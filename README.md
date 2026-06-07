@@ -95,6 +95,7 @@ API keys are **not required**. Without them the app works fully, but automatic c
 
 | Feature | Service | Variable | Where to get it |
 |---|---|---|---|
+| Cover art + tracklist | MusicBrainz | — | No key required — works out of the box |
 | Cover art + tracklist | Last.fm | `LASTFM_API_KEY` | [last.fm/api/account/create](https://www.last.fm/api/account/create) |
 | Cover art | Discogs | `DISCOGS_TOKEN` | [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
 | Track preview | YouTube Data API v3 | `YOUTUBE_API_KEY` | [console.cloud.google.com](https://console.cloud.google.com) |
