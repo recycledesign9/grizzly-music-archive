@@ -142,21 +142,21 @@ For MAMP users: set `DB_PORT=8889` and adjust `BASE_URL` to match your MAMP virt
 grizzly-music-archive/
 ├── docker/
 │   └── db/
-│       ├── 01_schema.sql        ← Database structure
-│       └── 02_seed.sql          ← Demo data (safe to publish)
+│       ├── 01_schema.sql        < Database structure
+│       └── 02_seed.sql          < Demo data (safe to publish)
 ├── public/
 │   ├── uploads/
-│   │   ├── covers/              ← Cover images (gitignored)
-│   │   └── audio/               ← Audio files (gitignored)
-│   └── index.php                ← Front controller / router
+│   │   ├── covers/              < Cover images (gitignored)
+│   │   └── audio/               < Audio files (gitignored)
+│   └── index.php                < Front controller / router
 ├── config/
-│   ├── config.php               ← Env-driven configuration
-│   └── database.php             ← PDO singleton
+│   ├── config.php               < Env-driven configuration
+│   └── database.php             < PDO singleton
 ├── app/
-│   ├── controllers/             ← AlbumController, ArtistController, …
-│   ├── models/                  ← Album, Artist, Track, …
-│   └── services/                ← AlbumMetadataService, MediaPathResolver, …
-├── views/                       ← PHP view templates
+│   ├── controllers/             < AlbumController, ArtistController, …
+│   ├── models/                  < Album, Artist, Track, …
+│   └── services/                < AlbumMetadataService, MediaPathResolver, …
+├── views/                       < PHP view templates
 ├── assets/
 │   ├── app.css
 │   ├── app.js
@@ -164,7 +164,7 @@ grizzly-music-archive/
 │   └── playlist-player.js
 ├── Dockerfile
 ├── docker-compose.yml
-├── .env.example                 ← Template — copy to .env
+├── .env.example                 < Template — copy to .env
 ├── .gitignore
 └── README.md
 ```
