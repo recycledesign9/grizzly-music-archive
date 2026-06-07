@@ -1,0 +1,52 @@
+services:
+
+  # ── PHP 8.1 + Apache application ──────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${APP_PORT:-8080}:80"
+    environment:
+      DB_HOST:          db
+      DB_PORT:          3306
+      DB_NAME:          ${DB_NAME:-grizzly_db}
+      DB_USER:          ${DB_USER:-grizzly}
+      DB_PASS:          ${DB_PASS:-grizzly_secret}
+      BASE_URL:         ${BASE_URL:-http://localhost:8080}
+      LASTFM_API_KEY:   ${LASTFM_API_KEY:-}
+      DISCOGS_TOKEN:    ${DISCOGS_TOKEN:-}
+      YOUTUBE_API_KEY:  ${YOUTUBE_API_KEY:-}
+      DEBUG:            ${DEBUG:-false}
+    volumes:
+      # Persistent uploads (covers + audio) — NOT committed to git
+      - uploads_data:/var/www/html/public/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── MySQL 8.0 database ────────────────────────────────────────────────────
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE:      ${DB_NAME:-grizzly_db}
+      MYSQL_USER:          ${DB_USER:-grizzly}
+      MYSQL_PASSWORD:      ${DB_PASS:-grizzly_secret}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS:-root_secret_change_me}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # Init scripts run in alphabetical order on first start
+      - ./docker/db/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./docker/db/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASS:-root_secret_change_me}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  uploads_data:

@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Grizzly Music Archive — .gitignore
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Environment & secrets — NEVER commit ─────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Personal media — covers and audio files ───────────────────────────────────
+# The directories are tracked via .gitkeep; actual files are not.
+public/uploads/covers/*
+!public/uploads/covers/.gitkeep
+public/uploads/audio/*
+!public/uploads/audio/.gitkeep
+
+# ── Database dumps with real data ────────────────────────────────────────────
+# Use docker/db/01_schema.sql and docker/db/02_seed.sql instead.
+su_grizzly_db.sql
+*.sql.gz
+*.sql.bz2
+
+# ── PHP / Composer ────────────────────────────────────────────────────────────
+vendor/
+composer.lock
+
+# ── Logs & cache ─────────────────────────────────────────────────────────────
+*.log
+/tmp/
+/cache/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverrideDirectory
+
+# ── Windows ───────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ── IDEs ─────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+nbproject/
