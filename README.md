@@ -142,7 +142,7 @@ For MAMP users: set `DB_PORT=8889` and adjust `BASE_URL` to match your MAMP virt
 grizzly-music-archive/
 ├── docker/
 │   └── db/
-│       ├── 01_schema.sql        ← Database structure (no personal data)
+│       ├── 01_schema.sql        ← Database structure
 │       └── 02_seed.sql          ← Demo data (safe to publish)
 ├── public/
 │   ├── uploads/
