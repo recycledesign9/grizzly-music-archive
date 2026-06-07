@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.jpg" width="400" alt="Grizzly Music Archive">
+</p>
+
 # 🐻 Grizzly Music Archive
 
 > A self-hosted web application for cataloguing your personal vinyl, CD and cassette collection.
