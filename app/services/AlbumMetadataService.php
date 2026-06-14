@@ -42,7 +42,14 @@ class AlbumMetadataService
                 $tracks = $this->getTracksFromMusicBrainzRelease($mb['id']);
                 $result['tracks'] = $this->cleanTracks($tracks);
 
+                // Tenta cover dalla release specifica
                 $cover = $this->getCoverFromCAA($mb['id']);
+
+                // Fallback: cerca cover sul release-group (più affidabile per album storici)
+                if (empty($cover) && !empty($mb['release-group']['id'])) {
+                    $cover = $this->getCoverFromReleaseGroup($mb['release-group']['id']);
+                }
+
                 if (!empty($cover)) {
                     $result['cover'] = $cover;
                 }
@@ -540,8 +547,43 @@ class AlbumMetadataService
 
         if (!empty($data['images'])) {
             foreach ($data['images'] as $img) {
-                if (!empty($img['front']) && !empty($img['image'])) {
-                    return $img['image'];
+                if (!empty($img['front'])) {
+                    // Preferisci thumbnail 500px: stabile, nessun redirect
+                    if (!empty($img['thumbnails']['500'])) {
+                        return $img['thumbnails']['500'];
+                    }
+                    if (!empty($img['thumbnails']['large'])) {
+                        return $img['thumbnails']['large'];
+                    }
+                    if (!empty($img['image'])) {
+                        return $img['image'];
+                    }
+                }
+            }
+        }
+
+        return '';
+    }
+
+    private function getCoverFromReleaseGroup(string $releaseGroupMbid): string
+    {
+        if (empty($releaseGroupMbid)) return '';
+
+        $url  = 'https://coverartarchive.org/release-group/' . $releaseGroupMbid;
+        $data = $this->httpGetJson($url);
+
+        if (!empty($data['images'])) {
+            foreach ($data['images'] as $img) {
+                if (!empty($img['front'])) {
+                    if (!empty($img['thumbnails']['500'])) {
+                        return $img['thumbnails']['500'];
+                    }
+                    if (!empty($img['thumbnails']['large'])) {
+                        return $img['thumbnails']['large'];
+                    }
+                    if (!empty($img['image'])) {
+                        return $img['image'];
+                    }
                 }
             }
         }
