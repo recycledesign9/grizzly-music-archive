@@ -8,7 +8,7 @@ $albumModel  = new Album();
 $artistModel = new Artist();
 $stats       = $albumModel->getStats();
 $recent      = $albumModel->getAll([], 'a.created_at', 'DESC');
-$recent      = array_slice($recent, 0, 6);
+$recent      = array_slice($recent, 0, 24);
 $topArtists  = $artistModel->getTopArtists(5);
 $pageTitle   = 'Dashboard';
 
@@ -60,35 +60,46 @@ require BASE_PATH . '/views/layout/header.php';
   <!-- Ultimi aggiunti -->
   <div class="col-lg-8">
     <h5 class="mb-3"><i class="bi bi-clock-history me-2"></i>Aggiunti di recente</h5>
-    <div class="row g-3">
-      <?php foreach ($recent as $a): ?>
-        <div class="col-sm-6 col-md-4">
+    <div class="row g-3" id="recent-albums-grid">
+      <?php foreach ($recent as $i => $a): ?>
+        <div class="col-sm-6 col-md-4 recent-album-item<?= $i >= 6 ? ' d-none' : '' ?>">
           <div class="card h-100 shadow-sm album-card">
-            <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>">
+            <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>"
+               class="position-relative d-block">
               <img src="<?= $a['cover_local']
                           ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
                           : BASE_URL . '/public/img/placeholder.png' ?>"
                 class="card-img-top cover-thumb" alt="Cover">
+              <span class="badge bg-<?= formatBadgeColor($a['format_name']) ?> position-absolute top-0 end-0 m-1 shadow-sm">
+                <?= htmlspecialchars($a['format_name']) ?>
+              </span>
             </a>
             <div class="card-body p-2">
-              <div class="d-flex justify-content-between align-items-start">
-                <div>
-                  <p class="mb-0 fw-semibold small lh-sm">
-                    <?= htmlspecialchars($a['title']) ?>
-                  </p>
-                  <p class="text-muted x-small mb-0">
-                    <?= htmlspecialchars($a['artist_name']) ?>
-                  </p>
-                </div>
-                <span class="badge bg-<?= formatBadgeColor($a['format_name']) ?> ms-1">
-                  <?= htmlspecialchars($a['format_name']) ?>
-                </span>
-              </div>
+              <p class="mb-0 fw-semibold small lh-sm">
+                <?= htmlspecialchars($a['title']) ?>
+              </p>
+              <p class="text-muted x-small mb-0 d-flex justify-content-between">
+                <span><?= htmlspecialchars($a['artist_name']) ?></span>
+                <?php if (!empty($a['year'])): ?>
+                  <span class="fw-semibold"><?= (int)$a['year'] ?></span>
+                <?php endif; ?>
+              </p>
             </div>
           </div>
         </div>
       <?php endforeach; ?>
     </div>
+
+    <?php if (count($recent) > 6): ?>
+      <div class="text-center mt-3">
+        <button id="btn-show-more-albums" class="btn btn-sm btn-outline-secondary">
+          <i class="bi bi-plus-lg me-1"></i>Mostra altri
+          <span class="badge bg-secondary ms-1" id="remaining-albums-count">
+            <?= min(6, count($recent) - 6) ?>
+          </span>
+        </button>
+      </div>
+    <?php endif; ?>
   </div>
 
   <!-- Top artisti + Playlist -->
@@ -261,6 +272,32 @@ require BASE_PATH . '/views/layout/header.php';
 
     bindDashboardPlaylistAudioEvents();
     syncDashboardPlaylistUI();
+
+    // ---- Mostra altri album ----
+    (function () {
+      var btn = document.getElementById('btn-show-more-albums');
+      if (!btn) return;
+
+      var STEP = 6;
+
+      btn.addEventListener('click', function () {
+        var hidden = document.querySelectorAll('.recent-album-item.d-none');
+        var toShow = Array.prototype.slice.call(hidden, 0, STEP);
+
+        toShow.forEach(function (el) { el.classList.remove('d-none'); });
+
+        var stillHidden = document.querySelectorAll('.recent-album-item.d-none').length;
+
+        if (stillHidden === 0) {
+          btn.parentNode.remove();
+        } else {
+          document.getElementById('remaining-albums-count').textContent =
+            Math.min(STEP, stillHidden);
+        }
+      });
+    })();
+
+    
 
     // Il player globale richiama questa funzione in app.js su play/pausa/stop.
     window.__syncPlaylistListUI = syncDashboardPlaylistUI;
