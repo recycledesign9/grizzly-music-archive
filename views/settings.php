@@ -60,7 +60,7 @@ require BASE_PATH . '/views/layout/header.php';
         </div>
         <div class="text-end flex-shrink-0">
           <div class="fs-4 fw-bold text-warning"><?= (int)$audioStats['count'] ?></div>
-          <div class="small text-muted">file MP3</div>
+          <div class="small text-muted">file audio (MP3 + FLAC)</div>
           <div class="small text-muted"><?= htmlspecialchars($audioStats['size_human']) ?></div>
         </div>
       </div>
@@ -132,7 +132,7 @@ require BASE_PATH . '/views/layout/header.php';
   <div class="card-body">
 
     <p class="text-muted small mb-3">
-      Copia fisicamente tutti i file MP3 presenti nella cartella attuale
+      Copia fisicamente tutti i file audio (MP3 e FLAC) presenti nella cartella attuale
       (<strong><?= (int)$audioStats['count'] ?> file, <?= htmlspecialchars($audioStats['size_human']) ?></strong>)
       in una nuova destinazione. Dopo la copia dovrai salvare il nuovo percorso sopra.<br>
       <span class="text-warning">
@@ -355,7 +355,7 @@ require BASE_PATH . '/views/layout/header.php';
     .then(function (data) {
       if (!data.ok || data.total === 0) {
         prog.classList.add('d-none');
-        result.innerHTML = '<div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>Nessun file MP3 trovato nella cartella sorgente.</div>';
+        result.innerHTML = '<div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>Nessun file audio (MP3/FLAC) trovato nella cartella sorgente.</div>';
         resetBtn();
         return;
       }

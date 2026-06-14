@@ -5,7 +5,7 @@
  *
  * Astrae il percorso fisico e gli URL dei file audio.
  * Le cover restano sempre in public/uploads/covers/ (webroot),
- * servite direttamente da Apache — nessuna modifica necessaria.
+ * servite direttamente da Apache senza overhead PHP.
  *
  * L'audio può essere ricollocato su un path esterno configurabile
  * tramite la tabella `settings` (chiave: audio_path).
@@ -142,15 +142,15 @@ class MediaPathResolver
             ];
         }
 
-        // Conta i file audio presenti
-        $files = glob($dir . '/*.mp3');
-        $count = $files ? count($files) : 0;
+        // Conta tutti i file audio presenti (MP3 + FLAC)
+        $files = self::getAudioFiles($dir);
+        $count = count($files);
 
         if ($count === 0) {
             return [
                 'ok'      => false,
                 'path'    => $dir,
-                'message' => 'Nessun file MP3 trovato in: ' . $dir,
+                'message' => 'Nessun file audio trovato in: ' . $dir,
                 'count'   => 0,
             ];
         }
@@ -158,7 +158,7 @@ class MediaPathResolver
         return [
             'ok'      => true,
             'path'    => $dir,
-            'message' => 'OK — ' . $count . ' file MP3 presenti',
+            'message' => 'OK — ' . $count . ' file audio presenti',
             'count'   => $count,
         ];
     }
@@ -171,7 +171,7 @@ class MediaPathResolver
     public static function getAudioStats(): array
     {
         $dir   = self::getAudioDir();
-        $files = is_dir($dir) ? (glob($dir . '/*.mp3') ?: []) : [];
+        $files = is_dir($dir) ? self::getAudioFiles($dir) : [];
         $total = 0;
         foreach ($files as $f) {
             $total += filesize($f);
@@ -215,7 +215,8 @@ class MediaPathResolver
             return $result;
         }
 
-        $files = glob($srcDir . '/*.mp3') ?: [];
+        // Migra MP3 e FLAC
+        $files = self::getAudioFiles($srcDir);
 
         foreach ($files as $srcFile) {
             $filename = basename($srcFile);
@@ -240,6 +241,20 @@ class MediaPathResolver
     // ----------------------------------------------------------
     // Internals
     // ----------------------------------------------------------
+
+    /**
+     * Restituisce tutti i file audio (MP3 + FLAC) presenti in una cartella.
+     *
+     * @param  string $dir  Path assoluto della cartella
+     * @return string[]     Array di path assoluti
+     */
+    private static function getAudioFiles(string $dir): array
+    {
+        $dir   = rtrim($dir, '/');
+        $mp3   = glob($dir . '/*.mp3')  ?: [];
+        $flac  = glob($dir . '/*.flac') ?: [];
+        return array_merge($mp3, $flac);
+    }
 
     /**
      * Risolve il path base con cache per la request corrente.
