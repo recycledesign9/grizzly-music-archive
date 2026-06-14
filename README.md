@@ -36,7 +36,7 @@
 ### 1 — Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/grizzly-music-archive.git
+git clone https://github.com/recycledesign9/grizzly-music-archive.git
 cd grizzly-music-archive
 ```
 
@@ -47,7 +47,7 @@ cp .env.example .env
 ```
 
 Open `.env` in your editor. The defaults work out of the box for local development.
-Add your API keys if you want automatic cover/metadata retrieval (optional — see [API Keys](#api-keys-optional)).
+Add your API keys if you want additional cover/metadata sources (optional — see [API Keys](#-api-keys-optional)).
 
 ### 3 — Start
 
@@ -57,7 +57,7 @@ docker compose up -d
 
 Docker will:
 1. Build the PHP + Apache image
-2. Start MySQL 8 and wait until it is healthy
+2. Start MySQL and wait until it is healthy
 3. Automatically import the schema (`docker/db/01_schema.sql`) and demo data (`docker/db/02_seed.sql`)
 4. Serve the app on [http://localhost:8080](http://localhost:8080)
 
@@ -91,16 +91,20 @@ docker compose up -d       # start again
 
 ## 🔑 API Keys (optional)
 
-API keys are **not required**. Without them the app works fully, but automatic cover art and metadata retrieval is disabled.
+**No API keys are required.** The app works fully out of the box thanks to **MusicBrainz**, a free and open music database that provides automatic cover art and tracklist retrieval with no registration or key needed.
 
-| Feature | Service | Variable | Where to get it |
+Simply add an album, click **Recupera automaticamente** and Grizzly will fetch cover and tracklist from MusicBrainz automatically.
+
+Last.fm and Discogs are used as **additional fallback sources** when MusicBrainz does not find a match. YouTube integration requires a key to enable track search and in-page preview.
+
+| Feature | Service | Variable | Notes |
 |---|---|---|---|
-| Cover art + tracklist | MusicBrainz | — | No key required — works out of the box |
-| Cover art + tracklist | Last.fm | `LASTFM_API_KEY` | [last.fm/api/account/create](https://www.last.fm/api/account/create) |
-| Cover art | Discogs | `DISCOGS_TOKEN` | [discogs.com/settings/developers](https://www.discogs.com/settings/developers) |
-| Track preview | YouTube Data API v3 | `YOUTUBE_API_KEY` | [console.cloud.google.com](https://console.cloud.google.com) |
+| Cover art + tracklist | **MusicBrainz** | — | ✅ No key required — works out of the box |
+| Cover art + tracklist | Last.fm | `LASTFM_API_KEY` | Optional fallback — [get key](https://www.last.fm/api/account/create) |
+| Cover art | Discogs | `DISCOGS_TOKEN` | Optional fallback — [get token](https://www.discogs.com/settings/developers) |
+| YouTube integration | YouTube Data API v3 | `YOUTUBE_API_KEY` | Required for YouTube preview — [get key](https://console.cloud.google.com) |
 
-Add keys to your `.env` file:
+To enable optional services, add keys to your `.env` file:
 
 ```dotenv
 LASTFM_API_KEY=your_key_here
@@ -129,7 +133,7 @@ cp .env.example .env
 #   DB_PORT=3306   (or 8889 for MAMP)
 #   BASE_URL=http://localhost:8888/grizzly-music-archive   (adjust to your setup)
 
-# 3. Set Apache DocumentRoot to the /public directory
+# 3. Set Apache DocumentRoot to the project root directory
 # 4. Enable mod_rewrite and AllowOverride All
 ```
 
@@ -142,6 +146,8 @@ For MAMP users: set `DB_PORT=8889` and adjust `BASE_URL` to match your MAMP virt
 ```
 grizzly-music-archive/
 ├── docker/
+│   ├── apache/
+│   │   └── vhost.conf           < Apache virtual host configuration
 │   └── db/
 │       ├── 01_schema.sql        < Database structure
 │       └── 02_seed.sql          < Demo data (safe to publish)
@@ -149,7 +155,9 @@ grizzly-music-archive/
 │   ├── uploads/
 │   │   ├── covers/              < Cover images (gitignored)
 │   │   └── audio/               < Audio files (gitignored)
-│   └── index.php                < Front controller / router
+│   ├── css/
+│   ├── js/
+│   └── img/
 ├── config/
 │   ├── config.php               < Env-driven configuration
 │   └── database.php             < PDO singleton
@@ -158,11 +166,8 @@ grizzly-music-archive/
 │   ├── models/                  < Album, Artist, Track, …
 │   └── services/                < AlbumMetadataService, MediaPathResolver, …
 ├── views/                       < PHP view templates
-├── assets/
-│   ├── app.css
-│   ├── app.js
-│   ├── youtube-player.js
-│   └── playlist-player.js
+├── api/                         < YouTube track API endpoint
+├── docs/                        < Project images and assets
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .env.example                 < Template — copy to .env
@@ -212,7 +217,7 @@ All configuration is via environment variables. See `.env.example` for the full 
 
 - Never commit `.env` to version control
 - Set `DEBUG=false` in any non-local environment
-- The `public/uploads/` directory is served by Apache; audio files outside the web root (configurable via Settings) are streamed through PHP with proper auth
+- The `public/uploads/` directory is served by Apache; audio files outside the web root (configurable via Settings) are streamed through PHP with proper authentication
 - All database queries use PDO prepared statements
 - File uploads are validated by MIME type and extension server-side
 
