@@ -13,7 +13,7 @@
 
 - **Full CRUD** for albums, artists, genres and labels
 - **Cover art** — automatic retrieval via MusicBrainz / Last.fm / Discogs, or manual upload
-- **Tracklist** — automatic from Last.fm API or manual entry
+- **Tracklist** — automatic from MusicBrainz / Last.fm / Discogs or manual entry
 - **Audio player** — upload MP3/FLAC files and play them directly in the browser via an HTML5 sticky player
 - **YouTube integration** — preview tracks via YouTube lightbox with result caching
 - **Playlists** — create playlists, drag-and-drop reorder (SortableJS)
