@@ -270,6 +270,7 @@ if ($albumTotalSec > 0) {
                     </span>
                   <?php endif; ?>
                 </div>
+                <div class="track-actions">
                 <?php if ($t['audio_filename']): ?>
                   <div class="d-flex align-items-center gap-2">
                     <audio controls preload="none" class="track-player">
@@ -371,6 +372,7 @@ if ($albumTotalSec > 0) {
                     </li>
                   </ul>
                 </div>
+                </div><!-- /.track-actions -->
               </div>
             </li>
           <?php endforeach; ?>
@@ -2062,7 +2064,7 @@ if ($albumTotalSec > 0) {
 
 <?php
 require BASE_PATH . '/views/layout/footer.php';
-function formatBadge($f)
+function formatBadge(string $f): string
 {
   switch ($f) {
     case 'Vinile':
