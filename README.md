@@ -4,6 +4,13 @@
 
 # 🐻 Grizzly Music Archive
 
+![GitHub release](https://img.shields.io/github/v/release/recycledesign9/grizzly-music-archive?display_name=tag)
+![License](https://img.shields.io/github/license/recycledesign9/grizzly-music-archive)
+![Docker](https://img.shields.io/badge/docker-compose-blue)
+![PHP](https://img.shields.io/badge/PHP-8.1+-777bb4)
+![MySQL](https://img.shields.io/badge/MySQL-8.0+-4479A1)
+![Self-hosted](https://img.shields.io/badge/self--hosted-ready-success)
+
 > A self-hosted web application for cataloguing your personal vinyl, CD and cassette collection.
 > PHP 8.1 · MySQL 8 · Bootstrap 5 · Vanilla JS — no frameworks, no dependencies to install.
 
