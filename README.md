@@ -22,7 +22,7 @@
 - **Cover art** — automatic retrieval via MusicBrainz / Last.fm / Discogs, or manual upload
 - **Tracklist** — automatic from MusicBrainz / Last.fm / Discogs or manual entry
 - **Audio player** — upload MP3/FLAC files and play them directly in the browser via an HTML5 sticky player
-* **YouTube integration** — automatically search and cache YouTube videos for tracks, with in-page preview via lightbox
+- **YouTube integration** — automatically search and cache YouTube videos for tracks, with in-page preview via lightbox
 - **Playlists** — create playlists, drag-and-drop reorder (SortableJS)
 - **Advanced search** — by artist, title, format, genre, year, label
 - **Artist page** — all albums linked to a single artist
