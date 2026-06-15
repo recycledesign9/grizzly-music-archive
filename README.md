@@ -22,7 +22,7 @@
 - **Cover art** — automatic retrieval via MusicBrainz / Last.fm / Discogs, or manual upload
 - **Tracklist** — automatic from MusicBrainz / Last.fm / Discogs or manual entry
 - **Audio player** — upload MP3/FLAC files and play them directly in the browser via an HTML5 sticky player
-- **YouTube integration** — preview tracks via YouTube lightbox with result caching
+* **YouTube integration** — automatically search and cache YouTube videos for tracks, with in-page preview via lightbox
 - **Playlists** — create playlists, drag-and-drop reorder (SortableJS)
 - **Advanced search** — by artist, title, format, genre, year, label
 - **Artist page** — all albums linked to a single artist
@@ -34,49 +34,74 @@
 ---
 
 ## 🚀 Quick Start with Docker
-
+ 
 ### Prerequisites
-
+ 
 - [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) installed
 - Ports `8080` (or your chosen `APP_PORT`) and `3306` available
-
 ### 1 — Clone the repository
-
+ 
 ```bash
 git clone https://github.com/recycledesign9/grizzly-music-archive.git
 cd grizzly-music-archive
 ```
-
+ 
 ### 2 — Configure environment
-
+ 
 ```bash
 cp .env.example .env
 ```
-
-Open `.env` in your editor. The defaults work out of the box for local development.
-Add your API keys if you want additional cover/metadata sources (optional — see [API Keys](#-api-keys-optional)).
-
+ 
+Open `.env` and set **`BASE_URL` and `APP_PORT`** according to where you are running the app.
+These are the only two variables you need to change — everything else works out of the box.
+ 
+| Scenario | `BASE_URL` | `APP_PORT` |
+|---|---|---|
+| Local machine (Mac / Windows / Linux) | `http://localhost:8080` | `8080` |
+| Home or LAN server (IP address) | `http://192.168.1.x:8080` | `8080` |
+| Server with domain name | `https://music.yourdomain.com` | `8080` |
+ 
+> **Why `BASE_URL` matters:** the app uses it to generate all internal links, redirects and asset paths.
+> If it does not match the address you open in your browser, navigation and assets will break.
+ 
+> **Why `APP_PORT` matters:** it is the port Docker exposes on your host machine.
+> Change it if `8080` is already in use (e.g. `APP_PORT=8082`). `BASE_URL` must use the same port.
+ 
+> **Never edit `docker-compose.yml` directly.** All configuration belongs in `.env` — Docker Compose reads it automatically.
+ 
+Example — LAN server on port `8082`:
+```dotenv
+BASE_URL=http://192.168.1.9:8082
+APP_PORT=8082
+```
+ 
+Example — local machine (default, no changes needed):
+```dotenv
+BASE_URL=http://localhost:8080
+APP_PORT=8080
+```
+ 
 ### 3 — Start
-
+ 
 ```bash
 docker compose up -d
 ```
-
+ 
 Docker will:
 1. Build the PHP + Apache image
 2. Start MySQL and wait until it is healthy
 3. Automatically import the schema (`docker/db/01_schema.sql`) and demo data (`docker/db/02_seed.sql`)
-4. Serve the app on [http://localhost:8080](http://localhost:8080)
-
+4. Serve the app at the address configured in `BASE_URL`
 > **First startup** takes ~30–60 s while MySQL initialises. The app container
 > waits for the database health check before starting.
-
+ 
 ### 4 — Open the app
-
+ 
+Open your browser at the `BASE_URL` you set in `.env`, for example:
+ 
 ```
 http://localhost:8080
 ```
-
 The archive starts pre-loaded with 12 demo albums (Beatles, Pink Floyd, Radiohead, Nirvana…).
 To start **completely empty**, comment out the seed line in `docker-compose.yml`:
 
