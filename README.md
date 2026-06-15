@@ -69,10 +69,10 @@ These are the only two variables you need to change — everything else works ou
  
 > **Never edit `docker-compose.yml` directly.** All configuration belongs in `.env` — Docker Compose reads it automatically.
  
-Example — LAN server on port `8082`:
+Example — LAN server on port `9082`:
 ```dotenv
-BASE_URL=http://192.168.1.9:8082
-APP_PORT=8082
+BASE_URL=http://192.168.1.x:9082
+APP_PORT=9082
 ```
  
 Example — local machine (default, no changes needed):
