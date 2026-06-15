@@ -4,6 +4,7 @@
 
 # 🐻 Grizzly Music Archive
 
+![GitHub release](https://img.shields.io/github/v/release/recycledesign9/grizzly-music-archive?display_name=tag)
 ![License](https://img.shields.io/github/license/recycledesign9/grizzly-music-archive)
 ![Docker](https://img.shields.io/badge/docker-compose-blue)
 ![PHP](https://img.shields.io/badge/PHP-8.1+-777bb4)
