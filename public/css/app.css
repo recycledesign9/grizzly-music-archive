@@ -1811,8 +1811,12 @@ body:has(#sticky-player[style*="flex"]) {
 
 /* ── Dashboard: card stat più compatte su mobile ── */
 @media (max-width: 575.98px) {
-  .card-body .fs-3 { font-size: 1.4rem !important; }
-  .card-body .fs-2 { font-size: 1.5rem !important; }
+  .card-body .fs-3 {
+    font-size: 1.4rem !important;
+  }
+  .card-body .fs-2 {
+    font-size: 1.5rem !important;
+  }
 
   /* Card statistiche: 3 per riga invece di 2 */
   .col-6.col-md-4 {
@@ -1823,9 +1827,16 @@ body:has(#sticky-player[style*="flex"]) {
   .col-6.col-md-4 .card-body {
     padding: 0.6rem 0.3rem !important;
   }
-  .col-6.col-md-4 .card-body .fs-2 { font-size: 1.2rem !important; }
-  .col-6.col-md-4 .card-body .fs-3 { font-size: 1.15rem !important; }
-  .col-6.col-md-4 .card-body .small { font-size: 0.68rem; line-height: 1.1; }
+  .col-6.col-md-4 .card-body .fs-2 {
+    font-size: 1.2rem !important;
+  }
+  .col-6.col-md-4 .card-body .fs-3 {
+    font-size: 1.15rem !important;
+  }
+  .col-6.col-md-4 .card-body .small {
+    font-size: 0.68rem;
+    line-height: 1.1;
+  }
 
   /* Album "Aggiunti di recente": 2 per riga invece di colonna singola */
   .col-sm-6.col-md-4 {
@@ -1834,15 +1845,18 @@ body:has(#sticky-player[style*="flex"]) {
   }
 
   /* Testo card album più compatto per stare in metà larghezza */
-  .album-card .card-body .fw-semibold { font-size: 0.85rem; }
-  .album-card .badge { font-size: 0.65rem; }
+  .album-card .card-body .fw-semibold {
+    font-size: 0.85rem;
+  }
+  .album-card .badge {
+    font-size: 0.65rem;
+  }
 }
 
 /* ============================================================
    MOBILE — Dettaglio disco: cover a sinistra, badge + info a destra
    ============================================================ */
 @media (max-width: 767.98px) {
-
   /* La colonna diventa griglia 2 zone: cover | contenuto.
      Cover occupa la sua colonna; badge, tabella, note, bottoni
      stanno tutti nella colonna destra, in pila verticale. */
@@ -1886,7 +1900,9 @@ body:has(#sticky-player[style*="flex"]) {
     font-size: 0.8rem;
   }
   /* L'etichetta (th) non va a capo, il valore può andare */
-  .col-md-4.col-lg-3 > table th { white-space: nowrap; }
+  .col-md-4.col-lg-3 > table th {
+    white-space: nowrap;
+  }
 
   /* Note e bottoni: a piena larghezza sotto cover+info */
   .col-md-4.col-lg-3 > .notes-card,
@@ -1897,10 +1913,481 @@ body:has(#sticky-player[style*="flex"]) {
 
 /* ── Player sticky: schermi molto piccoli ── */
 @media (max-width: 400px) {
-  .sticky-player { gap: 8px; padding: 0 10px; }
-  .sp-meta { max-width: 100px; }
-  .sp-btn { width: 30px; height: 30px; font-size: 15px; }
-  .sp-btn-main { width: 36px; height: 36px; font-size: 15px; }
-  .sp-volume-wrap { min-width: 60px; }
-  .sp-volume { width: 40px; }
+  .sticky-player {
+    gap: 8px;
+    padding: 0 10px;
+  }
+  .sp-meta {
+    max-width: 100px;
+  }
+  .sp-btn {
+    width: 30px;
+    height: 30px;
+    font-size: 15px;
+  }
+  .sp-btn-main {
+    width: 36px;
+    height: 36px;
+    font-size: 15px;
+  }
+  .sp-volume-wrap {
+    min-width: 60px;
+  }
+  .sp-volume {
+    width: 40px;
+  }
+}
+
+/* ---- HERO ---- */
+.artist-hero {
+  position: relative;
+  border-radius: 20px;
+  overflow: hidden;
+  background: #15161a;
+  border: 1px solid var(--bs-border-color);
+  min-height: 300px;
+}
+
+/* Sfondo sfocato a piena copertura (atmosfera) */
+.artist-hero__bg {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center 25%;
+  filter: blur(26px) saturate(1.2) brightness(0.7);
+  transform: scale(1.18);
+  opacity: 1;
+}
+.artist-hero__bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      90deg,
+      rgba(12, 13, 16, 0.96) 0%,
+      rgba(12, 13, 16, 0.88) 30%,
+      rgba(12, 13, 16, 0.55) 60%,
+      rgba(12, 13, 16, 0.15) 100%
+    ),
+    linear-gradient(180deg, rgba(12, 13, 16, 0.15), rgba(12, 13, 16, 0.45));
+}
+.artist-hero:not(:has(.artist-hero__bg[style])) {
+  background: linear-gradient(135deg, #26282e 0%, #131419 100%);
+}
+
+/* Foto "copertina" grande a destra, sfumata verso il testo */
+.artist-hero__photo {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 46%;
+  max-width: 620px;
+  background-size: cover;
+  background-position: center 20%;
+  -webkit-mask-image:
+    linear-gradient(90deg, transparent 0%, #000 38%),
+    linear-gradient(0deg, transparent 0%, #000 22%);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(90deg, transparent 0%, #000 38%),
+    linear-gradient(0deg, transparent 0%, #000 22%);
+  mask-composite: intersect;
+}
+.artist-hero__photo:not([style]) {
+  display: none;
+}
+
+.artist-hero__content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  padding: 34px 38px;
+  max-width: 62%;
+}
+
+/* Avatar non usato nel nuovo layout */
+.artist-hero__avatar {
+  display: none;
+}
+
+.artist-hero__topbar {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.artist-hero__name {
+  font-size: 2.6rem;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+  color: #fff;
+  text-shadow: 0 2px 20px rgba(0, 0, 0, 0.7);
+  margin: 0;
+}
+
+.artist-hero__back {
+  --bs-btn-border-color: rgba(255, 255, 255, 0.4);
+  --bs-btn-color: #fff;
+  --bs-btn-hover-bg: rgba(255, 255, 255, 0.18);
+  --bs-btn-hover-border-color: #fff;
+  --bs-btn-hover-color: #fff;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* Chips meta */
+.artist-hero__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.artist-hero__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 13px;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(10px);
+  border: 0.5px solid rgba(255, 255, 255, 0.25);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.artist-hero__chip i {
+  font-size: 0.82rem;
+  opacity: 0.9;
+}
+
+/* Bio */
+.artist-hero__bio {
+  max-width: 100%;
+}
+
+.artist-bio-text {
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 0.96rem;
+  line-height: 1.6;
+  margin-bottom: 4px;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.artist-bio-text.is-expanded {
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+}
+
+.artist-bio-toggle {
+  background: none;
+  border: none;
+  color: #ffc107;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 0;
+  cursor: pointer;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+.artist-bio-toggle:hover {
+  text-decoration: underline;
+}
+
+.artist-bio-source {
+  margin-top: 10px;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.65);
+}
+.artist-bio-source a {
+  color: #ffd54a;
+}
+.artist-bio-lang {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.22);
+  font-weight: 600;
+  font-size: 0.66rem;
+}
+
+.artist-bio-empty,
+.artist-bio-loading {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.9rem;
+  font-style: italic;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+}
+.artist-bio-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---- STATISTICHE ---- */
+.artist-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.artist-stat {
+  flex: 1 1 0;
+  min-width: 88px;
+  text-align: center;
+  padding: 14px 10px;
+  border-radius: 14px;
+  background: var(--bs-tertiary-bg);
+  border: 1px solid var(--bs-border-color);
+}
+.artist-stat__val {
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+.artist-stat__lbl {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bs-secondary-color);
+  margin-top: 2px;
+}
+
+/* ---- SEZIONE / DISCOGRAFIA ---- */
+.artist-section-title {
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+}
+
+.artist-discography {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 16px;
+}
+
+.disco-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+}
+.disco-card__cover {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  background: var(--bs-secondary-bg);
+}
+.disco-card__cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.25s ease;
+}
+.disco-card:hover .disco-card__cover img {
+  transform: scale(1.05);
+}
+
+.disco-card__fmt {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+}
+
+.disco-card__body {
+  padding: 10px 12px 12px;
+}
+.disco-card__title {
+  font-weight: 600;
+  font-size: 0.92rem;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.disco-card__meta {
+  font-size: 0.78rem;
+  color: var(--bs-secondary-color);
+  margin-top: 3px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.disco-card__dot {
+  opacity: 0.5;
+}
+
+/* ---- RESPONSIVE (tablet) ---- */
+@media (max-width: 991.98px) {
+  .artist-hero__content {
+    max-width: 70%;
+  }
+  .artist-hero__photo {
+    width: 52%;
+  }
+  .artist-hero__name {
+    font-size: 2.1rem;
+  }
+}
+
+/* ---- MOBILE: foto sopra, testo sotto ---- */
+@media (max-width: 767.98px) {
+  .artist-hero {
+    min-height: 0;
+  }
+  .artist-hero__photo {
+    position: relative;
+    width: 100%;
+    max-width: none;
+    height: 200px;
+    -webkit-mask-image: linear-gradient(0deg, transparent 0%, #000 45%);
+    mask-image: linear-gradient(0deg, transparent 0%, #000 45%);
+  }
+  .artist-hero__content {
+    max-width: 100%;
+    padding: 18px 20px 24px;
+    margin-top: -40px;
+  }
+  .artist-hero__name {
+    font-size: 1.7rem;
+  }
+  .artist-discography {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+  .artist-stat {
+    min-width: 72px;
+    padding: 10px 6px;
+  }
+  .artist-stat__val {
+    font-size: 1.2rem;
+  }
+}
+
+.official-disco__hint {
+  font-size: 0.72rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bs-secondary-color);
+  margin-left: 10px;
+}
+
+.official-disco__table-wrap {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.official-disco__table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0;
+}
+.official-disco__table td {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--bs-border-color);
+  font-size: 0.92rem;
+  vertical-align: middle;
+}
+.official-disco__table tr:last-child td {
+  border-bottom: none;
+}
+.official-disco__table tr:hover td {
+  background: var(--bs-tertiary-bg);
+}
+
+/* Numerazione progressiva */
+.official-disco__num {
+  width: 44px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--bs-secondary-color);
+}
+
+/* Cover miniatura */
+.official-disco__cover {
+  width: 56px;
+}
+.off-thumb {
+  position: relative;
+  display: block;
+  width: 44px;
+  height: 44px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--bs-secondary-bg);
+  border: 1px solid var(--bs-border-color);
+}
+.off-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* placeholder quando manca la cover */
+.off-thumb__ph {
+  display: none;
+}
+.off-thumb.is-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #2a2c33 0%, #16171c 100%);
+}
+.off-thumb.is-empty .off-thumb__ph {
+  display: block;
+  font-size: 1.1rem;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.official-disco__title {
+  font-weight: 600;
+}
+
+.official-disco__year {
+  width: 80px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--bs-secondary-color);
+}
+
+.official-disco__source {
+  margin-top: 10px;
+  font-size: 0.72rem;
+  color: var(--bs-secondary-color);
+}
+.official-disco__source a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+/* Mobile: niente numerazione, cover un filo più piccola */
+@media (max-width: 575.98px) {
+  .official-disco__num {
+    display: none;
+  }
+  .official-disco__table td {
+    padding: 7px 12px;
+  }
+  .off-thumb {
+    width: 40px;
+    height: 40px;
+  }
 }

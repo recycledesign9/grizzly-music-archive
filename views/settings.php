@@ -223,7 +223,122 @@ require BASE_PATH . '/views/layout/header.php';
   </div>
 </div>
 
+<!-- ============================================================
+     Sezione: Backup e migrazione archivio (export / import)
+============================================================ -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header bg-dark text-white">
+    <i class="bi bi-box-seam me-2"></i>
+    <strong>Backup e migrazione archivio</strong>
+  </div>
+  <div class="card-body">
+
+    <p class="text-muted small mb-4">
+      Esporta tutto l'archivio (dischi, artisti, tracce, playlist, biografie e
+      <strong>copertine + immagini artista</strong>) in un unico file <code>.zip</code>,
+      da importare su un'altra installazione di Grizzly — utile quando sposti l'app su un nuovo server.
+      <span class="d-block mt-2 text-warning">
+        <i class="bi bi-info-circle me-1"></i>
+        I <strong>file audio</strong> non sono inclusi (sono troppo pesanti): spostali a parte con
+        la sezione &laquo;Migra file audio&raquo; qui sopra, oppure copiando la cartella audio manualmente.
+      </span>
+    </p>
+
+    <!-- ESPORTA -->
+    <div class="mb-4">
+      <h6 class="text-muted text-uppercase small fw-bold mb-2">Esporta</h6>
+      <p class="text-muted small mb-2">
+        Genera e scarica il file di backup completo dell'archivio.
+      </p>
+      <a class="btn btn-warning" id="btnExport" href="<?= BASE_URL ?>/index.php?route=settings/export">
+        <i class="bi bi-download me-1"></i>Esporta archivio (.zip)
+      </a>
+    </div>
+
+    <hr>
+
+    <!-- IMPORTA -->
+    <div>
+      <h6 class="text-muted text-uppercase small fw-bold mb-2">Importa</h6>
+      <p class="text-danger small mb-3">
+        <i class="bi bi-exclamation-triangle-fill me-1"></i>
+        <strong>Attenzione:</strong> l'import <u>sostituisce completamente</u> l'archivio attuale
+        con il contenuto del file. I dati presenti verranno rimpiazzati. Verrà comunque creato
+        un backup di sicurezza automatico prima di procedere.
+      </p>
+
+      <form method="post"
+            action="<?= BASE_URL ?>/index.php?route=settings/import"
+            enctype="multipart/form-data"
+            id="importForm">
+        <div class="input-group mb-2">
+          <input type="file" name="archive" id="importFile" class="form-control" accept=".zip" required>
+          <button class="btn btn-outline-danger" type="submit" id="btnImport">
+            <i class="bi bi-upload me-1"></i>Importa e sostituisci
+          </button>
+        </div>
+        <!-- conferma esplicita richiesta dal controller -->
+        <input type="hidden" name="confirm" value="REPLACE">
+      </form>
+      <div class="form-text">
+        Carica un file <code>.zip</code> generato dalla funzione &laquo;Esporta&raquo; di Grizzly.
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
 <script>
+
+  // ── Feedback visivo durante la preparazione dell'export ─────
+  (function () {
+    var b = document.getElementById('btnExport');
+    if (!b) return;
+    b.addEventListener('click', function () {
+      var original = b.innerHTML;
+      b.classList.add('disabled');
+      b.setAttribute('aria-disabled', 'true');
+      b.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Preparazione export…';
+      // Il download avviene fuori dalla pagina: ripristina dopo qualche secondo.
+      setTimeout(function () {
+        b.classList.remove('disabled');
+        b.removeAttribute('aria-disabled');
+        b.innerHTML = original;
+      }, 5000);
+    });
+  })();
+
+
+  // ── Conferma import (sostituzione archivio) ─────────────────
+  (function () {
+    var form = document.getElementById('importForm');
+    if (!form) return;
+    form.addEventListener('submit', function (e) {
+      var f = document.getElementById('importFile');
+      if (!f || !f.files || !f.files.length) {
+        e.preventDefault();
+        alert('Seleziona prima un file .zip da importare.');
+        return;
+      }
+      var ok = confirm(
+        'ATTENZIONE: questa operazione sostituirà completamente l\'archivio attuale ' +
+        'con il contenuto del file selezionato.\n\n' +
+        'Verrà creato un backup di sicurezza automatico, ma i dati attuali verranno rimpiazzati.\n\n' +
+        'Vuoi procedere?'
+      );
+      if (!ok) {
+        e.preventDefault();
+        return;
+      }
+      var btn = document.getElementById('btnImport');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Importazione…';
+      }
+    });
+  })();
+
 (function () {
   var BASE_URL   = document.querySelector('meta[name="base-url"]').getAttribute('content');
   var CSRF_TOKEN = <?= json_encode($_SESSION['csrf_token'] ?? '') ?>;
