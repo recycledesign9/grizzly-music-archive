@@ -267,6 +267,48 @@ Pull requests are welcome. For major changes please open an issue first.
 
 ---
 
+## 📸 Screenshots
+
+Grizzly Music Archive is designed to work as a clean desktop archive and as a responsive mobile catalogue. The interface includes dashboard statistics, album browsing, artist profiles, discography lookup, track playback and dark mode support.
+
+### Desktop interface
+
+<p align="center">
+  <img src=".github/assets/screenshots/01-dashboard-desktop.jpg" alt="Grizzly Music Archive desktop dashboard" width="100%">
+</p>
+
+<p align="center">
+  <strong>Dashboard</strong><br>
+  Collection statistics, recently added albums, top artists and playlist overview.
+</p>
+
+---
+
+<p align="center">
+  <img src=".github/assets/screenshots/02-album-detail-dark-player.jpg" alt="Grizzly Music Archive album detail with tracklist and audio player" width="100%">
+</p>
+
+<p align="center">
+  <strong>Album detail and player</strong><br>
+  Album metadata, tracklist, MP3/FLAC upload, YouTube lookup and sticky HTML5 audio player.
+</p>
+
+---
+
+| Archive view | Artist profile |
+|---|---|
+| <img src=".github/assets/screenshots/03-archive-list.jpg" alt="Grizzly Music Archive archive table" width="100%"> | <img src=".github/assets/screenshots/04-artist-profile-discography.jpg" alt="Grizzly Music Archive artist profile and official discography" width="100%"> |
+| Searchable album table with cover, artist, format, year, genre and actions. | Artist biography, local albums, format statistics and official discography. |
+
+### Mobile interface
+
+| Mobile dashboard | Mobile artist page |
+|---|---|
+| <img src=".github/assets/screenshots/05-mobile-dashboard-player.jpg" alt="Grizzly Music Archive mobile dashboard with sticky player" width="100%"> | <img src=".github/assets/screenshots/06-mobile-artist-discography.jpg" alt="Grizzly Music Archive mobile artist discography" width="100%"> |
+| Responsive dashboard with compact cards, recent albums and sticky player. | Mobile artist archive with official discography and cover thumbnails. |
+
+---
+
 ## 📜 License
 
 MIT — see [LICENSE](LICENSE) for details.
