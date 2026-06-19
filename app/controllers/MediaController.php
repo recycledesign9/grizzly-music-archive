@@ -504,7 +504,9 @@ class MediaController
     {
         header('Content-Type: application/json');
         $dir   = MediaPathResolver::getAudioDir();
-        $files = glob($dir . '/*.mp3') ?: [];
+        $mp3   = glob($dir . '/*.mp3') ?: [];
+        $flac  = glob($dir . '/*.flac') ?: [];
+        $files = array_merge($mp3, $flac);
         echo json_encode([
             'ok'    => true,
             'total' => count($files),
@@ -567,7 +569,9 @@ class MediaController
 
         // Ordine stabile: sort alfabetico esplicito per evitare
         // comportamenti diversi tra filesystem (HFS+, APFS, ext4)
-        $files = glob($srcDir . '/*.mp3') ?: [];
+        $mp3   = glob($srcDir . '/*.mp3') ?: [];
+        $flac  = glob($srcDir . '/*.flac') ?: [];
+        $files = array_merge($mp3, $flac);
         sort($files);
         $total = count($files);
         $chunk = array_slice($files, $offset, $limit);
@@ -608,7 +612,10 @@ class MediaController
                 }
             } else {
                 if ($src) fclose($src);
-                if ($dst) { fclose($dst); @unlink($destFile); }
+                if ($dst) {
+                    fclose($dst);
+                    @unlink($destFile);
+                }
                 $errors[] = $filename . ' (apertura file fallita)';
             }
         }
@@ -622,13 +629,12 @@ class MediaController
             'skipped'    => $skipped,
             'errors'     => $errors,
             'offset'     => $offset,
-            'next_offset'=> $done ? $total : $nextOffset,
+            'next_offset' => $done ? $total : $nextOffset,
             'total'      => $total,
             'done'       => $done,
         ]);
         exit;
     }
-
 }
 
     // Aggiunto in fondo — vedere dispatch() per la route
