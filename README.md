@@ -61,7 +61,7 @@ These are the only two variables you need to change — everything else works ou
 | Home or LAN server (IP address) | `http://192.168.1.x:8080` | `8080` |
 | Server with domain name | `https://music.yourdomain.com` | `8080` |
  
-> **BASE_URL`:** the app uses it to generate all internal links, redirects and asset paths.
+> **`BASE_URL`:** the app uses it to generate all internal links, redirects and asset paths.
 > If it does not match the address you open in your browser, navigation and assets will break.
  
 > **`APP_PORT`:** it is the port Docker exposes on your host machine.
