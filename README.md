@@ -61,10 +61,10 @@ These are the only two variables you need to change — everything else works ou
 | Home or LAN server (IP address) | `http://192.168.1.x:8080` | `8080` |
 | Server with domain name | `https://music.yourdomain.com` | `8080` |
  
-> **Why `BASE_URL` matters:** the app uses it to generate all internal links, redirects and asset paths.
+> **BASE_URL`:** the app uses it to generate all internal links, redirects and asset paths.
 > If it does not match the address you open in your browser, navigation and assets will break.
  
-> **Why `APP_PORT` matters:** it is the port Docker exposes on your host machine.
+> **`APP_PORT`:** it is the port Docker exposes on your host machine.
 > Change it if `8080` is already in use (e.g. `APP_PORT=8082`). `BASE_URL` must use the same port.
  
 > **Never edit `docker-compose.yml` directly.** All configuration belongs in `.env` — Docker Compose reads it automatically.
