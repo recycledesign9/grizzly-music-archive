@@ -333,14 +333,20 @@ class MediaController
         $raw = str_replace('\\', '/', $raw);
 
         // Se vuoto, usa /Volumes su Mac (dove stanno i dischi esterni),
-        // oppure / su Linux, oppure C:/ su Windows
+        // oppure la cartella uploads su Linux/Docker, oppure C:/ su Windows
         if ($raw === '') {
             if (PHP_OS === 'Darwin') {
                 $raw = '/Volumes';
             } elseif (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
                 $raw = 'C:/';
             } else {
-                $raw = '/';
+                // Linux/Docker: parte dagli uploads del progetto (sempre accessibili).
+                // Per i dischi esterni montati nel container (es. /mnt/external)
+                // usare i bookmark qui sotto — appaiono automaticamente.
+                $uploadsBase = defined('BASE_PATH')
+                    ? BASE_PATH . '/public/uploads'
+                    : '/var/www/html/public/uploads';
+                $raw = is_dir($uploadsBase) ? $uploadsBase : '/var/www/html';
             }
         }
 
@@ -426,12 +432,46 @@ class MediaController
                 }
             }
         } else {
-            // Linux
-            $candidates = [
-                '/home'  => 'Home utenti',
-                '/media' => 'Media (dischi montati)',
-                '/mnt'   => 'Mount points',
-            ];
+            // Linux / Docker
+            // La cartella uploads è sempre accessibile (volume Docker o path di default).
+            // I dischi esterni devono essere montati nel container tramite docker-compose.yml:
+            //   volumes:
+            //     - /percorso/disco/host:/mnt/external
+            // Verranno rilevati automaticamente e mostrati nei bookmark.
+            $uploadsBase = defined('BASE_PATH')
+                ? BASE_PATH . '/public/uploads'
+                : '/var/www/html/public/uploads';
+
+            $candidates = [];
+
+            if (is_dir($uploadsBase)) {
+                $candidates[$uploadsBase] = 'Upload Grizzly (default)';
+            }
+            if (is_dir($uploadsBase . '/audio')) {
+                $candidates[$uploadsBase . '/audio'] = 'Audio (MP3/FLAC)';
+            }
+            if (is_dir($uploadsBase . '/covers')) {
+                $candidates[$uploadsBase . '/covers'] = 'Cover album';
+            }
+
+            // Scansiona i mount point standard — rileva automaticamente
+            // qualsiasi volume montato nel container (dischi esterni, NAS, ecc.)
+            foreach (['/mnt', '/media', '/srv'] as $mountBase) {
+                if (!is_dir($mountBase) || !is_readable($mountBase)) continue;
+                $entries = @scandir($mountBase) ?: [];
+                foreach ($entries as $entry) {
+                    if ($entry === '.' || $entry === '..') continue;
+                    $mp = $mountBase . '/' . $entry;
+                    if (is_dir($mp) && is_readable($mp)) {
+                        $candidates[$mp] = $entry . ' (volume in ' . $mountBase . ')';
+                    }
+                }
+            }
+
+            // Home utenti — utile su server bare-metal senza Docker
+            if (is_dir('/home') && is_readable('/home')) {
+                $candidates['/home'] = 'Home utenti';
+            }
         }
 
         foreach ($candidates as $path => $label) {
