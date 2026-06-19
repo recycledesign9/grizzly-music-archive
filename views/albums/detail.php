@@ -2084,7 +2084,7 @@ function conditionLabel(string $value): string
   $map = [
     'Mint'           => 'Nuovo (M)',
     'Near Mint'      => 'Come Nuovo (NM o M-)',
-    'Very Good Plus' => 'Molto più che buono (VG+)',
+    'Very Good Plus' => 'Ottimo (VG+)',
     'Very Good'      => 'Molto buono (VG)',
     'Good Plus'      => 'Più che buono (G+)',
     'Good'           => 'Buono (G)',

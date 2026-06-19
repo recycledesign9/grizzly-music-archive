@@ -1,5 +1,13 @@
 <?php
 
+/** @var array $album */
+/** @var array $old */
+/** @var array $formats */
+/** @var array $genres */
+/** @var array $labels */
+/** @var array $artists */
+/** @var bool $isEdit */
+
 $isEdit    = !empty($album['id']);
 
 $pageTitle = $isEdit ? 'Modifica: ' . htmlspecialchars($album['title']) : 'Aggiungi disco';
@@ -110,11 +118,12 @@ $artistNameValue = isset($old['artist_name'])
                     placeholder="Cerca o scrivi un artista…"
                     autocomplete="off"
                     value="<?= htmlspecialchars(
-                      $currentArtistId
-                        ? ($artists[array_search($currentArtistId, array_column($artists, 'id'))]['name'] ?? $artistNameValue)
-                        : $artistNameValue,
-                      ENT_QUOTES, 'UTF-8'
-                    ) ?>">
+                              $currentArtistId
+                                ? ($artists[array_search($currentArtistId, array_column($artists, 'id'))]['name'] ?? $artistNameValue)
+                                : $artistNameValue,
+                              ENT_QUOTES,
+                              'UTF-8'
+                            ) ?>">
                   <ul id="artistDropdown" class="artist-dropdown list-group shadow" style="display:none;position:absolute;z-index:1000;width:100%;max-height:220px;overflow-y:auto;top:100%;left:0"></ul>
                 </div>
 
@@ -219,7 +228,7 @@ $artistNameValue = isset($old['artist_name'])
                   $conditions = [
                     'Mint'           => 'Nuovo (M)',
                     'Near Mint'      => 'Come Nuovo (NM o M-)',
-                    'Very Good Plus' => 'Molto più che buono (VG+)',
+                    'Very Good Plus' => 'Ottimo (VG+)',
                     'Very Good'      => 'Molto buono (VG)',
                     'Good Plus'      => 'Più che buono (G+)',
                     'Good'           => 'Buono (G)',
@@ -700,9 +709,9 @@ $artistNameValue = isset($old['artist_name'])
     // Autocomplete artista
     // -------------------------------------------------------
     (function initArtistAutocomplete() {
-      const input    = document.getElementById('artistAutocomplete');
+      const input = document.getElementById('artistAutocomplete');
       const dropdown = document.getElementById('artistDropdown');
-      const selHidden  = document.getElementById('artistSelect');
+      const selHidden = document.getElementById('artistSelect');
       const nameHidden = document.getElementById('artistNameInput');
 
       if (!input || !dropdown) return;
@@ -710,12 +719,15 @@ $artistNameValue = isset($old['artist_name'])
       // Raccoglie artisti dal select nascosto
       const artists = Array.from(selHidden.options)
         .filter(o => o.value !== '')
-        .map(o => ({ id: o.value, name: o.text.trim() }));
+        .map(o => ({
+          id: o.value,
+          name: o.text.trim()
+        }));
 
       function setArtist(id, name) {
-        selHidden.value   = id || '';
-        nameHidden.value  = id ? '' : name;
-        input.value       = name;
+        selHidden.value = id || '';
+        nameHidden.value = id ? '' : name;
+        input.value = name;
         dropdown.style.display = 'none';
       }
 
@@ -752,9 +764,12 @@ $artistNameValue = isset($old['artist_name'])
       input.addEventListener('input', () => {
         const q = input.value.trim().toLowerCase();
         // Resetta selezione quando l'utente modifica il testo
-        selHidden.value  = '';
+        selHidden.value = '';
         nameHidden.value = input.value.trim();
-        if (!q) { dropdown.style.display = 'none'; return; }
+        if (!q) {
+          dropdown.style.display = 'none';
+          return;
+        }
         const filtered = artists.filter(a => a.name.toLowerCase().includes(q)).slice(0, 10);
         renderDropdown(filtered);
       });
@@ -768,7 +783,9 @@ $artistNameValue = isset($old['artist_name'])
       });
 
       input.addEventListener('blur', () => {
-        setTimeout(() => { dropdown.style.display = 'none'; }, 150);
+        setTimeout(() => {
+          dropdown.style.display = 'none';
+        }, 150);
       });
 
       // Navigazione tastiera
