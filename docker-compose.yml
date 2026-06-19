@@ -21,6 +21,7 @@ services:
     volumes:
       # Persistent uploads (covers + audio) — NOT committed to git
       - uploads_data:/var/www/html/public/uploads
+      - /mnt:/mnt
     depends_on:
       db:
         condition: service_healthy

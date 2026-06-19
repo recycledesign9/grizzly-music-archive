@@ -137,4 +137,5 @@ $baseUrl   = BASE_URL;
 
 
   <main id="page-content">
-    <div class="container-fluid py-4">
+    <div class="container-fluid px-3 px-md-4 px-lg-5 py-4">
+      
