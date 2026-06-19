@@ -185,23 +185,23 @@ class MediaController
             exit;
         }
 
-        $files = glob($path . '/*.mp3') ?: [];
+        $mp3   = glob($path . '/*.mp3') ?: [];
+        $flac  = glob($path . '/*.flac') ?: [];
+        $files = array_merge($mp3, $flac);
         $count = count($files);
-
         if ($count === 0) {
             echo json_encode([
                 'ok'      => false,
                 'path'    => $path,
-                'message' => 'Nessun file MP3 trovato in: ' . $path,
+                'message' => 'Nessun file audio trovato in: ' . $path,
                 'count'   => 0,
             ]);
             exit;
         }
-
         echo json_encode([
             'ok'      => true,
             'path'    => $path,
-            'message' => 'OK — ' . $count . ' file MP3 presenti',
+            'message' => 'OK — ' . $count . ' file audio presenti',
             'count'   => $count,
         ]);
         exit;
