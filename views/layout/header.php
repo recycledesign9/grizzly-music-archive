@@ -13,6 +13,7 @@ $baseUrl   = BASE_URL;
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="base-url" content="<?= BASE_URL ?>">
   <title><?= htmlspecialchars($pageTitle) ?> — Music Archive</title>
+  <link rel="icon" type="image/png" href="<?= $baseUrl ?>/public/img/logo-grizzly.png">
   <link rel="stylesheet"
     href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
   <link rel="stylesheet"
@@ -138,4 +139,3 @@ $baseUrl   = BASE_URL;
 
   <main id="page-content">
     <div class="container-fluid px-3 px-md-4 px-lg-5 py-4">
-      
