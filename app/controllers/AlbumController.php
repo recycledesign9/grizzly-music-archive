@@ -457,7 +457,8 @@ class AlbumController
   private function notFound(): void
   {
     http_response_code(404);
-    echo '<h1>404 — Disco non trovato</h1>';
+    $errorContext = 'disco';
+    require BASE_PATH . '/views/errors/404.php';
     exit;
   }
 

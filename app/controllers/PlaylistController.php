@@ -215,7 +215,6 @@ class PlaylistController
             );
             $stmt->execute([$albumId]);
             $trackIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
-
         } elseif (!empty($_POST['track_ids'])) {
             $trackIds = array_map('intval', (array)$_POST['track_ids']);
             $trackIds = array_filter($trackIds); // rimuove zeri
@@ -407,11 +406,11 @@ class PlaylistController
                 'position' => (int)$t['position'],
                 // src = null per le tracce senza file audio → Player le salta
                 'src'      => $t['audio_filename']
-                                ? BASE_URL . '/public/uploads/audio/' . $t['audio_filename']
-                                : null,
+                    ? BASE_URL . '/public/uploads/audio/' . $t['audio_filename']
+                    : null,
                 'cover'    => $t['cover_local']
-                                ? BASE_URL . '/public/uploads/' . $t['cover_local']
-                                : ($t['cover_url'] ?: BASE_URL . '/public/img/placeholder.png'),
+                    ? BASE_URL . '/public/uploads/' . $t['cover_local']
+                    : ($t['cover_url'] ?: BASE_URL . '/public/img/placeholder.png'),
                 'artist'   => $t['artist_name'],
                 'album_id' => (int)$t['album_id'],
                 'youtube_id' => $t['youtube_id'] ?: null,
@@ -516,7 +515,8 @@ class PlaylistController
     private function notFound(): void
     {
         http_response_code(404);
-        echo '<h1>404 — Playlist non trovata</h1>';
+        $errorContext = 'playlist';
+        require BASE_PATH . '/views/errors/404.php';
         exit;
     }
 }

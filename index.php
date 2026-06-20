@@ -59,6 +59,12 @@ switch ($section) {
         (new SettingsController())->dispatch($action, $id);
         break;
     default:
+        if ($section !== 'dashboard') {
+            http_response_code(404);
+            $errorContext = 'risorsa';
+            require BASE_PATH . '/views/errors/404.php';
+            exit;
+        }
         require BASE_PATH . '/views/dashboard.php';
         break;
 }

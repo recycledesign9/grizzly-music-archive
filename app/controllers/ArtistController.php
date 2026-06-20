@@ -52,8 +52,9 @@ class ArtistController
 
     if (!$artist) {
       http_response_code(404);
-      echo 'Artista non trovato.';
-      return;
+      $errorContext = 'artista';
+      require BASE_PATH . '/views/errors/404.php';
+      exit;
     }
 
     // Model: album + statistiche per la hero
