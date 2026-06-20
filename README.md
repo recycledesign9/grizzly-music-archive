@@ -144,8 +144,36 @@ DISCOGS_TOKEN=your_token_here
 YOUTUBE_API_KEY=your_key_here
 ```
 
-Then restart: `docker compose restart app`
 
+Then restart: `docker compose restart app`
+ 
+> **⚠️ YouTube embed on LAN servers (IP address)**
+>
+> If you run Grizzly on a home server accessed via IP address (e.g. `http://192.168.1.x:8082`), YouTube may refuse to embed certain videos — showing "Video non disponibile" — because it does not recognise raw private IP addresses as valid embed origins.
+>
+> **Fix:** map a local hostname to your server IP on every device that will use the app.
+>
+> On **macOS / Linux** (on each client machine, not the server):
+> ```bash
+> sudo nano /etc/hosts
+> # add this line:
+> 192.168.1.x    grizzly.archive
+> ```
+>
+> On **Windows** (run Notepad as Administrator, open `C:\Windows\System32\drivers\etc\hosts`):
+> ```
+> 192.168.1.x    grizzly.archive
+> ```
+>
+> Then update your `.env` on the server:
+> ```dotenv
+> BASE_URL=http://grizzly.archive:8082
+> ```
+>
+> Restart: `docker compose down && docker compose up -d`
+>
+> You can use any hostname you like (`grizzly.archive`, `grizzly.local`, `music.home`, etc.). The hostname just needs to match `BASE_URL` and be present in `/etc/hosts` on each client.
+ 
 ---
 
 ## 🛠 Local Development (without Docker)
