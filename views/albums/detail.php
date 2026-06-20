@@ -753,7 +753,7 @@ if ($albumTotalSec > 0) {
 
   .bulk-track-row {
     display: grid;
-    grid-template-columns: 2rem 1fr 1fr auto;
+    grid-template-columns: 2rem 1fr minmax(0, 260px) 120px;
     align-items: center;
     gap: 0.75rem;
     padding: 0.6rem 0.5rem;
@@ -777,7 +777,7 @@ if ($albumTotalSec > 0) {
 
   .bulk-match-header {
     display: grid;
-    grid-template-columns: 2rem 1fr 1fr auto;
+    grid-template-columns: 2rem 1fr minmax(0, 260px) 120px;
     gap: 0.75rem;
     padding: 0.4rem 0.5rem;
     font-size: 0.75rem;
