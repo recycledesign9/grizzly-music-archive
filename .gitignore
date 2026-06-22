@@ -32,7 +32,7 @@ composer.lock
 # ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
 .AppleDouble
-.LSOverrideDirectory
+.LSOverride
 
 # ── Windows ───────────────────────────────────────────────────────────────────
 Thumbs.db

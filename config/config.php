@@ -21,6 +21,51 @@ function _env(string $key, string $default = ''): string
     return ($val !== false && $val !== '') ? (string) $val : $default;
 }
 
+// ── Helper: build a safe dynamic base URL ─────────────────────────────────────
+function _app_base_url(): string
+{
+    $canonical = rtrim(_env('BASE_URL', 'http://localhost:8080'), '/');
+
+    $allowedHosts = array_filter(array_map(
+        'trim',
+        explode(',', _env(
+            'ALLOWED_HOSTS',
+            'localhost,localhost:8080,127.0.0.1,127.0.0.1:8080'
+        ))
+    ));
+
+    $canonicalHost = parse_url($canonical, PHP_URL_HOST);
+    $canonicalPort = parse_url($canonical, PHP_URL_PORT);
+
+    if ($canonicalHost) {
+        $allowedHosts[] = $canonicalPort
+            ? $canonicalHost . ':' . $canonicalPort
+            : $canonicalHost;
+    }
+
+    $allowedHosts = array_unique(array_map('strtolower', $allowedHosts));
+
+    $host = strtolower($_SERVER['HTTP_HOST'] ?? '');
+
+    if ($host !== '' && in_array($host, $allowedHosts, true)) {
+        $proto = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '';
+
+        if ($proto !== '') {
+            $proto = strtolower(trim(explode(',', $proto)[0]));
+        }
+
+        if (!in_array($proto, ['http', 'https'], true)) {
+            $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+                ? 'https'
+                : 'http';
+        }
+
+        return $proto . '://' . $host;
+    }
+
+    return $canonical;
+}
+
 // ── Database ─────────────────────────────────────────────────────────────────
 define('DB_HOST',    _env('DB_HOST',    'db'));       // 'db' = Docker service name
 define('DB_PORT',    _env('DB_PORT',    '3306'));
@@ -30,7 +75,7 @@ define('DB_PASS',    _env('DB_PASS',    ''));
 define('DB_CHARSET', 'utf8mb4');
 
 // ── Application ───────────────────────────────────────────────────────────────
-define('BASE_URL',  rtrim(_env('BASE_URL', 'http://localhost:8080'), '/'));
+define('BASE_URL',  _app_base_url());
 define('BASE_PATH', dirname(__DIR__));
 
 // ── Upload paths ──────────────────────────────────────────────────────────────
