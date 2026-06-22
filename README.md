@@ -1,4 +1,4 @@
-<p align="center">
+<lp align="center">
   <img src="docs/logo.jpg" width="400" alt="Grizzly Music Archive">
 </p>
 
@@ -114,7 +114,7 @@ Example — reverse proxy with public domain and LAN access:
 ```dotenv
 BASE_URL=https://music.yourdomain.com
 APP_PORT=8080
-ALLOWED_HOSTS=music.yourdomain.com,192.168.1.x:8080,music.local:8080
+ALLOWED_HOSTS=music.yourdomain.com,192.168.1.x:8080,grizzly.local:8080
 ```
 
 When Grizzly Music Archive is behind a reverse proxy such as Nginx Proxy Manager, SSL should normally terminate at the proxy. In that case, the app container can continue to run over HTTP internally.
@@ -219,7 +219,7 @@ sudo nano /etc/hosts
 Add a line like this:
 
 ```text
-192.168.1.x    music.local
+192.168.1.x    grizzly.local
 ```
 
 On **Windows**:
@@ -233,15 +233,15 @@ C:\Windows\System32\drivers\etc\hosts
 Add:
 
 ```text
-192.168.1.x    music.local
+192.168.1.x    grizzly.local
 ```
 
 Then configure `.env` on the server:
 
 ```dotenv
-BASE_URL=http://music.local:8082
+BASE_URL=http://grizzly.local:8082
 APP_PORT=8082
-ALLOWED_HOSTS=music.local,music.local:8082,192.168.1.x:8082
+ALLOWED_HOSTS=grizzly.local,grizzly.local:8082,192.168.1.x:8082
 ```
 
 Restart:
@@ -251,7 +251,7 @@ docker compose down
 docker compose up -d
 ```
 
-You can use any local hostname you like, for example `music.local`, `vinyl.local`, or `archive.home`. The hostname must resolve to the server IP on every client that uses the app, and it should be included in `ALLOWED_HOSTS`.
+You can use any local hostname you like, for example `grizzly.local`, `grizzly.archive`, or `archive.home`. The hostname must resolve to the server IP on every client that uses the app, and it should be included in `ALLOWED_HOSTS`.
 
 ---
 
