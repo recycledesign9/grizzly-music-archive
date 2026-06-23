@@ -1205,7 +1205,7 @@ if ($albumTotalSec > 0) {
       var html = '<div class="bulk-match-header">' +
         '<span>#</span>' +
         '<span>Traccia</span>' +
-        '<span>File MP3 assegnato</span>' +
+        '<span>File Audio assegnato</span>' +
         '<span>Stato</span>' +
         '</div>';
 
