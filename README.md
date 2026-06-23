@@ -1,4 +1,4 @@
-<lp align="center">
+<p align="center">
   <img src="docs/logo.jpg" width="400" alt="Grizzly Music Archive">
 </p>
 
