@@ -271,107 +271,107 @@ if ($albumTotalSec > 0) {
                   <?php endif; ?>
                 </div>
                 <div class="track-actions">
-                <?php if ($t['audio_filename']): ?>
-                  <div class="d-flex align-items-center gap-2">
-                    <audio controls preload="none" class="track-player">
-                      <source src="<?= MediaPathResolver::getStreamUrl($t['audio_filename']) ?>"
-                        type="<?= pathinfo($t['audio_filename'], PATHINFO_EXTENSION) === 'flac' ? 'audio/flac' : 'audio/mpeg' ?>">
-                      Il tuo browser non supporta l'audio HTML5.
-                    </audio>
-                    <a href="<?= MediaPathResolver::getDownloadUrl($t['audio_filename']) ?>"
-                      class="btn btn-xs btn-outline-secondary" download
-                      title="Scarica MP3">
-                      <i class="bi bi-download"></i>
-                    </a>
-                    <?php if (!empty($t['audio_file_id'])): ?>
-                      <button type="button"
-                        class="btn btn-xs btn-outline-danger btn-delete-audio"
-                        data-audio-id="<?= (int)$t['audio_file_id'] ?>"
-                        data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
-                        data-csrf="<?= htmlspecialchars($_SESSION['csrf_token']) ?>"
-                        title="Rimuovi audio">
-                        <i class="bi bi-x-lg"></i>
-                      </button>
-                    <?php endif; ?>
-                  </div>
-                <?php else: ?>
-                  <span class="text-muted small fst-italic">
-                    <i class="bi bi-music-note text-muted"></i> nessun audio
-                  </span>
-                <?php endif; ?>
-                <!-- Bottone YouTube -->
-                <button
-                  type="button"
-                  class="btn btn-xs btn-yt"
-                  data-track-id="<?= (int)$t['id'] ?>"
-                  data-artist="<?= htmlspecialchars($album['artist_name'], ENT_QUOTES) ?>"
-                  data-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
-                  title="Cerca video su YouTube">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
-                  </svg>
-                </button>
-                <!-- Dropdown: aggiungi traccia a playlist -->
-                <?php $inPlaylists = $trackPlaylistMap[(int)$t['id']] ?? []; ?>
-                <div class="dropdown">
-                  <button type="button"
-                    class="btn btn-xs btn-outline-secondary"
-                    data-bs-toggle="dropdown"
-                    data-bs-auto-close="outside"
-                    aria-expanded="false"
-                    title="Aggiungi a playlist">
-                    <i class="bi bi-collection-play"></i>
+                  <?php if ($t['audio_filename']): ?>
+                    <div class="d-flex align-items-center gap-2">
+                      <audio controls preload="none" class="track-player">
+                        <source src="<?= MediaPathResolver::getStreamUrl($t['audio_filename']) ?>"
+                          type="<?= pathinfo($t['audio_filename'], PATHINFO_EXTENSION) === 'flac' ? 'audio/flac' : 'audio/mpeg' ?>">
+                        Il tuo browser non supporta l'audio HTML5.
+                      </audio>
+                      <a href="<?= MediaPathResolver::getDownloadUrl($t['audio_filename']) ?>"
+                        class="btn btn-xs btn-outline-secondary" download
+                        title="Scarica MP3">
+                        <i class="bi bi-download"></i>
+                      </a>
+                      <?php if (!empty($t['audio_file_id'])): ?>
+                        <button type="button"
+                          class="btn btn-xs btn-outline-danger btn-delete-audio"
+                          data-audio-id="<?= (int)$t['audio_file_id'] ?>"
+                          data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
+                          data-csrf="<?= htmlspecialchars($_SESSION['csrf_token']) ?>"
+                          title="Rimuovi audio">
+                          <i class="bi bi-x-lg"></i>
+                        </button>
+                      <?php endif; ?>
+                    </div>
+                  <?php else: ?>
+                    <span class="text-muted small fst-italic">
+                      <i class="bi bi-music-note text-muted"></i> nessun audio
+                    </span>
+                  <?php endif; ?>
+                  <!-- Bottone YouTube -->
+                  <button
+                    type="button"
+                    class="btn btn-xs btn-yt"
+                    data-track-id="<?= (int)$t['id'] ?>"
+                    data-artist="<?= htmlspecialchars($album['artist_name'], ENT_QUOTES) ?>"
+                    data-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
+                    title="Cerca video su YouTube">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+                    </svg>
                   </button>
-                  <ul class="dropdown-menu dropdown-menu-end shadow-sm" style="min-width:230px">
-                    <li>
-                      <h6 class="dropdown-header py-1 small">Aggiungi a playlist</h6>
-                    </li>
-                    <?php if (empty($userPlaylists)): ?>
-                      <li><span class="dropdown-item-text small text-muted">Nessuna playlist</span></li>
-                    <?php else: ?>
-                      <?php foreach ($userPlaylists as $pl):
-                        $alreadyIn = in_array((int)$pl['id'], $inPlaylists);
-                      ?>
-                        <li class="d-flex align-items-center px-1 gap-1">
-                          <?php if ($alreadyIn): ?>
-                            <span class="dropdown-item small text-muted d-flex align-items-center
+                  <!-- Dropdown: aggiungi traccia a playlist -->
+                  <?php $inPlaylists = $trackPlaylistMap[(int)$t['id']] ?? []; ?>
+                  <div class="dropdown">
+                    <button type="button"
+                      class="btn btn-xs btn-outline-secondary"
+                      data-bs-toggle="dropdown"
+                      data-bs-auto-close="outside"
+                      aria-expanded="false"
+                      title="Aggiungi a playlist">
+                      <i class="bi bi-collection-play"></i>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end shadow-sm" style="min-width:230px">
+                      <li>
+                        <h6 class="dropdown-header py-1 small">Aggiungi a playlist</h6>
+                      </li>
+                      <?php if (empty($userPlaylists)): ?>
+                        <li><span class="dropdown-item-text small text-muted">Nessuna playlist</span></li>
+                      <?php else: ?>
+                        <?php foreach ($userPlaylists as $pl):
+                          $alreadyIn = in_array((int)$pl['id'], $inPlaylists);
+                        ?>
+                          <li class="d-flex align-items-center px-1 gap-1">
+                            <?php if ($alreadyIn): ?>
+                              <span class="dropdown-item small text-muted d-flex align-items-center
                                         justify-content-between flex-grow-1 pe-0 disabled">
-                              <span><i class="bi bi-check2 me-2 text-success"></i><?= htmlspecialchars($pl['name']) ?></span>
-                              <span class="badge bg-success-subtle text-success ms-2"
-                                style="font-size:.65rem;white-space:nowrap">presente</span>
-                            </span>
-                          <?php else: ?>
-                            <button class="dropdown-item small btn-add-track-to-playlist
+                                <span><i class="bi bi-check2 me-2 text-success"></i><?= htmlspecialchars($pl['name']) ?></span>
+                                <span class="badge bg-success-subtle text-success ms-2"
+                                  style="font-size:.65rem;white-space:nowrap">presente</span>
+                              </span>
+                            <?php else: ?>
+                              <button class="dropdown-item small btn-add-track-to-playlist
                                           d-flex align-items-center justify-content-between
                                           flex-grow-1 pe-0"
-                              type="button"
-                              data-track-id="<?= (int)$t['id'] ?>"
-                              data-playlist-id="<?= (int)$pl['id'] ?>"
-                              data-playlist-name="<?= htmlspecialchars($pl['name'], ENT_QUOTES) ?>">
-                              <span><i class="bi bi-collection me-2 text-muted"></i><?= htmlspecialchars($pl['name']) ?></span>
-                            </button>
-                          <?php endif; ?>
-                          <a href="<?= BASE_URL ?>/index.php?route=playlists/detail/<?= (int)$pl['id'] ?>"
-                            class="btn btn-xs btn-link text-muted flex-shrink-0 px-1"
-                            title="Apri playlist">
-                            <i class="bi bi-box-arrow-up-right" style="font-size:.65rem"></i>
-                          </a>
-                        </li>
-                      <?php endforeach; ?>
-                    <?php endif; ?>
-                    <li>
-                      <hr class="dropdown-divider my-1">
-                    </li>
-                    <li>
-                      <button class="dropdown-item small btn-add-track-new-playlist"
-                        type="button"
-                        data-track-id="<?= (int)$t['id'] ?>"
-                        data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>">
-                        <i class="bi bi-plus-circle me-2 text-success"></i>Nuova playlist…
-                      </button>
-                    </li>
-                  </ul>
-                </div>
+                                type="button"
+                                data-track-id="<?= (int)$t['id'] ?>"
+                                data-playlist-id="<?= (int)$pl['id'] ?>"
+                                data-playlist-name="<?= htmlspecialchars($pl['name'], ENT_QUOTES) ?>">
+                                <span><i class="bi bi-collection me-2 text-muted"></i><?= htmlspecialchars($pl['name']) ?></span>
+                              </button>
+                            <?php endif; ?>
+                            <a href="<?= BASE_URL ?>/index.php?route=playlists/detail/<?= (int)$pl['id'] ?>"
+                              class="btn btn-xs btn-link text-muted flex-shrink-0 px-1"
+                              title="Apri playlist">
+                              <i class="bi bi-box-arrow-up-right" style="font-size:.65rem"></i>
+                            </a>
+                          </li>
+                        <?php endforeach; ?>
+                      <?php endif; ?>
+                      <li>
+                        <hr class="dropdown-divider my-1">
+                      </li>
+                      <li>
+                        <button class="dropdown-item small btn-add-track-new-playlist"
+                          type="button"
+                          data-track-id="<?= (int)$t['id'] ?>"
+                          data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>">
+                          <i class="bi bi-plus-circle me-2 text-success"></i>Nuova playlist…
+                        </button>
+                      </li>
+                    </ul>
+                  </div>
                 </div><!-- /.track-actions -->
               </div>
             </li>
@@ -528,9 +528,9 @@ if ($albumTotalSec > 0) {
               <i class="bi bi-folder2-open me-2"></i>Scegli cartella audio
             </button>
             <input type="file" id="folderInput"
-              accept=".mp3,.flac,audio/mpeg,audio/flac"
               multiple
               webkitdirectory
+              directory
               style="display:none">
 
             <!-- Fallback: selezione file multipla -->
