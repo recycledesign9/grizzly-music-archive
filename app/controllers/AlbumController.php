@@ -52,6 +52,10 @@ class AlbumController
         $this->apiCover();
         break;
 
+      case 'api-description':
+        $this->apiDescription();
+        break;
+
       default:
         $this->list();
         break;
@@ -519,6 +523,192 @@ class AlbumController
       ]);
       exit;
     }
+  }
+
+  // ----------------------------------------------------------
+  // GET /albums/api-description?artist=...&album=...&lang=it|en
+  // Wikipedia API — cerca "Artista Album" nella lingua richiesta
+  // ----------------------------------------------------------
+  private function apiDescription(): void
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    try {
+      $artist = trim($_GET['artist'] ?? '');
+      $album  = trim($_GET['album']  ?? '');
+      $lang   = in_array($_GET['lang'] ?? 'it', ['it', 'en'], true)
+                  ? ($_GET['lang'] ?? 'it')
+                  : 'it';
+
+      if (!$artist || !$album) {
+        echo json_encode(['error' => 'Parametri mancanti']);
+        exit;
+      }
+
+      $result = $this->fetchWikipediaDescription($artist, $album, $lang);
+
+      echo json_encode($result);
+    } catch (Throwable $e) {
+      echo json_encode(['error' => $e->getMessage()]);
+    }
+
+    exit;
+  }
+
+  // ----------------------------------------------------------
+  // Cerca su Wikipedia la pagina dell'album e ne estrae l'intro
+  // Strategia: prova "Artista Album (album)" → "Artista Album"
+  // ----------------------------------------------------------
+  private function fetchWikipediaDescription(string $artist, string $album, string $lang): array
+  {
+    $ua  = defined('APP_USER_AGENT') ? APP_USER_AGENT : 'GrizzlyMusicArchive/1.0';
+    $ctx = stream_context_create([
+      'http' => [
+        'header'        => "User-Agent: {$ua}\r\nAccept: application/json",
+        'timeout'       => 8,
+        'ignore_errors' => true,
+      ],
+    ]);
+
+    // Candidati da provare in ordine — i primi forzano la pagina "album"
+    $candidates = [
+      $album . ' (' . strtolower($artist) . ' album)',
+      $album . ' (album)',
+      $album . ' (' . $artist . ')',
+      $artist . ' ' . $album,
+      $album,
+    ];
+
+    $base = 'https://' . $lang . '.wikipedia.org/w/api.php';
+
+    // Frasi che indicano una pagina DA SCARTARE:
+    // biografia artista, oppure singolo / brano / canzone
+    $rejectMarkers = [
+      // Biografia artista
+      'è un gruppo musicale', 'è una band', 'è un cantante', 'è una cantante',
+      'è un complesso', 'sono un gruppo', 'è un musicista', 'è un duo',
+      'is a band', 'is an american', 'is a british', 'is an english',
+      'are an american', 'are a british', 'is a singer', 'is a musician',
+      'is a rock band', 'is a musical group', 'formatasi', 'formatosi',
+      'formed in', 'is a singer-songwriter',
+      // Singolo / brano / canzone
+      'è un singolo', 'è una canzone', 'è un brano', 'è il singolo',
+      'is a single', 'is a song', 'is the lead single', 'is the debut single',
+      'is the second single', 'is the third single',
+    ];
+
+    // Una pagina è considerata un ALBUM se NON è stata scartata dalla
+    // blacklist sopra E contiene la parola "album"/"disco" nel testo.
+    // (la verifica avviene più sotto, dopo aver letto l'estratto)
+
+    foreach ($candidates as $query) {
+      // 1. Cerca il titolo esatto della pagina
+      $searchUrl = $base
+        . '?action=query&list=search&srsearch=' . urlencode($query)
+        . '&srlimit=5&format=json&utf8=1';
+
+      $raw  = @file_get_contents($searchUrl, false, $ctx);
+      $data = $raw ? json_decode($raw, true) : null;
+
+      $hits = $data['query']['search'] ?? [];
+      if (empty($hits)) continue;
+
+      $albumLower  = strtolower($album);
+      $artistLower = strtolower($artist);
+
+      // Normalizza un titolo Wikipedia rimuovendo i suffissi tra parentesi
+      // es. "Korn (album)" -> "korn", "Issues (Korn) -> "issues"
+      $normalizeTitle = function (string $t): string {
+        $t = preg_replace('/\s*\([^)]*\)\s*/', ' ', $t); // togli (…)
+        $t = strtolower(trim($t));
+        $t = preg_replace('/\s+/', ' ', $t);
+        return $t;
+      };
+      $albumNorm = $normalizeTitle($album);
+
+      // Prova ogni risultato finché non ne troviamo uno che è davvero un album
+      foreach ($hits as $hit) {
+        $pageTitle = $hit['title'] ?? '';
+        if ($pageTitle === '') continue;
+
+        $titleLower = strtolower($pageTitle);
+
+        // Salta se il titolo è ESATTAMENTE il nome dell'artista (= pagina bio)
+        if ($titleLower === $artistLower) continue;
+
+        // CONTROLLO DECISIVO: il titolo della pagina, ripulito dai suffissi
+        // tra parentesi, deve corrispondere all'album cercato.
+        // Questo evita di pescare un ALTRO album dello stesso artista
+        // (es. cercando "Korn" non deve restituire "Issues").
+        $pageTitleNorm = $normalizeTitle($pageTitle);
+        if ($pageTitleNorm !== $albumNorm) {
+          continue;
+        }
+
+        // 2. Recupera l'estratto introduttivo della pagina
+        $extractUrl = $base
+          . '?action=query&prop=extracts&exintro=1&explaintext=1&redirects=1'
+          . '&titles=' . urlencode($pageTitle)
+          . '&format=json&utf8=1';
+
+        $raw2  = @file_get_contents($extractUrl, false, $ctx);
+        $data2 = $raw2 ? json_decode($raw2, true) : null;
+
+        $pages = $data2['query']['pages'] ?? [];
+        $page  = reset($pages);
+
+        $extract = trim($page['extract'] ?? '');
+        if ($extract === '') continue;
+
+        $extractLower = strtolower($extract);
+
+        // Scarta disambiguazioni
+        if (stripos($extract, 'may refer to') !== false
+            || stripos($extract, 'può riferirsi') !== false) {
+          continue;
+        }
+
+        // La definizione sta sempre nella prima frase: analizziamo
+        // solo l'inizio dell'intro per decidere se scartare.
+        $intro = substr($extractLower, 0, 250);
+
+        // Scarta se è una biografia / singolo / brano / canzone.
+        // (blacklist forte: queste frasi compaiono SEMPRE nella prima riga)
+        $reject = false;
+        foreach ($rejectMarkers as $marker) {
+          if (strpos($intro, $marker) !== false) {
+            $reject = true;
+            break;
+          }
+        }
+        if ($reject) continue;
+
+        // A questo punto NON è una bio né un singolo/brano.
+        // Accettiamo la pagina se nell'intero estratto compare
+        // la parola "album" (conferma debole ma sufficiente, dato che
+        // singoli e bio sono già stati esclusi sopra).
+        // Se "album" non c'è proprio, proviamo comunque il candidato
+        // successivo solo quando l'intro è cortissimo/ambiguo.
+        if (strpos($extractLower, 'album') === false
+            && strpos($extractLower, 'disco') === false
+            && strpos($extractLower, 'ep ') === false) {
+          continue;
+        }
+
+        // OK: pagina valida
+        $text = preg_replace("/\n{3,}/", "\n\n", $extract);
+        $text = trim($text);
+
+        return [
+          'description' => $text,
+          'lang'        => $lang,
+          'page_title'  => $pageTitle,
+          'wiki_url'    => 'https://' . $lang . '.wikipedia.org/wiki/' . urlencode(str_replace(' ', '_', $pageTitle)),
+        ];
+      }
+    }
+
+    return ['description' => null, 'lang' => $lang];
   }
 
   private function apiCover(): void

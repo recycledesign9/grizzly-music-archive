@@ -111,11 +111,19 @@ if ($albumTotalSec > 0) {
     </div>
   <?php endif; ?>
 
-  <!-- Cover + metadati -->
-  <div class="col-md-4 col-lg-3">
-    <img src="<?= htmlspecialchars($coverSrc) ?>"
-      class="img-fluid rounded shadow w-100 mb-3" alt="Cover <?= htmlspecialchars($album['title']) ?>">
+  <!-- ============================================================
+       COLONNA SINISTRA — cover · metadati · azioni · descrizione
+       ============================================================ -->
+  <div class="col-12 col-md-4 col-lg-3 album-detail-sidebar">
 
+    <!-- Cover -->
+    <div class="album-detail-cover-wrap mb-3">
+      <img src="<?= htmlspecialchars($coverSrc) ?>"
+        class="album-detail-cover img-fluid rounded shadow w-100"
+        alt="Cover <?= htmlspecialchars($album['title']) ?>">
+    </div>
+
+    <!-- Badge formato / genere -->
     <div class="d-flex flex-wrap gap-2 mb-3">
       <span class="badge badge-format bg-<?= formatBadge($album['format_name']) ?>">
         <?= htmlspecialchars($album['format_name']) ?>
@@ -125,67 +133,109 @@ if ($albumTotalSec > 0) {
       <?php endif; ?>
     </div>
 
-    <table class="table table-sm table-borderless small">
-      <tr>
-        <th>Artista</th>
-        <td>
-          <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= $album['artist_id'] ?>">
-            <?= htmlspecialchars($album['artist_name']) ?>
-          </a>
-        </td>
-      </tr>
-      <?php if ($album['year']): ?>
-        <tr>
-          <th>Anno</th>
-          <td><?= $album['year'] ?></td>
-        </tr>
-      <?php endif; ?>
-      <?php if ($album['label_name']): ?>
-        <tr>
-          <th>Etichetta</th>
-          <td><?= htmlspecialchars($album['label_name']) ?></td>
-        </tr>
-      <?php endif; ?>
-      <tr>
-        <th>Condizione</th>
-        <td><?= htmlspecialchars(conditionLabel($album['condition'])) ?></td>
-      </tr>
-      <tr>
-        <th>Copie</th>
-        <td><?= $album['copies'] ?></td>
-      </tr>
-      <?php if ($album['mbid']): ?>
-        <tr>
-          <th>MBID</th>
-          <td><a href="https://musicbrainz.org/release/<?= $album['mbid'] ?>"
-              target="_blank" class="font-monospace small">
-              <?= substr($album['mbid'], 0, 8) ?>…</a>
-          </td>
-        </tr>
-      <?php endif; ?>
-    </table>
+    <!-- Metadati -->
+    <div class="album-meta-block mb-3">
+      <dl class="album-meta-list">
+        <div class="album-meta-row">
+          <dt>Artista</dt>
+          <dd>
+            <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= $album['artist_id'] ?>"
+              class="album-meta-link">
+              <?= htmlspecialchars($album['artist_name']) ?>
+            </a>
+          </dd>
+        </div>
+        <?php if ($album['year']): ?>
+          <div class="album-meta-row">
+            <dt>Anno</dt>
+            <dd><?= $album['year'] ?></dd>
+          </div>
+        <?php endif; ?>
+        <?php if ($album['label_name']): ?>
+          <div class="album-meta-row">
+            <dt>Etichetta</dt>
+            <dd><?= htmlspecialchars($album['label_name']) ?></dd>
+          </div>
+        <?php endif; ?>
+        <div class="album-meta-row">
+          <dt>Condizione</dt>
+          <dd><?= htmlspecialchars(conditionLabel($album['condition'])) ?></dd>
+        </div>
+        <div class="album-meta-row">
+          <dt>Copie</dt>
+          <dd><?= $album['copies'] ?></dd>
+        </div>
+        <?php if ($album['mbid']): ?>
+          <div class="album-meta-row">
+            <dt>MBID</dt>
+            <dd>
+              <a href="https://musicbrainz.org/release/<?= $album['mbid'] ?>"
+                target="_blank" class="font-monospace small album-meta-link">
+                <?= substr($album['mbid'], 0, 8) ?>…
+              </a>
+            </dd>
+          </div>
+        <?php endif; ?>
+      </dl>
+    </div>
 
+    <!-- Note personali -->
     <?php if ($album['notes']): ?>
-      <div class="card card-body small shadow-sm notes-card">
-        <i class="bi bi-sticky me-2 text-warning"></i>
-        <?= nl2br(htmlspecialchars($album['notes'])) ?>
+      <div class="album-notes-block mb-3">
+        <i class="bi bi-pencil-square me-2 text-warning opacity-75"></i>
+        <span class="small"><?= nl2br(htmlspecialchars($album['notes'])) ?></span>
       </div>
     <?php endif; ?>
 
-    <div class="d-grid gap-2 mt-3">
+    <!-- Pulsanti azione -->
+    <div class="album-actions-row mb-4">
       <a href="<?= BASE_URL ?>/index.php?route=albums/edit/<?= $album['id'] ?>"
-        class="btn btn-sm btn-outline-secondary">
+        class="btn btn-sm btn-outline-secondary album-action-edit">
         <i class="bi bi-pencil me-1"></i>Modifica
       </a>
-      <button type="button" class="btn btn-sm btn-outline-danger"
-        data-bs-toggle="modal" data-bs-target="#deleteModal">
-        <i class="bi bi-trash me-1"></i>Elimina
+
+      <button type="button"
+        class="btn btn-sm btn-outline-danger album-action-delete"
+        data-bs-toggle="modal"
+        data-bs-target="#deleteModal"
+        title="Elimina"
+        aria-label="Elimina album">
+        <i class="bi bi-trash"></i>
       </button>
     </div>
+    
+    <!-- Descrizione automatica / Note sull'album -->
+    <div class="album-desc-block album-desc-block-sidebar mb-4" id="albumDescBlock"
+      data-artist="<?= htmlspecialchars($album['artist_name'], ENT_QUOTES) ?>"
+      data-album="<?= htmlspecialchars($album['title'], ENT_QUOTES) ?>">
+
+      <div class="album-desc-header">
+        <i class="bi bi-journal-text album-desc-icon"></i>
+        <span class="album-desc-label">Note sull'album</span>
+      </div>
+
+      <div class="album-desc-loading" id="albumDescLoading">
+        <span class="spinner-border spinner-border-sm text-warning me-2" role="status"></span>
+        <span class="small text-muted">Recupero informazioni…</span>
+      </div>
+
+      <div class="album-desc-body" id="albumDescBody" style="display:none">
+        <p class="album-desc-text" id="albumDescText"></p>
+        <button type="button" class="album-desc-toggle" id="albumDescToggle" style="display:none">Mostra tutto</button>
+        <div class="album-desc-footer" id="albumDescFooter"></div>
+      </div>
+
+      <div class="album-desc-empty" id="albumDescEmpty" style="display:none">
+        <i class="bi bi-music-note-list me-2 opacity-50"></i>
+        <span class="small text-muted fst-italic">Nessuna descrizione disponibile.</span>
+      </div>
+
+    </div>
+
   </div><!-- /col cover -->
 
   <!-- Tracklist + player -->
-  <div class="col-md-8 col-lg-9">
+  <div class="col-12 col-md-8 col-lg-9">
 
     <!-- Intestazione con menu azioni -->
     <div class="d-flex align-items-start justify-content-between mb-1">
@@ -496,7 +546,131 @@ if ($albumTotalSec > 0) {
     </script>
 
   </div><!-- /col tracklist -->
+
+
+
 </div><!-- /row -->
+
+<script>
+  /* ----------------------------------------------------------------
+   Album Description — Wikipedia IT → EN fallback
+---------------------------------------------------------------- */
+  (function() {
+    var block = document.getElementById('albumDescBlock');
+    var loading = document.getElementById('albumDescLoading');
+    var body = document.getElementById('albumDescBody');
+    var textEl = document.getElementById('albumDescText');
+    var footer = document.getElementById('albumDescFooter');
+    var empty = document.getElementById('albumDescEmpty');
+    var toggle = document.getElementById('albumDescToggle');
+
+    if (!block) return;
+
+    var artist = block.dataset.artist || '';
+    var album = block.dataset.album || '';
+    var baseUrl = (document.querySelector('meta[name="base-url"]') || {}).content ||
+      window.location.origin;
+
+    var MAX_CHARS = 280; // soglia oltre cui appare "Mostra tutto"
+    var expanded = false;
+    var fullText = '';
+
+    function buildUrl(lang) {
+      return baseUrl + '/index.php?route=albums/api-description' +
+        '&artist=' + encodeURIComponent(artist) +
+        '&album=' + encodeURIComponent(album) +
+        '&lang=' + lang;
+    }
+
+    function showDescription(d, lang) {
+      fullText = (d.description || '').trim();
+      if (!fullText) {
+        showEmpty();
+        return;
+      }
+
+      if (fullText.length > MAX_CHARS) {
+        textEl.textContent = fullText.substring(0, MAX_CHARS) + '…';
+        toggle.style.display = '';
+        toggle.textContent = 'Mostra tutto';
+        expanded = false;
+      } else {
+        textEl.textContent = fullText;
+        toggle.style.display = 'none';
+      }
+
+      var footerHtml = '';
+      if (lang !== 'it') {
+        footerHtml += '<span class="album-desc-lang-badge me-2">EN</span>';
+      }
+      if (d.wiki_url) {
+        footerHtml += '<a href="' + d.wiki_url + '" target="_blank" rel="noopener" class="album-desc-wiki-link">' +
+          '<i class="bi bi-box-arrow-up-right me-1"></i>Wikipedia' +
+          '</a>';
+      }
+      if (footerHtml) {
+        footer.innerHTML = footerHtml;
+        footer.style.display = '';
+      } else {
+        footer.style.display = 'none';
+      }
+
+      loading.style.display = 'none';
+      body.style.display = '';
+    }
+
+    function showEmpty() {
+      loading.style.display = 'none';
+      empty.style.display = '';
+    }
+
+    function fetchDescription(lang, fallbackLang) {
+      fetch(buildUrl(lang), {
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        })
+        .then(function(r) {
+          return r.ok ? r.json() : Promise.reject(r.status);
+        })
+        .then(function(d) {
+          if (d.description) {
+            showDescription(d, lang);
+          } else if (fallbackLang) {
+            fetchDescription(fallbackLang, null);
+          } else {
+            showEmpty();
+          }
+        })
+        .catch(function() {
+          if (fallbackLang) {
+            fetchDescription(fallbackLang, null);
+          } else {
+            showEmpty();
+          }
+        });
+    }
+
+    if (toggle) {
+      toggle.addEventListener('click', function() {
+        expanded = !expanded;
+        if (expanded) {
+          textEl.textContent = fullText;
+          toggle.textContent = 'Mostra meno';
+        } else {
+          textEl.textContent = fullText.substring(0, MAX_CHARS) + '…';
+          toggle.textContent = 'Mostra tutto';
+        }
+      });
+    }
+
+    if (artist && album) {
+      fetchDescription('it', 'en');
+    } else {
+      showEmpty();
+    }
+  })();
+</script>
 
 <!-- ============================================================
      MODAL BULK UPLOAD
