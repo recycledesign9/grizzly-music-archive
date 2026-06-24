@@ -2686,3 +2686,128 @@ body:has(#sticky-player[style*="flex"]) {
     padding: 5px 0;
   }
 }
+
+/* ============================================================
+   Search Results Page
+   ============================================================ */
+
+.sr-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .09em;
+  color: var(--bs-secondary-color);
+  padding-bottom: 0.5rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 1px solid var(--bs-border-color);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---- Artisti ---- */
+.sr-artists-wrap { margin-bottom: 2.5rem; }
+
+.sr-artist-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--bs-border-color);
+  text-decoration: none;
+  color: var(--bs-body-color);
+  transition: color .15s;
+}
+.sr-artist-row:last-child { border-bottom: none; }
+.sr-artist-row:hover { color: #ffc107; }
+.sr-artist-name { font-size: 1.1rem; font-weight: 700; }
+.sr-artist-count { font-size: 0.78rem; color: var(--bs-secondary-color); }
+.sr-artist-arrow {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--bs-secondary-color);
+  opacity: 0;
+  transition: opacity .15s;
+  flex-shrink: 0;
+}
+.sr-artist-row:hover .sr-artist-arrow { opacity: 1; }
+
+/* ---- Album: 1 solo risultato — hero ---- */
+.sr-single-wrap {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 2.5rem;
+  align-items: start;
+  padding: 2rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: 16px;
+  background: var(--bs-tertiary-bg);
+  text-decoration: none;
+  color: var(--bs-body-color);
+  transition: box-shadow .18s ease;
+}
+.sr-single-wrap:hover { box-shadow: 0 8px 32px rgba(0,0,0,.13); color: var(--bs-body-color); }
+[data-bs-theme="dark"] .sr-single-wrap:hover { box-shadow: 0 8px 32px rgba(0,0,0,.5); }
+.sr-single-cover {
+  width: 100%;
+  aspect-ratio: 1/1;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bs-secondary-bg);
+  box-shadow: 0 6px 24px rgba(0,0,0,.22);
+}
+.sr-single-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.sr-single-info { display: flex; flex-direction: column; gap: 0.75rem; padding-top: 0.5rem; }
+.sr-single-title { font-size: 2rem; font-weight: 800; line-height: 1.1; letter-spacing: -.025em; }
+.sr-single-artist { font-size: 1.05rem; color: var(--bs-secondary-color); font-weight: 500; }
+.sr-single-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-top: 0.25rem; }
+.sr-single-year { font-size: 0.92rem; color: var(--bs-secondary-color); font-weight: 500; }
+.sr-single-cta { margin-top: 0.5rem; font-size: 0.85rem; color: #ffc107; font-weight: 600; display: flex; align-items: center; gap: 5px; }
+
+@media (max-width: 767px) {
+  .sr-single-wrap { grid-template-columns: 1fr; gap: 1.5rem; padding: 1.25rem; }
+  .sr-single-title { font-size: 1.5rem; }
+}
+
+/* ---- Album: tabella con cover grandi ---- */
+.sr-table { width: 100%; border-collapse: collapse; }
+.sr-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--bs-border-color);
+  vertical-align: middle;
+  font-size: 0.9rem;
+}
+.sr-table tr:last-child td { border-bottom: none; }
+.sr-table tr:hover td { background: rgba(var(--bs-warning-rgb), 0.04); }
+.sr-table thead th {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--bs-secondary-color);
+  padding: 8px 14px 10px;
+  border-bottom: 2px solid var(--bs-border-color);
+}
+.sr-cover-cell { width: 90px; }
+.sr-cover-thumb {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 6px;
+  display: block;
+  box-shadow: 0 2px 8px rgba(0,0,0,.18);
+}
+.sr-title-link {
+  font-weight: 600;
+  color: var(--bs-body-color);
+  text-decoration: none;
+  transition: color .15s;
+}
+.sr-title-link:hover { color: #ffc107; }
+.sr-artist-link {
+  color: var(--bs-secondary-color);
+  text-decoration: none;
+  font-size: 0.82rem;
+  transition: color .15s;
+}
+.sr-artist-link:hover { color: var(--bs-body-color); }
