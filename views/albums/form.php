@@ -429,7 +429,7 @@ $artistNameValue = isset($old['artist_name'])
               <i class="bi bi-save me-2"></i>
               <?= $isEdit ? 'Aggiorna disco' : 'Salva disco' ?>
             </button>
-            <a href="<?= BASE_URL ?>/index.php?route=albums/list" class="btn btn-outline-secondary">Annulla</a>
+            <a href="<?= $isEdit ? BASE_URL . '/index.php?route=albums/detail/' . $album['id'] : BASE_URL . '/index.php?route=albums/list' ?>" class="btn btn-outline-secondary">Annulla</a>
           </div>
 
         </div>
