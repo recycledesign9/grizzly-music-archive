@@ -2695,7 +2695,7 @@ body:has(#sticky-player[style*="flex"]) {
   font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: .09em;
+  letter-spacing: 0.09em;
   color: var(--bs-secondary-color);
   padding-bottom: 0.5rem;
   margin-bottom: 1.25rem;
@@ -2706,7 +2706,9 @@ body:has(#sticky-player[style*="flex"]) {
 }
 
 /* ---- Artisti ---- */
-.sr-artists-wrap { margin-bottom: 2.5rem; }
+.sr-artists-wrap {
+  margin-bottom: 2.5rem;
+}
 
 .sr-artist-row {
   display: flex;
@@ -2716,21 +2718,33 @@ body:has(#sticky-player[style*="flex"]) {
   border-bottom: 1px solid var(--bs-border-color);
   text-decoration: none;
   color: var(--bs-body-color);
-  transition: color .15s;
+  transition: color 0.15s;
 }
-.sr-artist-row:last-child { border-bottom: none; }
-.sr-artist-row:hover { color: #ffc107; }
-.sr-artist-name { font-size: 1.1rem; font-weight: 700; }
-.sr-artist-count { font-size: 0.78rem; color: var(--bs-secondary-color); }
+.sr-artist-row:last-child {
+  border-bottom: none;
+}
+.sr-artist-row:hover {
+  color: #ffc107;
+}
+.sr-artist-name {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+.sr-artist-count {
+  font-size: 0.78rem;
+  color: var(--bs-secondary-color);
+}
 .sr-artist-arrow {
   margin-left: auto;
   font-size: 0.75rem;
   color: var(--bs-secondary-color);
   opacity: 0;
-  transition: opacity .15s;
+  transition: opacity 0.15s;
   flex-shrink: 0;
 }
-.sr-artist-row:hover .sr-artist-arrow { opacity: 1; }
+.sr-artist-row:hover .sr-artist-arrow {
+  opacity: 1;
+}
 
 /* ---- Album: 1 solo risultato — hero ---- */
 .sr-single-wrap {
@@ -2744,70 +2758,609 @@ body:has(#sticky-player[style*="flex"]) {
   background: var(--bs-tertiary-bg);
   text-decoration: none;
   color: var(--bs-body-color);
-  transition: box-shadow .18s ease;
+  transition: box-shadow 0.18s ease;
 }
-.sr-single-wrap:hover { box-shadow: 0 8px 32px rgba(0,0,0,.13); color: var(--bs-body-color); }
-[data-bs-theme="dark"] .sr-single-wrap:hover { box-shadow: 0 8px 32px rgba(0,0,0,.5); }
+.sr-single-wrap:hover {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.13);
+  color: var(--bs-body-color);
+}
+[data-bs-theme="dark"] .sr-single-wrap:hover {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
 .sr-single-cover {
   width: 100%;
   aspect-ratio: 1/1;
   border-radius: 12px;
   overflow: hidden;
   background: var(--bs-secondary-bg);
-  box-shadow: 0 6px 24px rgba(0,0,0,.22);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
 }
-.sr-single-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.sr-single-info { display: flex; flex-direction: column; gap: 0.75rem; padding-top: 0.5rem; }
-.sr-single-title { font-size: 2rem; font-weight: 800; line-height: 1.1; letter-spacing: -.025em; }
-.sr-single-artist { font-size: 1.05rem; color: var(--bs-secondary-color); font-weight: 500; }
-.sr-single-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-top: 0.25rem; }
-.sr-single-year { font-size: 0.92rem; color: var(--bs-secondary-color); font-weight: 500; }
-.sr-single-cta { margin-top: 0.5rem; font-size: 0.85rem; color: #ffc107; font-weight: 600; display: flex; align-items: center; gap: 5px; }
+.sr-single-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.sr-single-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 0.5rem;
+}
+.sr-single-title {
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+}
+.sr-single-artist {
+  font-size: 1.05rem;
+  color: var(--bs-secondary-color);
+  font-weight: 500;
+}
+.sr-single-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.25rem;
+}
+.sr-single-year {
+  font-size: 0.92rem;
+  color: var(--bs-secondary-color);
+  font-weight: 500;
+}
+.sr-single-cta {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: #ffc107;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
 
 @media (max-width: 767px) {
-  .sr-single-wrap { grid-template-columns: 1fr; gap: 1.5rem; padding: 1.25rem; }
-  .sr-single-title { font-size: 1.5rem; }
+  .sr-single-wrap {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+    padding: 1.25rem;
+  }
+  .sr-single-title {
+    font-size: 1.5rem;
+  }
 }
 
 /* ---- Album: tabella con cover grandi ---- */
-.sr-table { width: 100%; border-collapse: collapse; }
+.sr-table {
+  width: 100%;
+  border-collapse: collapse;
+}
 .sr-table td {
   padding: 10px 14px;
   border-bottom: 1px solid var(--bs-border-color);
   vertical-align: middle;
   font-size: 0.9rem;
 }
-.sr-table tr:last-child td { border-bottom: none; }
-.sr-table tr:hover td { background: rgba(var(--bs-warning-rgb), 0.04); }
+.sr-table tr:last-child td {
+  border-bottom: none;
+}
+.sr-table tr:hover td {
+  background: rgba(var(--bs-warning-rgb), 0.04);
+}
 .sr-table thead th {
   font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: .07em;
+  letter-spacing: 0.07em;
   color: var(--bs-secondary-color);
   padding: 8px 14px 10px;
   border-bottom: 2px solid var(--bs-border-color);
 }
-.sr-cover-cell { width: 90px; }
+.sr-cover-cell {
+  width: 90px;
+}
 .sr-cover-thumb {
   width: 72px;
   height: 72px;
   object-fit: cover;
   border-radius: 6px;
   display: block;
-  box-shadow: 0 2px 8px rgba(0,0,0,.18);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
 }
 .sr-title-link {
   font-weight: 600;
   color: var(--bs-body-color);
   text-decoration: none;
-  transition: color .15s;
+  transition: color 0.15s;
 }
-.sr-title-link:hover { color: #ffc107; }
+.sr-title-link:hover {
+  color: #ffc107;
+}
 .sr-artist-link {
   color: var(--bs-secondary-color);
   text-decoration: none;
   font-size: 0.82rem;
-  transition: color .15s;
+  transition: color 0.15s;
 }
-.sr-artist-link:hover { color: var(--bs-body-color); }
+.sr-artist-link:hover {
+  color: var(--bs-body-color);
+}
+
+/* ============================================================
+   GRIZZLY DASHBOARD — Redesign.
+   ============================================================ */
+ 
+:root {
+  --grz-amber: #f59e0b;
+  --grz-amber-dim: #d97706;
+  --grz-amber-glow: rgba(245, 158, 11, 0.18);
+  --grz-amber-glow-s: rgba(245, 158, 11, 0.08);
+  --grz-surface-2: var(--bs-tertiary-bg);
+  --grz-surface-3: var(--bs-secondary-bg);
+  --grz-border: var(--bs-border-color);
+  --grz-text-1: var(--bs-body-color);
+  --grz-text-2: var(--bs-secondary-color);
+  --grz-radius: 10px;
+  --grz-radius-lg: 14px;
+  --grz-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.1);
+  --grz-shadow-hover: 0 8px 28px rgba(0, 0, 0, 0.15);
+}
+[data-bs-theme="dark"] {
+  --grz-shadow-md: 0 4px 20px rgba(0, 0, 0, 0.4);
+  --grz-shadow-hover: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+ 
+/* ── Hero ── */
+.grz-dash-hero {
+  margin-bottom: 1.75rem;
+}
+.grz-dash-hero__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--grz-amber);
+  margin-bottom: 0.3rem;
+}
+.grz-dash-hero__dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--grz-amber);
+  box-shadow: 0 0 0 3px var(--grz-amber-glow);
+}
+.grz-dash-hero__title {
+  font-size: clamp(1.5rem, 3vw, 2.1rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  color: var(--grz-text-1);
+  margin: 0 0 0.2rem;
+}
+/* Sottotitolo separato — non inline nel titolo */
+.grz-dash-hero__count {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--grz-text-2);
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+ 
+/* ── KPI strip — 6 card su riga fissa ── */
+.grz-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+  margin-bottom: 2rem;
+}
+@media (max-width: 1199.98px) {
+  .grz-kpi-strip {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+@media (max-width: 575.98px) {
+  .grz-kpi-strip {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+}
+ 
+.grz-kpi-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 14px 12px;
+  border-radius: var(--grz-radius);
+  background: var(--grz-surface-2);
+  border: 1px solid var(--grz-border);
+  overflow: hidden;
+  transition:
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+.grz-kpi-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 3px 0 0 3px;
+  background: var(--grz-amber);
+  opacity: 0.7;
+}
+.grz-kpi-card:hover {
+  box-shadow: var(--grz-shadow-md);
+  transform: translateY(-2px);
+}
+ 
+.grz-kpi-card--vinyl::before {
+  background: #f59e0b;
+}
+.grz-kpi-card--cd::before {
+  background: #38bdf8;
+}
+.grz-kpi-card--tape::before {
+  background: #4ade80;
+}
+.grz-kpi-card--digital::before {
+  background: #818cf8;
+}
+.grz-kpi-card--artist::before {
+  background: #a78bfa;
+}
+.grz-kpi-card--genre::before {
+  background: #f87171;
+}
+ 
+.grz-kpi-card__icon {
+  font-size: 1.1rem;
+  line-height: 1;
+  opacity: 0.55;
+  color: var(--grz-text-1);
+}
+.grz-kpi-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.grz-kpi-card__value {
+  font-size: 1.85rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--grz-text-1);
+}
+.grz-kpi-card__label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--grz-text-1);
+  line-height: 1.2;
+}
+.grz-kpi-card__sub {
+  font-size: 0.65rem;
+  color: var(--grz-text-2);
+}
+ 
+@media (max-width: 575.98px) {
+  .grz-kpi-card {
+    padding: 10px 10px 9px;
+  }
+  .grz-kpi-card__value {
+    font-size: 1.4rem;
+  }
+  .grz-kpi-card__label {
+    font-size: 0.7rem;
+  }
+  .grz-kpi-card__sub {
+    display: none;
+  }
+}
+ 
+/* ── Layout ── */
+.grz-dash-grid {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 991.98px) {
+  .grz-dash-grid {
+    grid-template-columns: 1fr;
+  }
+}
+ 
+/* ── Section header ── */
+.grz-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--grz-border);
+}
+.grz-section-header--panel {
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.55rem;
+}
+.grz-section-header__label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--grz-text-2);
+}
+.grz-section-header__label i {
+  color: var(--grz-amber);
+  font-size: 0.8rem;
+}
+.grz-section-header__link {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--grz-text-2);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: color 0.15s;
+}
+.grz-section-header__link:hover {
+  color: var(--grz-amber);
+}
+ 
+/* ── Album grid ── */
+.grz-album-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+@media (max-width: 767.98px) {
+  .grz-album-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+}
+@media (max-width: 479.98px) {
+  .grz-album-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+}
+/* La cella si estende per tutta l'altezza della riga */
+.grz-album-cell {
+  display: flex;
+}
+.grz-album-tile {
+  display: flex;
+  flex-direction: column;
+  text-decoration: none;
+  color: var(--grz-text-1);
+  border-radius: var(--grz-radius);
+  overflow: hidden;
+  background: var(--grz-surface-2);
+  border: 1px solid var(--grz-border);
+  width: 100%;
+  transition:
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+.grz-album-tile:hover {
+  box-shadow: var(--grz-shadow-hover);
+  transform: translateY(-3px);
+  color: var(--grz-text-1);
+}
+.grz-album-tile__cover {
+  position: relative;
+  aspect-ratio: 1/1;
+  overflow: hidden;
+  background: var(--grz-surface-3);
+}
+.grz-album-tile__cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+ 
+/* Overlay hover — sfondo scuro + icona freccia */
+.grz-album-tile__cover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  pointer-events: none;
+}
+.grz-album-tile__cover::before {
+  content: "\F4F4"; /* bi bi-play-fill */
+  font-family: "bootstrap-icons";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  color: #fff;
+  opacity: 0;
+  transform: scale(0.8);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+  pointer-events: none;
+}
+.grz-album-tile:hover .grz-album-tile__cover::after {
+  opacity: 1;
+}
+.grz-album-tile:hover .grz-album-tile__cover::before {
+  opacity: 1;
+  transform: scale(1);
+}
+ 
+/* Badge formato sulla cover — riusa .badge-format esistente */
+.grz-cover-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+ 
+.grz-album-tile__info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 9px 10px;
+  flex: 1; /* occupa tutto lo spazio rimanente sotto la cover */
+}
+.grz-album-tile__title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--grz-text-1);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  /* Altezza fissa = 2 righe sempre, indipendentemente dal contenuto */
+  height: calc(0.78rem * 1.25 * 2);
+}
+.grz-album-tile__artist {
+  font-size: 0.7rem;
+  color: var(--grz-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grz-album-tile__year {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--grz-amber-dim);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+ 
+/* ── Mostra altri ── */
+.grz-show-more {
+  text-align: center;
+  margin-top: 1rem;
+}
+.grz-btn-show-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--grz-border);
+  border-radius: 20px;
+  background: transparent;
+  color: var(--grz-text-2);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    color 0.15s,
+    background 0.15s;
+}
+.grz-btn-show-more:hover {
+  border-color: var(--grz-amber);
+  color: var(--grz-amber);
+  background: var(--grz-amber-glow-s);
+}
+ 
+/* ── Sidebar ── */
+.grz-dash-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.grz-dash-panel {
+  background: var(--grz-surface-2);
+  border: 1px solid var(--grz-border);
+  border-radius: var(--grz-radius-lg);
+  padding: 14px 16px;
+}
+ 
+/* ── Top artisti ── */
+.grz-top-artists {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.grz-top-artist-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--grz-border);
+}
+.grz-top-artist-row:last-child {
+  border-bottom: none;
+}
+.grz-top-artist-row__rank {
+  font-size: 0.68rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--grz-amber);
+  opacity: 0.7;
+  min-width: 16px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.grz-top-artist-row__name {
+  flex: 1;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--grz-text-1);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.15s;
+}
+.grz-top-artist-row__name:hover {
+  color: var(--grz-amber);
+}
+.grz-top-artist-row__count {
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  background: var(--grz-amber-glow);
+  color: var(--grz-amber);
+  padding: 2px 7px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.grz-top-artist-row:hover .grz-top-artist-row__count {
+  background: var(--grz-amber);
+  color: #1a0f00;
+}
+ 
+/* Badge Digital nel sistema badge-format esistente (dark mode) */
+[data-bs-theme="dark"] .badge-format.bg-primary {
+  background: rgba(99, 102, 241, 0.18) !important;
+  color: #a5b4fc !important;
+  border: 0.5px solid rgba(99, 102, 241, 0.35);
+}
+ 
+/* Spacer celle griglia — invisibili, completano l'ultima riga */
+.grz-album-spacer {
+  visibility: hidden;
+  pointer-events: none;
+  aspect-ratio: 1/1; /* stessa altezza delle tile reali */

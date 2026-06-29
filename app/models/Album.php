@@ -286,6 +286,7 @@ class Album
                 SUM(f.name = 'Vinile')       AS vinili,
                 SUM(f.name = 'CD')           AS cd,
                 SUM(f.name = 'Musicassetta') AS cassette,
+                SUM(f.name = 'Digital')      AS digital,
                 COUNT(DISTINCT a.artist_id)  AS artisti,
                 COUNT(DISTINCT a.genre_id)   AS generi
             FROM albums a

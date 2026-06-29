@@ -203,7 +203,7 @@ if ($albumTotalSec > 0) {
         <i class="bi bi-trash"></i>
       </button>
     </div>
-    
+
     <!-- Descrizione automatica / Note sull'album -->
     <div class="album-desc-block album-desc-block-sidebar mb-4" id="albumDescBlock"
       data-artist="<?= htmlspecialchars($album['artist_name'], ENT_QUOTES) ?>"
@@ -251,6 +251,11 @@ if ($albumTotalSec > 0) {
               <i class="bi bi-clock me-1"></i><?= $albumDurationStr ?>
             </span>
           <?php endif; ?>
+          <?php if (!empty($tracks)): ?>
+            <span class="ms-2 text-muted small">
+              · <?= count($tracks) ?> <?= count($tracks) === 1 ? 'traccia' : 'tracce' ?>
+            </span>
+          <?php endif; ?>
         </p>
       </div>
 
@@ -265,6 +270,17 @@ if ($albumTotalSec > 0) {
           <i class="bi bi-three-dots-vertical"></i>
         </button>
         <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="albumActionsMenu">
+          <?php if (!empty($playerTracks)): ?>
+            <li>
+              <button class="dropdown-item" type="button"
+                onclick="Player.load(window.__album)">
+                <i class="bi bi-play-fill me-2 text-warning"></i>Riproduci album
+              </button>
+            </li>
+            <li>
+              <hr class="dropdown-divider">
+            </li>
+          <?php endif; ?>
           <?php if (!empty($tracks)): ?>
             <li>
               <button class="dropdown-item" type="button"
@@ -303,7 +319,6 @@ if ($albumTotalSec > 0) {
       <div class="card shadow-sm">
         <div class="card-header fw-semibold">
           <i class="bi bi-music-note-list me-2"></i>Tracklist
-          <span class="badge bg-secondary ms-1"><?= count($tracks) ?> tracce</span>
         </div>
         <ul class="list-group list-group-flush" id="tracklistPlayer">
           <?php foreach ($tracks as $t): ?>
