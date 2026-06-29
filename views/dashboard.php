@@ -38,7 +38,7 @@ require BASE_PATH . '/views/layout/header.php';
     <span>Archivio attivo</span>
   </div>
   <h1 class="grz-dash-hero__title">La tua collezione</h1>
-  <p class="grz-dash-hero__count"><?= (int)($stats['total'] ?? 0) ?> dischi nella raccolta</p>
+  <p class="grz-dash-hero__count"><?= (int)($stats['total'] ?? 0) ?> dischi</p>
 </div>
 
 <!-- KPI -->
