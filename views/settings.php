@@ -135,11 +135,12 @@ require BASE_PATH . '/views/layout/header.php';
       Per rinnovare un singolo disco invece, usa l'icona <i class="bi bi-arrow-clockwise"></i> accanto a "Note sull'album" nella sua pagina di dettaglio.
     </p>
     <button class="btn btn-outline-warning" id="btnClearWikiCache">
-      <i class="bi bi-trash3 me-1"></i>Svuota cache Wikipedia
+      <i class="bi bi-trash3 me-1"></i>Svuota cache descrizioni
     </button>
     <span id="wikiCacheResult" class="small ms-2"></span>
   </div>
 </div>
+
 
 <!-- ============================================================
      Sezione: Migrazione file audio
