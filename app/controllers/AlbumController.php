@@ -294,6 +294,22 @@ class AlbumController
       $albumId = $this->albumModel->create($data);
     }
 
+    // Invalida la cache delle descrizioni Wikipedia: se artista/titolo
+    // sono cambiati (o se prima il disco non aveva ancora una scheda),
+    // forza una nuova ricerca alla prossima apertura della pagina invece
+    // di mostrare una descrizione vecchia/sbagliata o "non trovata".
+    $newArtist = $this->artistModel->getById($artistId)['name'] ?? '';
+    $newTitle  = $data['title'];
+    $this->invalidateWikiCache($newArtist, $newTitle);
+
+    if ($existing) {
+      $oldArtist = $this->artistModel->getById($existing['artist_id'])['name'] ?? '';
+      $oldTitle  = $existing['title'] ?? '';
+      if ($oldArtist !== $newArtist || $oldTitle !== $newTitle) {
+        $this->invalidateWikiCache($oldArtist, $oldTitle);
+      }
+    }
+
     // Salva tracklist
     $trackIds       = $_POST['track_id']       ?? [];
     $trackTitles    = $_POST['track_title']    ?? [];
@@ -545,7 +561,21 @@ class AlbumController
         exit;
       }
 
+      $cacheKey = strtolower($artist) . '|' . strtolower($album) . '|' . $lang;
+
+      $cached = $this->getWikiCache($cacheKey);
+      if ($cached !== null) {
+        echo json_encode($cached);
+        exit;
+      }
+
       $result = $this->fetchWikipediaDescription($artist, $album, $lang);
+
+      // Cache anche gli esiti negativi (description=null), ma con TTL più
+      // breve: così se l'album viene aggiunto su Wikipedia in seguito,
+      // dopo qualche giorno la ricerca viene ritentata automaticamente.
+      $ttl = !empty($result['description']) ? (60 * 60 * 24 * 30) : (60 * 60 * 24 * 3);
+      $this->setWikiCache($cacheKey, $result, $ttl);
 
       echo json_encode($result);
     } catch (Throwable $e) {
@@ -553,6 +583,73 @@ class AlbumController
     }
 
     exit;
+  }
+
+  // ----------------------------------------------------------
+  // Cache su file per le descrizioni Wikipedia.
+  // Evita di rifare ogni volta la ricerca lenta (più round-trip
+  // HTTP sequenziali) quando l'utente apre/ricarica la stessa
+  // scheda album.
+  // ----------------------------------------------------------
+  private function wikiCacheDir(): string
+  {
+    $dir = BASE_PATH . '/cache/wiki';
+    if (!is_dir($dir)) {
+      @mkdir($dir, 0775, true);
+    }
+    return $dir;
+  }
+
+  private function wikiCacheFile(string $key): string
+  {
+    return $this->wikiCacheDir() . '/' . sha1($key) . '.json';
+  }
+
+  private function getWikiCache(string $key): ?array
+  {
+    $file = $this->wikiCacheFile($key);
+    if (!is_file($file)) {
+      return null;
+    }
+
+    $raw  = @file_get_contents($file);
+    $data = $raw ? json_decode($raw, true) : null;
+
+    if (!is_array($data) || !isset($data['_expires'], $data['_payload'])) {
+      return null;
+    }
+
+    if (time() > $data['_expires']) {
+      return null; // scaduta
+    }
+
+    return $data['_payload'];
+  }
+
+  private function setWikiCache(string $key, array $payload, int $ttlSeconds): void
+  {
+    $file = $this->wikiCacheFile($key);
+    $data = [
+      '_expires' => time() + $ttlSeconds,
+      '_payload' => $payload,
+    ];
+    @file_put_contents($file, json_encode($data), LOCK_EX);
+  }
+
+  // Cancella le cache IT ed EN per una coppia artista/album, es. dopo
+  // il salvataggio del disco (titolo o artista modificati).
+  private function invalidateWikiCache(string $artist, string $album): void
+  {
+    if ($artist === '' || $album === '') {
+      return;
+    }
+    foreach (['it', 'en'] as $lang) {
+      $key  = strtolower($artist) . '|' . strtolower($album) . '|' . $lang;
+      $file = $this->wikiCacheFile($key);
+      if (is_file($file)) {
+        @unlink($file);
+      }
+    }
   }
 
   // ----------------------------------------------------------
@@ -565,7 +662,7 @@ class AlbumController
     $ctx = stream_context_create([
       'http' => [
         'header'        => "User-Agent: {$ua}\r\nAccept: application/json",
-        'timeout'       => 8,
+        'timeout'       => 4,
         'ignore_errors' => true,
       ],
     ]);
