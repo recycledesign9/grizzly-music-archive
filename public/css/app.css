@@ -2945,7 +2945,7 @@ body:has(#sticky-player[style*="flex"]) {
 /* Sottotitolo separato — non inline nel titolo */
 .grz-dash-hero__count {
   font-size: 0.82rem;
-  font-weight: 500;
+  font-weight: 700;
   color: var(--grz-text-2);
   margin: 0;
   letter-spacing: 0.01em;
@@ -3364,3 +3364,14 @@ body:has(#sticky-player[style*="flex"]) {
   visibility: hidden;
   pointer-events: none;
   aspect-ratio: 1/1; /* stessa altezza delle tile reali */
+}
+
+/* Pulsante "Rinnova" note album — rotazione icona durante il refresh */
+#albumDescRefresh i.spin {
+  animation: albumDescSpin 0.7s linear infinite;
+}
+
+@keyframes albumDescSpin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}

@@ -562,20 +562,30 @@ class AlbumController
       }
 
       $cacheKey = strtolower($artist) . '|' . strtolower($album) . '|' . $lang;
+      $debug    = isset($_GET['debug']) && $_GET['debug'] === '1';
+      // force=1: bypassa SOLO la lettura della cache (rifà la ricerca a fresco)
+      // ma scrive comunque il risultato nuovo in cache — usato dal pulsante
+      // "Rinnova" sulla scheda disco, per aggiornare un singolo album senza
+      // svuotare tutta la cache.
+      $force    = isset($_GET['force']) && $_GET['force'] === '1';
 
-      $cached = $this->getWikiCache($cacheKey);
-      if ($cached !== null) {
-        echo json_encode($cached);
-        exit;
+      if (!$debug && !$force) {
+        $cached = $this->getWikiCache($cacheKey);
+        if ($cached !== null) {
+          echo json_encode($cached);
+          exit;
+        }
       }
 
-      $result = $this->fetchWikipediaDescription($artist, $album, $lang);
+      $result = $this->fetchWikipediaDescription($artist, $album, $lang, $debug);
 
-      // Cache anche gli esiti negativi (description=null), ma con TTL più
-      // breve: così se l'album viene aggiunto su Wikipedia in seguito,
-      // dopo qualche giorno la ricerca viene ritentata automaticamente.
-      $ttl = !empty($result['description']) ? (60 * 60 * 24 * 30) : (60 * 60 * 24 * 3);
-      $this->setWikiCache($cacheKey, $result, $ttl);
+      if (!$debug) {
+        // Cache anche gli esiti negativi (description=null), ma con TTL più
+        // breve: così se l'album viene aggiunto su Wikipedia in seguito,
+        // dopo qualche giorno la ricerca viene ritentata automaticamente.
+        $ttl = !empty($result['description']) ? (60 * 60 * 24 * 30) : (60 * 60 * 24 * 3);
+        $this->setWikiCache($cacheKey, $result, $ttl);
+      }
 
       echo json_encode($result);
     } catch (Throwable $e) {
@@ -653,19 +663,63 @@ class AlbumController
   }
 
   // ----------------------------------------------------------
+  // Esegue una GET verso Wikipedia usando cURL invece di
+  // file_get_contents(): su stack PHP/OpenSSL datati (come MAMP
+  // con PHP 7.4 + OpenSSL 1.0.2o) file_get_contents fallisce in
+  // modo intermittente l'handshake TLS verso siti moderni, mentre
+  // cURL gestisce meglio le versioni TLS e i certificati. Ritorna
+  // [body, httpCode, error] — error è popolato solo se la
+  // richiesta fallisce a livello di connessione (non per HTTP 4xx/5xx,
+  // che vengono comunque restituiti come body+code).
+  // ----------------------------------------------------------
+  private function httpGetWiki(string $url, string $userAgent, int $timeoutSeconds = 4): array
+  {
+    if (!function_exists('curl_init')) {
+      // Fallback estremo se cURL non è disponibile (raro)
+      $ctx = stream_context_create([
+        'http' => [
+          'header'        => "User-Agent: {$userAgent}\r\nAccept: application/json",
+          'timeout'       => $timeoutSeconds,
+          'ignore_errors' => true,
+        ],
+      ]);
+      $body = @file_get_contents($url, false, $ctx);
+      return [$body === false ? null : $body, $body === false ? 0 : 200, $body === false ? 'file_get_contents failed (no curl available)' : ''];
+    }
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_HTTPHEADER     => ["User-Agent: {$userAgent}", 'Accept: application/json'],
+      CURLOPT_TIMEOUT        => $timeoutSeconds,
+      CURLOPT_CONNECTTIMEOUT => $timeoutSeconds,
+      CURLOPT_SSL_VERIFYPEER => true,
+      CURLOPT_SSL_VERIFYHOST => 2,
+      CURLOPT_FOLLOWLOCATION => true,
+      CURLOPT_MAXREDIRS      => 3,
+    ]);
+
+    $body  = curl_exec($ch);
+    $error = curl_error($ch);
+    $code  = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($body === false) {
+      return [null, $code, $error ?: 'curl_exec returned false'];
+    }
+
+    return [$body, $code, ''];
+  }
+
+  // ----------------------------------------------------------
   // Cerca su Wikipedia la pagina dell'album e ne estrae l'intro
   // Strategia: prova "Artista Album (album)" → "Artista Album"
   // ----------------------------------------------------------
-  private function fetchWikipediaDescription(string $artist, string $album, string $lang): array
+  private function fetchWikipediaDescription(string $artist, string $album, string $lang, bool $debug = false): array
   {
     $ua  = defined('APP_USER_AGENT') ? APP_USER_AGENT : 'GrizzlyMusicArchive/1.0';
-    $ctx = stream_context_create([
-      'http' => [
-        'header'        => "User-Agent: {$ua}\r\nAccept: application/json",
-        'timeout'       => 4,
-        'ignore_errors' => true,
-      ],
-    ]);
+
+    $debugLog = [];
 
     // Candidati da provare in ordine — i primi forzano la pagina "album"
     $candidates = [
@@ -704,8 +758,24 @@ class AlbumController
         . '?action=query&list=search&srsearch=' . urlencode($query)
         . '&srlimit=5&format=json&utf8=1';
 
-      $raw  = @file_get_contents($searchUrl, false, $ctx);
+      $raw  = null;
+      $data = null;
+      $httpCode = 0;
+      $curlError = '';
+      [$raw, $httpCode, $curlError] = $this->httpGetWiki($searchUrl, $ua);
       $data = $raw ? json_decode($raw, true) : null;
+
+      if ($debug) {
+        $debugLog[] = [
+          'step'        => 'search',
+          'query'       => $query,
+          'http_code'   => $httpCode,
+          'curl_error'  => $curlError,
+          'raw_length'  => $raw === null ? false : strlen($raw),
+          'json_valid'  => $data !== null,
+          'hits_found'  => count($data['query']['search'] ?? []),
+        ];
+      }
 
       $hits = $data['query']['search'] ?? [];
       if (empty($hits)) continue;
@@ -748,7 +818,8 @@ class AlbumController
           . '&titles=' . urlencode($pageTitle)
           . '&format=json&utf8=1';
 
-        $raw2  = @file_get_contents($extractUrl, false, $ctx);
+        $raw2  = null;
+        [$raw2, , ] = $this->httpGetWiki($extractUrl, $ua);
         $data2 = $raw2 ? json_decode($raw2, true) : null;
 
         $pages = $data2['query']['pages'] ?? [];
@@ -810,16 +881,20 @@ class AlbumController
         $text = preg_replace("/\n{3,}/", "\n\n", $extract);
         $text = trim($text);
 
-        return [
+        $out = [
           'description' => $text,
           'lang'        => $lang,
           'page_title'  => $pageTitle,
           'wiki_url'    => 'https://' . $lang . '.wikipedia.org/wiki/' . urlencode(str_replace(' ', '_', $pageTitle)),
         ];
+        if ($debug) $out['debug'] = $debugLog;
+        return $out;
       }
     }
 
-    return ['description' => null, 'lang' => $lang];
+    $out = ['description' => null, 'lang' => $lang];
+    if ($debug) $out['debug'] = $debugLog;
+    return $out;
   }
 
   private function apiCover(): void
