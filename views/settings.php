@@ -30,7 +30,7 @@ require BASE_PATH . '/views/layout/header.php';
 <!-- ============================================================
      Sezione: Percorso File Audio
 ============================================================ -->
-<div class="card border-0 shadow-sm mb-4">
+<div class="card border-1 shadow-sm mb-4">
   <div class="card-header bg-dark text-white">
     <i class="bi bi-folder2-open me-2"></i>
     <strong>Percorso file audio</strong>
@@ -122,9 +122,35 @@ require BASE_PATH . '/views/layout/header.php';
 </div>
 
 <!-- ============================================================
+     Sezione: Cache descrizioni Wikipedia
+============================================================ -->
+<div class="card border-1 shadow-sm mb-4">
+  <div class="card-header bg-dark text-white">
+    <i class="bi bi-journal-text me-2"></i>
+    <strong>Cache descrizioni Wikipedia</strong>
+  </div>
+  <div class="card-body">
+    <p class="text-muted small mb-3">
+      Le "Note sull'album" recuperate da Wikipedia vengono salvate in cache per
+      non rifare la ricerca ad ogni apertura della scheda disco (30 giorni se
+      trovata, 3 giorni se non trovata). Se hai appena aggiornato il codice di
+      ricerca, o se più dischi mostrano ingiustamente "nessuna descrizione
+      disponibile" nonostante la pagina Wikipedia esista, svuota qui tutta la
+      cache per forzare una nuova ricerca alla prossima apertura di ogni scheda.
+      Per rinnovare un singolo disco invece, usa l'icona <i class="bi bi-arrow-clockwise"></i>
+      accanto a "Note sull'album" nella sua pagina di dettaglio.
+    </p>
+    <button class="btn btn-outline-warning" id="btnClearWikiCache">
+      <i class="bi bi-trash3 me-1"></i>Svuota cache Wikipedia
+    </button>
+    <span id="wikiCacheResult" class="small ms-2"></span>
+  </div>
+</div>
+
+<!-- ============================================================
      Sezione: Migrazione file audio
 ============================================================ -->
-<div class="card border-0 shadow-sm mb-4">
+<div class="card border-1 shadow-sm mb-4">
   <div class="card-header bg-dark text-white">
     <i class="bi bi-arrow-left-right me-2"></i>
     <strong>Migra file audio</strong>
@@ -206,7 +232,7 @@ require BASE_PATH . '/views/layout/header.php';
 <!-- ============================================================
      Sezione: Cover (informativa — non configurabile)
 ============================================================ -->
-<div class="card border-0 shadow-sm mb-4 opacity-75">
+<div class="card border-1 shadow-sm mb-4 opacity-75">
   <div class="card-header bg-secondary text-white">
     <i class="bi bi-image me-2"></i>
     <strong>Percorso cover</strong>
@@ -226,7 +252,7 @@ require BASE_PATH . '/views/layout/header.php';
 <!-- ============================================================
      Sezione: Backup e migrazione archivio (export / import)
 ============================================================ -->
-<div class="card border-0 shadow-sm mb-4">
+<div class="card border-1 shadow-sm mb-4">
   <div class="card-header bg-dark text-white">
     <i class="bi bi-box-seam me-2"></i>
     <strong>Backup e migrazione archivio</strong>
@@ -734,6 +760,40 @@ require BASE_PATH . '/views/layout/header.php';
         escHtml(e.message) + '</div>';
     });
   }
+
+  // ── Svuota cache Wikipedia ──────────────────────────────────
+  document.getElementById('btnClearWikiCache').onclick = function () {
+    var btn    = this;
+    var result = document.getElementById('wikiCacheResult');
+
+    btn.disabled = true;
+    var originalHtml = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Svuotamento…';
+    result.textContent = '';
+
+    fetch(BASE_URL + '/index.php?route=settings/clear-wiki-cache', {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      btn.disabled  = false;
+      btn.innerHTML = originalHtml;
+      if (data.ok) {
+        result.className = 'small ms-2 text-success';
+        result.innerHTML = '<i class="bi bi-check-circle me-1"></i>' + escHtml(data.message);
+      } else {
+        result.className = 'small ms-2 text-danger';
+        result.innerHTML = '<i class="bi bi-x-circle me-1"></i>' + escHtml(data.error || 'Errore.');
+      }
+    })
+    .catch(function (e) {
+      btn.disabled  = false;
+      btn.innerHTML = originalHtml;
+      result.className = 'small ms-2 text-danger';
+      result.innerHTML = '<i class="bi bi-x-circle me-1"></i>' + escHtml(e.message);
+    });
+  };
 
   // ── Utils ────────────────────────────────────────────────────
   function escAttr(s) {

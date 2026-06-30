@@ -217,7 +217,7 @@ if ($albumTotalSec > 0) {
         <button type="button"
           class="btn btn-sm btn-outline-secondary py-0 px-1"
           id="albumDescRefresh"
-          title="Rinnova: rifà la ricerca su Wikipedia ignorando la cache salvata per questo disco">
+          title="Rinnova la ricerca su Wikipedia ignorando la cache salvata per questo disco">
           <i class="bi bi-arrow-clockwise"></i>
         </button>
       </div>

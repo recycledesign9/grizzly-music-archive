@@ -22,6 +22,9 @@ class SettingsController
             case 'import':
                 $this->import();
                 break;
+            case 'clear-wiki-cache':
+                $this->clearWikiCache();
+                break;
             case 'index':
             default:
                 $this->index();
@@ -144,6 +147,49 @@ class SettingsController
         }
 
         header('Location: ' . BASE_URL . '/index.php?route=settings');
+        exit;
+    }
+
+    // ----------------------------------------------------------
+    // Svuota la cache delle descrizioni Wikipedia (cache/wiki/*).
+    // POST /index.php?route=settings/clear-wiki-cache
+    // Usata dal pulsante "Svuota cache Wikipedia" nelle Impostazioni,
+    // utile dopo modifiche al codice di ricerca o quando un disco
+    // mostra ingiustamente "nessuna descrizione disponibile" per via
+    // di un esito negativo cachato in precedenza (TTL fino a 3 giorni).
+    // ----------------------------------------------------------
+    private function clearWikiCache(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            echo json_encode(['ok' => false, 'error' => 'Metodo non consentito.']);
+            exit;
+        }
+
+        $dir = BASE_PATH . '/cache/wiki';
+
+        if (!is_dir($dir)) {
+            echo json_encode(['ok' => true, 'deleted' => 0, 'message' => 'Nessuna cache da svuotare.']);
+            exit;
+        }
+
+        $files   = glob($dir . '/*.json') ?: [];
+        $deleted = 0;
+
+        foreach ($files as $file) {
+            if (@unlink($file)) {
+                $deleted++;
+            }
+        }
+
+        echo json_encode([
+            'ok'      => true,
+            'deleted' => $deleted,
+            'message' => $deleted > 0
+                ? "Cache svuotata: {$deleted} file rimossi."
+                : 'La cache era già vuota.',
+        ]);
         exit;
     }
 }
