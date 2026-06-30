@@ -615,10 +615,25 @@ class AlbumMetadataService
 
             if ($title === '') continue;
 
-            // Salta tracce con parole da evitare
-            foreach ($skipWords as $word) {
-                if (strpos($titleLower, $word) !== false) {
-                    continue 2;
+            // Salta tracce SOLO se le parole-marcatore compaiono dentro
+            // un'annotazione tra parentesi/quadre o dopo un trattino
+            // finale, es. "Song (Alternate Take)", "Song (Remix)",
+            // "Song - Studio Jam". MAI sull'intero titolo: altrimenti
+            // un titolo come "Love Takes Miles" verrebbe scartato solo
+            // perché contiene "take" dentro "takes".
+            $annotation = '';
+            if (preg_match('/[\(\[]([^)\]]*)[\)\]]/', $titleLower, $m)) {
+                $annotation .= ' ' . $m[1];
+            }
+            if (preg_match('/\s-\s(.+)$/', $titleLower, $m2)) {
+                $annotation .= ' ' . $m2[1];
+            }
+
+            if ($annotation !== '') {
+                foreach ($skipWords as $word) {
+                    if (strpos($annotation, $word) !== false) {
+                        continue 2;
+                    }
                 }
             }
 

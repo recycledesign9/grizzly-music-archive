@@ -781,14 +781,28 @@ class AlbumController
         if ($reject) continue;
 
         // A questo punto NON è una bio né un singolo/brano.
-        // Accettiamo la pagina se nell'intero estratto compare
-        // la parola "album" (conferma debole ma sufficiente, dato che
-        // singoli e bio sono già stati esclusi sopra).
-        // Se "album" non c'è proprio, proviamo comunque il candidato
-        // successivo solo quando l'intro è cortissimo/ambiguo.
+        // Accettiamo la pagina se nell'intero estratto compare una parola
+        // che indica un disco: "album"/"disco"/"ep " oppure "LP" (usato
+        // spesso da Wikipedia IT per dischi più datati, es. "è il settimo
+        // LP della band"). "lp" va cercato come parola intera per evitare
+        // falsi positivi (es. "help", "alps").
+        // Se nessuna di queste è presente, proviamo il candidato successivo.
         if (strpos($extractLower, 'album') === false
             && strpos($extractLower, 'disco') === false
-            && strpos($extractLower, 'ep ') === false) {
+            && strpos($extractLower, 'ep ') === false
+            && !preg_match('/\blp\b/', $extractLower)) {
+          continue;
+        }
+
+        // CONTROLLO ANTI-OMONIMIA: quando il titolo dell'album coincide
+        // con un termine generico (es. "Heavy Metal" = nome di un genere
+        // musicale), la pagina sbagliata può comunque superare i controlli
+        // sopra (nessuna bio/singolo, contiene "album" da qualche parte).
+        // Una vera pagina-album cita SEMPRE il nome dell'artista
+        // nell'introduzione ("è il primo album in studio di X" /
+        // "is the debut album by X"): se l'artista non compare affatto
+        // nell'estratto, scartiamo e proviamo il prossimo candidato.
+        if (stripos($extract, $artist) === false) {
           continue;
         }
 
