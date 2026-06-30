@@ -209,17 +209,9 @@ if ($albumTotalSec > 0) {
       data-artist="<?= htmlspecialchars($album['artist_name'], ENT_QUOTES) ?>"
       data-album="<?= htmlspecialchars($album['title'], ENT_QUOTES) ?>">
 
-      <div class="album-desc-header d-flex align-items-center justify-content-between">
-        <span>
-          <i class="bi bi-journal-text album-desc-icon"></i>
-          <span class="album-desc-label">Note sull'album</span>
-        </span>
-        <button type="button"
-          class="btn btn-sm btn-outline-secondary py-0 px-1"
-          id="albumDescRefresh"
-          title="Rinnova la ricerca su Wikipedia ignorando la cache salvata per questo disco">
-          <i class="bi bi-arrow-clockwise"></i>
-        </button>
+      <div class="album-desc-header">
+        <i class="bi bi-journal-text album-desc-icon"></i>
+        <span class="album-desc-label">Note sull'album</span>
       </div>
 
       <div class="album-desc-loading" id="albumDescLoading">
@@ -261,7 +253,7 @@ if ($albumTotalSec > 0) {
           <?php endif; ?>
           <?php if (!empty($tracks)): ?>
             <span class="ms-2 text-muted small">
-              · <?= count($tracks) ?> <?= count($tracks) === 1 ? 'traccia' : 'tracce' ?>
+              <i class="bi bi-music-note-beamed me-1"></i><?= count($tracks) ?> <?= count($tracks) === 1 ? 'traccia' : 'tracce' ?>
             </span>
           <?php endif; ?>
         </p>
@@ -586,7 +578,6 @@ if ($albumTotalSec > 0) {
     var footer = document.getElementById('albumDescFooter');
     var empty = document.getElementById('albumDescEmpty');
     var toggle = document.getElementById('albumDescToggle');
-    var refreshBtn = document.getElementById('albumDescRefresh');
 
     if (!block) return;
 
@@ -599,13 +590,11 @@ if ($albumTotalSec > 0) {
     var expanded = false;
     var fullText = '';
 
-    function buildUrl(lang, force) {
-      var url = baseUrl + '/index.php?route=albums/api-description' +
+    function buildUrl(lang) {
+      return baseUrl + '/index.php?route=albums/api-description' +
         '&artist=' + encodeURIComponent(artist) +
         '&album=' + encodeURIComponent(album) +
         '&lang=' + lang;
-      if (force) url += '&force=1';
-      return url;
     }
 
     function showDescription(d, lang) {
@@ -650,8 +639,8 @@ if ($albumTotalSec > 0) {
       empty.style.display = '';
     }
 
-    function fetchDescription(lang, fallbackLang, force) {
-      fetch(buildUrl(lang, force), {
+    function fetchDescription(lang, fallbackLang) {
+      fetch(buildUrl(lang), {
           headers: {
             'X-Requested-With': 'XMLHttpRequest'
           }
@@ -663,14 +652,14 @@ if ($albumTotalSec > 0) {
           if (d.description) {
             showDescription(d, lang);
           } else if (fallbackLang) {
-            fetchDescription(fallbackLang, null, force);
+            fetchDescription(fallbackLang, null);
           } else {
             showEmpty();
           }
         })
         .catch(function() {
           if (fallbackLang) {
-            fetchDescription(fallbackLang, null, force);
+            fetchDescription(fallbackLang, null);
           } else {
             showEmpty();
           }
@@ -690,30 +679,8 @@ if ($albumTotalSec > 0) {
       });
     }
 
-    if (refreshBtn) {
-      refreshBtn.addEventListener('click', function() {
-        if (refreshBtn.disabled) return;
-        refreshBtn.disabled = true;
-        refreshBtn.querySelector('i').classList.add('spin');
-
-        body.style.display = 'none';
-        empty.style.display = 'none';
-        loading.style.display = '';
-
-        fetchDescription('it', 'en', true);
-
-        // Lo spinner si ferma quando showDescription/showEmpty nascondono
-        // "loading" — qui basta riattivare il pulsante con un piccolo delay
-        // di sicurezza nel caso la richiesta sia molto rapida.
-        setTimeout(function() {
-          refreshBtn.disabled = false;
-          refreshBtn.querySelector('i').classList.remove('spin');
-        }, 600);
-      });
-    }
-
     if (artist && album) {
-      fetchDescription('it', 'en', false);
+      fetchDescription('it', 'en');
     } else {
       showEmpty();
     }
