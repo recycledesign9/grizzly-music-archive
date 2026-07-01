@@ -217,7 +217,7 @@ if ($albumTotalSec > 0) {
         <button type="button"
           class="btn btn-sm btn-outline-secondary py-0 px-1"
           id="albumDescRefresh"
-          title="Rinnova: rifà la ricerca ignorando la cache salvata per questo disco">
+          title="Forza una nuova ricerca, ignorando la cache salvata per questo disco">
           <i class="bi bi-arrow-clockwise"></i>
         </button>
       </div>
@@ -300,6 +300,11 @@ if ($albumTotalSec > 0) {
               <button class="dropdown-item" type="button"
                 data-bs-toggle="modal" data-bs-target="#addToPlaylistModal">
                 <i class="bi bi-collection-play me-2 text-success"></i>Aggiungi a playlist
+              </button>
+            </li>
+            <li>
+              <button class="dropdown-item" type="button" id="yt-play-all">
+                <i class="bi bi-youtube me-2 text-danger"></i>Riproduci tutti da YouTube
               </button>
             </li>
             <li>
