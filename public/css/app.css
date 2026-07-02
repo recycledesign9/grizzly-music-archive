@@ -3558,6 +3558,25 @@ body:has(#sticky-player[style*="flex"]) {
   flex: 1;
 }
 
+/* Scrollbar coda — sottile e scura (Windows mostra quella di default) */
+.qp-list {
+  scrollbar-width: thin;                              /* Firefox + Chromium 121+ */
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+.qp-list::-webkit-scrollbar {                         /* Chromium/Safari legacy */
+  width: 8px;
+}
+.qp-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.qp-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
+.qp-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
 .qp-item {
   display: flex;
   align-items: center;
