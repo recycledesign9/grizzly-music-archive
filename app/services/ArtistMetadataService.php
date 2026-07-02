@@ -7,6 +7,8 @@
  * l'ITALIANO. Pipeline:
  *
  *   1) MusicBrainz  -> match affidabile (score>=85) + relation Wikidata
+ *                      (con disambiguazione omonimi: tra i candidati vince
+ *                      chi ha a catalogo almeno un album dell'archivio locale)
  *   2) Wikidata     -> titolo pagina Wikipedia IT + nazionalita + immagine P18
  *   3) Wikipedia IT -> bio italiana COMPLETA (intro) + immagine
  *   4) [fallback]   -> Wikipedia EN
@@ -30,7 +32,16 @@ class ArtistMetadataService
     /** Lunghezza massima bio salvata (caratteri) per non esagerare */
     private const BIO_MAX_CHARS = 2200;
 
-    public function fetchByName(string $name): array
+    /**
+     * @param string $name              Nome artista da cercare
+     * @param array  $localAlbumTitles  Titoli degli album di questo artista
+     *                                  presenti nell'archivio locale. Usati per
+     *                                  disambiguare artisti omonimi su MusicBrainz
+     *                                  (es. "Beck" musicista vs Rufus Beck attore).
+     *                                  Con array vuoto il comportamento è identico
+     *                                  a prima (nessuna verifica).
+     */
+    public function fetchByName(string $name, array $localAlbumTitles = []): array
     {
         $result = $this->emptyResult();
         $name   = trim($name);
@@ -39,7 +50,7 @@ class ArtistMetadataService
         }
 
         // ---------- 1) MUSICBRAINZ : match + metadati ----------
-        $mb = $this->searchMusicBrainzArtist($name);
+        $mb = $this->searchMusicBrainzArtist($name, $localAlbumTitles);
 
         $wikidataId = '';
         if (!empty($mb)) {
@@ -127,7 +138,7 @@ class ArtistMetadataService
     // MUSICBRAINZ
     // ============================================================
 
-    private function searchMusicBrainzArtist(string $name): array
+    private function searchMusicBrainzArtist(string $name, array $localAlbumTitles = []): array
     {
         $url = 'https://musicbrainz.org/ws/2/artist/'
             . '?query=' . urlencode('artist:"' . $name . '"')
@@ -140,16 +151,51 @@ class ArtistMetadataService
             return [];
         }
 
-        $best = null;
+        // Raccoglie TUTTI i candidati sopra soglia (non solo il primo):
+        // per nomi ambigui ("Beck", "Bush", "Genesis"...) MusicBrainz può
+        // restituire più artisti omonimi con score alto e l'ordinamento
+        // del motore di ricerca non garantisce che il primo sia quello giusto.
+        $candidates = [];
         foreach ($data['artists'] as $a) {
             $score = (int) ($a['score'] ?? 0);
             if ($score >= self::MB_MIN_SCORE) {
-                $best = $a;
-                break;
+                $candidates[] = $a;
             }
         }
-        if ($best === null) {
+        if (empty($candidates)) {
             return [];
+        }
+
+        // Disambiguazione: se c'è più di un candidato e conosciamo gli album
+        // locali dell'artista, vince il primo candidato che ha a catalogo
+        // (release-group MusicBrainz) almeno uno di quegli album.
+        $best = null;
+        if (count($candidates) > 1 && !empty($localAlbumTitles)) {
+            $normLocal = [];
+            foreach ($localAlbumTitles as $t) {
+                $n = $this->normalizeTitleForMatch((string) $t);
+                if ($n !== '') {
+                    $normLocal[] = $n;
+                }
+            }
+            if (!empty($normLocal)) {
+                foreach ($candidates as $a) {
+                    if (empty($a['id'])) {
+                        continue;
+                    }
+                    if ($this->artistOwnsLocalAlbum($a['id'], $normLocal)) {
+                        $best = $a;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Fallback: comportamento storico (primo candidato sopra soglia).
+        // Copre candidato unico, archivio senza album verificabili su MB,
+        // o nessun match nella verifica.
+        if ($best === null) {
+            $best = $candidates[0];
         }
 
         if (!empty($best['id'])) {
@@ -164,6 +210,46 @@ class ArtistMetadataService
         }
 
         return $best;
+    }
+
+    /**
+     * Verifica se l'artista MusicBrainz possiede almeno uno degli album
+     * locali (confronto su titoli normalizzati dei release-group).
+     * Costa una richiesta MB (throttled) per candidato verificato.
+     *
+     * @param string   $mbid       MBID artista candidato
+     * @param string[] $normLocal  Titoli locali già normalizzati
+     */
+    private function artistOwnsLocalAlbum(string $mbid, array $normLocal): bool
+    {
+        $url = 'https://musicbrainz.org/ws/2/release-group'
+            . '?artist=' . urlencode($mbid)
+            . '&type=album&limit=100&fmt=json';
+
+        $data = $this->httpGetJson($url);
+        usleep(self::MB_THROTTLE_US);
+
+        foreach ($data['release-groups'] ?? [] as $rg) {
+            $t = $this->normalizeTitleForMatch((string) ($rg['title'] ?? ''));
+            if ($t !== '' && in_array($t, $normLocal, true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Normalizza un titolo album per il confronto: minuscolo, senza
+     * annotazioni tra parentesi (deluxe, remaster...), senza punteggiatura,
+     * spazi compattati. Stessa filosofia del matching Wikipedia degli album.
+     */
+    private function normalizeTitleForMatch(string $t): string
+    {
+        $t = mb_strtolower(trim($t));
+        $t = preg_replace('/\s*[\(\[][^\)\]]*[\)\]]\s*/u', ' ', $t);
+        $t = preg_replace('/[^\p{L}\p{N}\s]/u', '', $t);
+        $t = preg_replace('/\s+/u', ' ', $t);
+        return trim($t);
     }
 
     private function extractWikidataId(array $relations): string

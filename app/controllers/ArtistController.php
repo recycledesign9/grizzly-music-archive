@@ -102,7 +102,11 @@ class ArtistController
       require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
       $service = new ArtistMetadataService();
 
-      $meta = $service->fetchByName($artist['name']);
+      // Titoli degli album locali dell'artista: usati dal service per
+      // disambiguare artisti omonimi su MusicBrainz (es. "Beck").
+      $localTitles = array_column($this->artistModel->getAlbums($id), 'title');
+
+      $meta = $service->fetchByName($artist['name'], $localTitles);
 
       // Download immagine in locale (best-effort)
       if (!empty($meta['image_url'])) {
