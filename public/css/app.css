@@ -789,7 +789,9 @@ body:has(#sticky-player[style*="flex"]) {
   background: transparent;
   color: #aaa;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 #yt-queue-controls button:hover {
   background: rgba(255, 255, 255, 0.1);
@@ -891,7 +893,9 @@ body:has(#sticky-player[style*="flex"]) {
   color: #aaa;
   flex-shrink: 0;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 #yt-lightbox-minimize:hover {
   background: rgba(255, 255, 255, 0.1);
@@ -3000,7 +3004,7 @@ body:has(#sticky-player[style*="flex"]) {
 /* ============================================================
    GRIZZLY DASHBOARD — Redesign.
    ============================================================ */
- 
+
 :root {
   --grz-amber: #f59e0b;
   --grz-amber-dim: #d97706;
@@ -3020,7 +3024,7 @@ body:has(#sticky-player[style*="flex"]) {
   --grz-shadow-md: 0 4px 20px rgba(0, 0, 0, 0.4);
   --grz-shadow-hover: 0 8px 32px rgba(0, 0, 0, 0.6);
 }
- 
+
 /* ── Hero ── */
 .grz-dash-hero {
   margin-bottom: 1.75rem;
@@ -3060,7 +3064,7 @@ body:has(#sticky-player[style*="flex"]) {
   margin: 0;
   letter-spacing: 0.01em;
 }
- 
+
 /* ── KPI strip — 6 card su riga fissa ── */
 .grz-kpi-strip {
   display: grid;
@@ -3079,7 +3083,7 @@ body:has(#sticky-player[style*="flex"]) {
     gap: 8px;
   }
 }
- 
+
 .grz-kpi-card {
   position: relative;
   display: flex;
@@ -3109,7 +3113,7 @@ body:has(#sticky-player[style*="flex"]) {
   box-shadow: var(--grz-shadow-md);
   transform: translateY(-2px);
 }
- 
+
 .grz-kpi-card--vinyl::before {
   background: #f59e0b;
 }
@@ -3128,7 +3132,7 @@ body:has(#sticky-player[style*="flex"]) {
 .grz-kpi-card--genre::before {
   background: #f87171;
 }
- 
+
 .grz-kpi-card__icon {
   font-size: 1.1rem;
   line-height: 1;
@@ -3158,7 +3162,7 @@ body:has(#sticky-player[style*="flex"]) {
   font-size: 0.65rem;
   color: var(--grz-text-2);
 }
- 
+
 @media (max-width: 575.98px) {
   .grz-kpi-card {
     padding: 10px 10px 9px;
@@ -3173,7 +3177,7 @@ body:has(#sticky-player[style*="flex"]) {
     display: none;
   }
 }
- 
+
 /* ── Layout ── */
 .grz-dash-grid {
   display: grid;
@@ -3186,7 +3190,7 @@ body:has(#sticky-player[style*="flex"]) {
     grid-template-columns: 1fr;
   }
 }
- 
+
 /* ── Section header ── */
 .grz-section-header {
   display: flex;
@@ -3227,7 +3231,7 @@ body:has(#sticky-player[style*="flex"]) {
 .grz-section-header__link:hover {
   color: var(--grz-amber);
 }
- 
+
 /* ── Album grid ── */
 .grz-album-grid {
   display: grid;
@@ -3281,7 +3285,7 @@ body:has(#sticky-player[style*="flex"]) {
   object-fit: cover;
   display: block;
 }
- 
+
 /* Overlay hover — sfondo scuro + icona freccia */
 .grz-album-tile__cover::after {
   content: "";
@@ -3317,7 +3321,7 @@ body:has(#sticky-player[style*="flex"]) {
   opacity: 1;
   transform: scale(1);
 }
- 
+
 /* Badge formato sulla cover — riusa .badge-format esistente */
 .grz-cover-badge {
   position: absolute;
@@ -3327,7 +3331,7 @@ body:has(#sticky-player[style*="flex"]) {
   -webkit-backdrop-filter: blur(4px);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
- 
+
 .grz-album-tile__info {
   display: flex;
   flex-direction: column;
@@ -3362,7 +3366,7 @@ body:has(#sticky-player[style*="flex"]) {
   font-variant-numeric: tabular-nums;
   margin-top: 2px;
 }
- 
+
 /* ── Mostra altri ── */
 .grz-show-more {
   text-align: center;
@@ -3392,7 +3396,7 @@ body:has(#sticky-player[style*="flex"]) {
   color: var(--grz-amber);
   background: var(--grz-amber-glow-s);
 }
- 
+
 /* ── Sidebar ── */
 .grz-dash-sidebar {
   display: flex;
@@ -3405,7 +3409,7 @@ body:has(#sticky-player[style*="flex"]) {
   border-radius: var(--grz-radius-lg);
   padding: 14px 16px;
 }
- 
+
 /* ── Top artisti ── */
 .grz-top-artists {
   list-style: none;
@@ -3461,14 +3465,14 @@ body:has(#sticky-player[style*="flex"]) {
   background: var(--grz-amber);
   color: #1a0f00;
 }
- 
+
 /* Badge Digital nel sistema badge-format esistente (dark mode) */
 [data-bs-theme="dark"] .badge-format.bg-primary {
   background: rgba(99, 102, 241, 0.18) !important;
   color: #a5b4fc !important;
   border: 0.5px solid rgba(99, 102, 241, 0.35);
 }
- 
+
 /* Spacer celle griglia — invisibili, completano l'ultima riga */
 .grz-album-spacer {
   visibility: hidden;
@@ -3482,10 +3486,13 @@ body:has(#sticky-player[style*="flex"]) {
 }
 
 @keyframes albumDescSpin {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
-
 
 /* ===== QUEUE PANEL — coda di riproduzione player nativo ===== */
 .qp-panel {
@@ -3543,7 +3550,9 @@ body:has(#sticky-player[style*="flex"]) {
   font-size: 12px;
   cursor: pointer;
   border-radius: 6px;
-  transition: color 0.15s, background 0.15s;
+  transition:
+    color 0.15s,
+    background 0.15s;
 }
 .qp-close:hover {
   color: #fff;
@@ -3560,10 +3569,11 @@ body:has(#sticky-player[style*="flex"]) {
 
 /* Scrollbar coda — sottile e scura (Windows mostra quella di default) */
 .qp-list {
-  scrollbar-width: thin;                              /* Firefox + Chromium 121+ */
+  scrollbar-width: thin; /* Firefox + Chromium 121+ */
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
-.qp-list::-webkit-scrollbar {                         /* Chromium/Safari legacy */
+.qp-list::-webkit-scrollbar {
+  /* Chromium/Safari legacy */
   width: 8px;
 }
 .qp-list::-webkit-scrollbar-track {
@@ -3620,18 +3630,38 @@ body:has(#sticky-player[style*="flex"]) {
   flex-shrink: 0;
 }
 
-.qp-item-title {
+/* Wrapper titolo + artista (due righe nelle playlist, una negli album) */
+.qp-meta {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.qp-item-title {
   font-size: 12.5px;
   color: rgba(255, 255, 255, 0.85);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.3;
 }
 .qp-item.qp-current .qp-item-title {
   color: #ffc107;
   font-weight: 600;
+}
+
+.qp-item-artist {
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.42);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+.qp-item.qp-current .qp-item-artist {
+  color: rgba(255, 193, 7, 0.65);
 }
 
 .qp-remove {
@@ -3648,7 +3678,10 @@ body:has(#sticky-player[style*="flex"]) {
   border-radius: 6px;
   opacity: 0;
   flex-shrink: 0;
-  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  transition:
+    opacity 0.15s,
+    color 0.15s,
+    background 0.15s;
 }
 .qp-item:hover .qp-remove {
   opacity: 1;

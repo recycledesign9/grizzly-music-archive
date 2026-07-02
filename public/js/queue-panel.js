@@ -102,11 +102,24 @@
       }
       li.appendChild(pos);
 
-      // Titolo
+      // Titolo + artista (l'artista esiste solo nelle tracce playlist;
+      // le tracce album non hanno il campo e restano su una riga sola)
+      const meta = document.createElement('span');
+      meta.className = 'qp-meta';
+
       const title = document.createElement('span');
       title.className = 'qp-item-title';
       title.textContent = t.title || '—';
-      li.appendChild(title);
+      meta.appendChild(title);
+
+      if (t.artist) {
+        const artist = document.createElement('span');
+        artist.className = 'qp-item-artist';
+        artist.textContent = t.artist;
+        meta.appendChild(artist);
+      }
+
+      li.appendChild(meta);
 
       // Rimozione — mai sulla traccia corrente
       if (i !== cur) {
