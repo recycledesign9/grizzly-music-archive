@@ -21,6 +21,7 @@
     <button class="sp-btn sp-btn-main" id="sp-play-pause" title="Play"><i class="bi bi-play-fill"></i></button>
     <button class="sp-btn" id="sp-next" title="Successiva"><i class="bi bi-skip-forward-fill"></i></button>
     <button class="sp-btn" id="sp-stop" title="Stop"><i class="bi bi-stop-fill"></i></button>
+    <button class="sp-btn" id="sp-queue" title="Coda di riproduzione"><i class="bi bi-music-note-list"></i></button>
     <!-- VOLUME  -->
     <div class="sp-volume-wrap">
       <button class="sp-btn sp-btn-vol" id="sp-mute" title="Muto"><i class="bi bi-volume-up-fill"></i></button>
@@ -41,6 +42,7 @@
 <script src="<?= BASE_URL ?>/public/js/app.js"></script>
 <script src="<?= BASE_URL ?>/public/js/youtube-player.js"></script>
 <script src="<?= BASE_URL ?>/public/js/playlist-player.js"></script>
+<script src="<?= BASE_URL ?>/public/js/queue-panel.js"></script>
 </body>
 
 </html>

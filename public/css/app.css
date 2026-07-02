@@ -3485,3 +3485,171 @@ body:has(#sticky-player[style*="flex"]) {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
+
+
+/* ===== QUEUE PANEL — coda di riproduzione player nativo ===== */
+.qp-panel {
+  position: fixed;
+  right: 18px;
+  bottom: 84px; /* 72px sticky player + margine */
+  z-index: 1049;
+  width: 340px;
+  max-height: min(55vh, 480px);
+  display: none;
+  flex-direction: column;
+  background: rgba(20, 20, 20, 0.96);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+.qp-panel.is-open {
+  display: flex;
+}
+
+.qp-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+.qp-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qp-count {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.42);
+  white-space: nowrap;
+}
+.qp-close {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: color 0.15s, background 0.15s;
+}
+.qp-close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.qp-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.qp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+  user-select: none;
+}
+.qp-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.qp-item.qp-current {
+  background: rgba(255, 193, 7, 0.08);
+  cursor: default;
+}
+.qp-item.qp-unavailable {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.qp-handle {
+  color: rgba(255, 255, 255, 0.25);
+  cursor: grab;
+  flex-shrink: 0;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+}
+.qp-handle:active {
+  cursor: grabbing;
+}
+
+.qp-pos {
+  min-width: 22px;
+  text-align: center;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.42);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.qp-item-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.qp-item.qp-current .qp-item-title {
+  color: #ffc107;
+  font-weight: 600;
+}
+
+.qp-remove {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 6px;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.qp-item:hover .qp-remove {
+  opacity: 1;
+}
+.qp-remove:hover {
+  color: #fff;
+  background: rgba(220, 53, 69, 0.35);
+}
+
+/* Ghost durante il drag SortableJS */
+.qp-item.qp-ghost {
+  opacity: 0.3;
+  background: rgba(255, 193, 7, 0.12);
+}
+
+/* Mobile: pannello a tutta larghezza */
+@media (max-width: 576px) {
+  .qp-panel {
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
+}

@@ -137,6 +137,12 @@
     if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.BUFFERING) {
       showSpinner(false);
     }
+    // Regola unica speculare di mutua esclusione: qualsiasi avvio del video
+    // (loadVideoById o play interno all'iframe) mette in pausa l'audio nativo.
+    // Copre anche la ripresa manuale dai controlli dentro l'iframe YouTube.
+    if (e.data === YT.PlayerState.PLAYING) {
+      pauseAudioIfPlaying();
+    }
     // Fine traccia → avanza (solo in modalità coda)
     if (e.data === YT.PlayerState.ENDED) {
       if (isQueueMode) {

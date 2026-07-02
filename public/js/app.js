@@ -62,6 +62,12 @@ const Player = (function () {
     panel.style.display = 'flex';
   }
 
+  // Notifica ai moduli esterni (es. queue-panel.js) che lo stato del player
+  // è cambiato: traccia corrente, playlist o reset. Nessun accoppiamento diretto.
+  function notifyChange() {
+    document.dispatchEvent(new CustomEvent('player:changed'));
+  }
+
   function resetPlayerState(reason) {
     // reason: 'stopped' | 'completed' | 'no-playable-track'
     panel.style.display = 'none';
@@ -136,6 +142,8 @@ const Player = (function () {
     if (typeof window.__syncPlaylistListUI === 'function') {
       window.__syncPlaylistListUI();
     }
+
+    notifyChange();
   }
 
   function hide() {
@@ -219,6 +227,8 @@ const Player = (function () {
         if (btn) { btn.innerHTML = '<i class="bi bi-play-fill"></i>'; btn.title = 'Ascolta'; }
       }
     });
+
+    notifyChange();
   }
 
   function setPlaying(playing) {
@@ -301,10 +311,9 @@ const Player = (function () {
     audio.load();
     safePlay();
 
-    // Ferma eventuale video YouTube aperto
-    if (window.YTPlayer && typeof window.YTPlayer.stopVideo === 'function') {
-      window.YTPlayer.stopVideo();
-    }
+    // Nota: lo stop del player YouTube non è più chiamato qui.
+    // È gestito dalla regola unica nel listener 'play' dell'elemento audio,
+    // che scatta quando safePlay() va effettivamente in riproduzione.
 
     updateUI();
     show();
@@ -326,7 +335,16 @@ const Player = (function () {
   }
 
   // Audio events
-  audio.addEventListener('play', () => setPlaying(true));
+  audio.addEventListener('play', () => {
+    // Regola unica di mutua esclusione: qualsiasi avvio dell'audio nativo
+    // (btnPlay, spacebar, toggle traccia, playAt) chiude il player YouTube.
+    // L'evento 'play' scatta per ogni play() da qualsiasi punto del codice,
+    // quindi nessun entry-point presente o futuro può bypassare la regola.
+    if (window.YTPlayer && typeof window.YTPlayer.stopVideo === 'function') {
+      window.YTPlayer.stopVideo();
+    }
+    setPlaying(true);
+  });
   audio.addEventListener('pause', () => setPlaying(false));
   audio.addEventListener('ended', () => {
     // Cerca la prossima traccia con src valido, saltando quelle senza file audio.
@@ -437,6 +455,7 @@ const Player = (function () {
           window.__PlaylistState.cursor = -1;
         }
 
+        notifyChange();
         return;
       }
 
@@ -467,6 +486,8 @@ const Player = (function () {
         window.__PlaylistState.tracks = playlist.slice();
         window.__PlaylistState.cursor = cursor;
       }
+
+      notifyChange();
     }
   };
 })();
