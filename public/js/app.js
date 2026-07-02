@@ -164,9 +164,12 @@ const Player = (function () {
     const t = playlist[cursor];
     if (!t) return;
     trackEl.textContent = t.position + '. ' + t.title;
-    artistEl.textContent = albumMeta.artist || '';
+    // Artista per traccia (playlist multi-artista) con fallback
+    // sull'artista dell'album — stesso pattern già usato per la cover.
+    const artistName = t.artist || albumMeta.artist || '';
+    artistEl.textContent = artistName;
     coverImg.src = t.cover || albumMeta.cover || '';
-    document.title = t.title + ' — ' + (albumMeta.artist || '') + ' · Music Archive';
+    document.title = t.title + ' — ' + artistName + ' · Music Archive';
 
     const coverLink = document.getElementById('sp-cover-link');
     if (coverLink) {
