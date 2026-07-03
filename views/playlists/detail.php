@@ -13,9 +13,18 @@ $playableTracks = array_filter($tracks, function ($t) {
 $playableCount  = count($playableTracks);
 $totalCount     = count($tracks);
 
-// YouTube share: raccoglie i video_id disponibili (massimo 50)
+// YouTube share: raccoglie i video_id disponibili
+// (lo slicing a 50 per watch_videos avviene lato JS in ytWatchUrl)
 $ytIds = array_filter(array_column($tracks, 'youtube_id'));
 $ytIds = array_values(array_unique($ytIds));
+
+// Tracce ancora senza video YouTube associato (candidate al resolver batch)
+$missingYt = 0;
+foreach ($tracks as $t) {
+  if (empty($t['youtube_id'])) {
+    $missingYt++;
+  }
+}
 ?>
 
 <!-- Intestazione playlist -->
@@ -91,20 +100,24 @@ $ytIds = array_values(array_unique($ytIds));
       </button>
     <?php endif; ?>
 
-    <!-- YouTube: apre tutti i video cachati come coda di riproduzione su YouTube -->
-    <?php if (!empty($ytIds)): ?>
-      <?php $ytUrl = 'https://www.youtube.com/watch_videos?video_ids=' . implode(',', array_map('htmlspecialchars', $ytIds)); ?>
-      <a href="<?= $ytUrl ?>"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="btn btn-outline-danger btn-sm"
-        title="Apri <?= count($ytIds) ?> <?= count($ytIds) === 1 ? 'traccia' : 'tracce' ?> su YouTube">
+    <!-- YouTube: bottone unico "risolvi e apri".
+         - Se tutte le tracce hanno già un video → apre subito watch_videos.
+         - Se mancano associazioni → le risolve in batch (progresso sul
+           bottone) e poi reindirizza la scheda già aperta al click.
+         La scheda viene aperta SUBITO al click (sincrono) per non essere
+         bloccata dai popup blocker; l'URL viene impostato a fine lavoro. -->
+    <?php if ($totalCount > 0): ?>
+      <button class="btn btn-outline-danger btn-sm" id="btnYoutube"
+        data-missing="<?= $missingYt ?>"
+        title="<?= $missingYt > 0
+          ? 'Cerca i video delle ' . $missingYt . ' tracce mancanti e apri la playlist su YouTube'
+          : 'Apri ' . count($ytIds) . ' ' . (count($ytIds) === 1 ? 'traccia' : 'tracce') . ' su YouTube' ?>">
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" class="me-1">
           <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
         </svg>
-        YouTube
-        <span class="badge bg-danger ms-1" style="font-size:.65rem"><?= count($ytIds) ?></span>
-      </a>
+        <span id="btnYoutubeLabel">YouTube</span>
+        <span class="badge bg-danger ms-1" style="font-size:.65rem" id="ytCountBadge"><?= count($ytIds) ?></span>
+      </button>
     <?php endif; ?>
 
     <button class="btn btn-outline-secondary btn-sm" id="btnToggleSelect"
@@ -340,7 +353,10 @@ $ytIds = array_values(array_unique($ytIds));
   (function() {
 
     var PLAYLIST_ID = <?= (int)$playlist['id'] ?>;
+    var PLAYLIST_NAME = <?= json_encode($playlist['name']) ?>;
     var BASE = '<?= BASE_URL ?>';
+    // youtube_id già risolti, in ordine di posizione (per il bottone YouTube)
+    var YT_IDS = <?= json_encode(array_values($ytIds)) ?>;
 
     // ================================================================
     // REGOLA FONDAMENTALE: tutti i listener su elementi della tracklist
@@ -979,6 +995,180 @@ $ytIds = array_values(array_unique($ytIds));
             btnBulkDel.innerHTML = '<i class="bi bi-trash me-1"></i>Elimina selezionate';
           });
       });
+    }
+
+    /* ---------- Bottone YouTube unico: risolvi e apri ----------
+       Al click:
+         1. apre SUBITO una scheda vuota (sincrono → niente popup blocker);
+         2. se tutte le tracce sono già risolte, la reindirizza subito;
+         3. altrimenti chiama api/youtube-resolve-playlist.php a chunk
+            mostrando il progresso sul bottone, poi reindirizza la scheda
+            alla playlist watch_videos completa (max 50 id).
+       Se la quota si esaurisce a metà, apre comunque con le tracce
+       risolte fino a quel momento. Usa onclick (come btnPlayAll) per
+       evitare accumulo di listener tra le navigazioni SPA.
+    ------------------------------------------------------------ */
+    var btnYoutube = document.getElementById('btnYoutube');
+
+    function ytWatchUrl(ids) {
+      // watch_videos accetta max 50 id
+      return 'https://www.youtube.com/watch_videos?video_ids=' +
+        ids.slice(0, 50).join(',');
+    }
+
+    function ytSetLabel(text, spinning) {
+      var label = document.getElementById('btnYoutubeLabel');
+      if (label) {
+        label.innerHTML = (spinning
+          ? '<span class="spinner-border spinner-border-sm me-1"></span>'
+          : '') + text;
+      }
+    }
+
+    function ytUpdateBadge(count) {
+      var badge = document.getElementById('ytCountBadge');
+      if (badge) badge.textContent = count;
+    }
+
+    /* Scrive nella scheda di attesa una pagina animata in tema con l'app:
+       logo che pulsa, spinner, nome playlist e progresso aggiornato live.
+       La scheda è about:blank scritta da noi → same-origin, quindi
+       possiamo aggiornarne il DOM finché non la reindirizziamo a YouTube. */
+    function ytWriteWaitingPage(tab) {
+      if (!tab || !tab.document) return;
+      try {
+        var d = tab.document;
+        d.open();
+        d.write(
+          '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+          '<title>' + PLAYLIST_NAME.replace(/</g, '&lt;') + ' \u2014 YouTube</title>' +
+          '<style>' +
+          'html,body{height:100%;margin:0}' +
+          'body{display:flex;align-items:center;justify-content:center;' +
+          '  background:#121212;color:#e9e9e9;' +
+          '  font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}' +
+          '.box{text-align:center;padding:2rem}' +
+          '.logo{width:84px;height:84px;border-radius:18px;' +
+          '  animation:pulse 1.6s ease-in-out infinite}' +
+          '@keyframes pulse{0%,100%{transform:scale(1);opacity:1}' +
+          '  50%{transform:scale(1.07);opacity:.75}}' +
+          '.name{margin-top:1.1rem;font-size:1.15rem;font-weight:600}' +
+          '.sub{margin-top:.35rem;font-size:.85rem;color:#9a9a9a}' +
+          '.ring{margin:1.4rem auto 0;width:34px;height:34px;border-radius:50%;' +
+          '  border:3px solid #333;border-top-color:#e53935;' +
+          '  animation:spin .9s linear infinite}' +
+          '@keyframes spin{to{transform:rotate(360deg)}}' +
+          '.prog{margin-top:.9rem;font-size:.8rem;color:#bdbdbd;' +
+          '  font-variant-numeric:tabular-nums}' +
+          '.yt{color:#e53935;font-weight:600}' +
+          '</style></head><body><div class="box">' +
+          '<img class="logo" src="' + BASE + '/public/img/logo-grizzly.png" alt="">' +
+          '<div class="name">' + PLAYLIST_NAME.replace(/</g, '&lt;') + '</div>' +
+          '<div class="sub">Preparazione playlist <span class="yt">YouTube</span>\u2026</div>' +
+          '<div class="ring"></div>' +
+          '<div class="prog" id="ytProg">Avvio ricerca\u2026</div>' +
+          '</div></body></html>'
+        );
+        d.close();
+      } catch (e) { /* solo cosmesi: mai bloccare il flusso */ }
+    }
+
+    /* Aggiorna la riga di progresso nella scheda di attesa (se ancora nostra) */
+    function ytTabProgress(tab, text) {
+      try {
+        var el = tab && tab.document ? tab.document.getElementById('ytProg') : null;
+        if (el) el.textContent = text;
+      } catch (e) { /* la scheda potrebbe essere stata chiusa dall'utente */ }
+    }
+
+    if (btnYoutube) {
+      btnYoutube.onclick = function() {
+        var missing = parseInt(btnYoutube.dataset.missing, 10) || 0;
+
+        // Scheda aperta subito, dentro il gesto utente
+        var ytTab = window.open('', '_blank');
+        ytWriteWaitingPage(ytTab);
+
+        function finish(ids) {
+          ytUpdateBadge(ids.length);
+          if (ids.length === 0) {
+            if (ytTab) ytTab.close();
+            ytSetLabel('Nessun video', false);
+            btnYoutube.disabled = false;
+            return;
+          }
+          if (ytTab) {
+            ytTab.location.href = ytWatchUrl(ids);
+          } else {
+            // Popup bloccato nonostante tutto: fallback nella scheda corrente
+            window.location.href = ytWatchUrl(ids);
+          }
+          ytSetLabel('YouTube', false);
+          btnYoutube.disabled = false;
+        }
+
+        // Tutto già risolto → apri subito
+        if (missing <= 0) {
+          finish(YT_IDS);
+          return;
+        }
+
+        // Risoluzione batch con progresso
+        btnYoutube.disabled = true;
+        var totalMissing = missing;
+        var done = 0;
+
+        function step() {
+          fetch(BASE + '/api/youtube-resolve-playlist.php', {
+              method: 'POST',
+              headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Content-Type': 'application/x-www-form-urlencoded'
+              },
+              body: 'playlist_id=' + encodeURIComponent(PLAYLIST_ID) + '&limit=8'
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+              if (!d.success) {
+                // Errore server: apri comunque con quello che abbiamo
+                finish(YT_IDS);
+                return;
+              }
+
+              done += (d.resolved || 0) + (d.failed || 0);
+              YT_IDS = d.youtube_ids || YT_IDS;
+              ytUpdateBadge(YT_IDS.length);
+              ytTabProgress(ytTab,
+                'Tracce analizzate: ' + Math.min(done, totalMissing) + '/' + totalMissing +
+                ' \u2014 video trovati: ' + YT_IDS.length);
+
+              if (d.quota_exceeded) {
+                // Quota finita: le mancanti restano per un'altra volta
+                btnYoutube.dataset.missing = d.remaining;
+                finish(YT_IDS);
+                return;
+              }
+
+              if (d.remaining > 0) {
+                ytSetLabel('Risolvo\u2026 ' + Math.min(done, totalMissing) + '/' + totalMissing, true);
+                step(); // prossimo chunk
+                return;
+              }
+
+              // Finito: eventuali tracce senza video sono marcate not_found
+              btnYoutube.dataset.missing = 0;
+              finish(YT_IDS);
+            })
+            .catch(function() {
+              // Errore di rete: apri con quello che abbiamo (o chiudi se nulla)
+              finish(YT_IDS);
+            });
+        }
+
+        ytSetLabel('Risolvo\u2026 0/' + totalMissing, true);
+        ytTabProgress(ytTab, 'Tracce da cercare: ' + totalMissing);
+        step();
+      };
     }
 
   })();
