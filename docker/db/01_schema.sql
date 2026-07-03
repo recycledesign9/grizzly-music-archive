@@ -157,6 +157,10 @@ CREATE TABLE `tracks` (
   `duration_sec` SMALLINT(5) UNSIGNED DEFAULT NULL,
   `youtube_id`   VARCHAR(20) COLLATE utf8mb4_unicode_ci DEFAULT NULL
                  COMMENT 'Cached YouTube videoId — avoids repeated API calls',
+  `youtube_status` VARCHAR(12) COLLATE utf8mb4_unicode_ci DEFAULT NULL
+                 COMMENT 'auto | confirmed | not_found | rejected',
+  `youtube_checked_at` DATETIME DEFAULT NULL
+                 COMMENT 'Last YouTube search timestamp (negative cache)',
   PRIMARY KEY (`id`),
   KEY `idx_track_album` (`album_id`),
   KEY `idx_tracks_youtube_id` (`youtube_id`),
