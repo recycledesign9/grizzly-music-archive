@@ -207,7 +207,8 @@ if ($albumTotalSec > 0) {
     <!-- Descrizione automatica / Note sull'album -->
     <div class="album-desc-block album-desc-block-sidebar mb-4" id="albumDescBlock"
       data-artist="<?= htmlspecialchars($album['artist_name'], ENT_QUOTES) ?>"
-      data-album="<?= htmlspecialchars($album['title'], ENT_QUOTES) ?>">
+      data-album="<?= htmlspecialchars($album['title'], ENT_QUOTES) ?>"
+      data-mbid="<?= htmlspecialchars($album['mbid'] ?? '', ENT_QUOTES) ?>">
 
       <div class="album-desc-header d-flex align-items-center justify-content-between">
         <span>
@@ -597,6 +598,7 @@ if ($albumTotalSec > 0) {
 
     var artist = block.dataset.artist || '';
     var album = block.dataset.album || '';
+    var mbid = block.dataset.mbid || '';
     var baseUrl = (document.querySelector('meta[name="base-url"]') || {}).content ||
       window.location.origin;
 
@@ -609,6 +611,7 @@ if ($albumTotalSec > 0) {
         '&artist=' + encodeURIComponent(artist) +
         '&album=' + encodeURIComponent(album) +
         '&lang=' + lang;
+      if (mbid) url += '&mbid=' + encodeURIComponent(mbid);
       if (force) url += '&force=1';
       return url;
     }
@@ -616,9 +619,13 @@ if ($albumTotalSec > 0) {
     function showDescription(d, lang) {
       fullText = (d.description || '').trim();
       if (!fullText) {
-        showEmpty();
+        showEmpty(false);
         return;
       }
+
+      // La lingua effettiva può differire da quella richiesta: il server
+      // risolve cross-lingua (es. richiesta IT → pagina solo EN).
+      var effLang = d.lang || lang;
 
       if (fullText.length > MAX_CHARS) {
         textEl.textContent = fullText.substring(0, MAX_CHARS) + '…';
@@ -631,7 +638,7 @@ if ($albumTotalSec > 0) {
       }
 
       var footerHtml = '';
-      if (lang !== 'it') {
+      if (effLang !== 'it') {
         footerHtml += '<span class="album-desc-lang-badge me-2">EN</span>';
       }
       if (d.wiki_url) {
@@ -650,34 +657,50 @@ if ($albumTotalSec > 0) {
       body.style.display = '';
     }
 
-    function showEmpty() {
+    function showEmpty(transient) {
       loading.style.display = 'none';
+      var msg = empty.querySelector('span');
+      if (msg) {
+        msg.textContent = transient
+          ? 'Recupero non riuscito (problema di rete): riprova con il pulsante di aggiornamento.'
+          : 'Nessuna descrizione disponibile.';
+      }
       empty.style.display = '';
     }
 
     function fetchDescription(lang, fallbackLang, force) {
+      // Timeout lato client: qualunque cosa accada al server, lo spinner
+      // non gira mai oltre i 15 secondi.
+      var controller = ('AbortController' in window) ? new AbortController() : null;
+      var timer = controller ? setTimeout(function() {
+        controller.abort();
+      }, 15000) : null;
+
       fetch(buildUrl(lang, force), {
           headers: {
             'X-Requested-With': 'XMLHttpRequest'
-          }
+          },
+          signal: controller ? controller.signal : undefined
         })
         .then(function(r) {
           return r.ok ? r.json() : Promise.reject(r.status);
         })
         .then(function(d) {
+          if (timer) clearTimeout(timer);
           if (d.description) {
             showDescription(d, lang);
           } else if (fallbackLang) {
             fetchDescription(fallbackLang, null, force);
           } else {
-            showEmpty();
+            showEmpty(!!d.transient);
           }
         })
         .catch(function() {
+          if (timer) clearTimeout(timer);
           if (fallbackLang) {
             fetchDescription(fallbackLang, null, force);
           } else {
-            showEmpty();
+            showEmpty(true);
           }
         });
     }
