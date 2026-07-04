@@ -314,7 +314,7 @@ $discoFetched = !empty($artist['disco_fetched_at']);
     }
 
     // ---- Fetch on demand (solo prima volta) ------------------
-    function fetchMeta() {
+    function fetchMeta(done) {
       fetch(BASE + '/index.php?route=artists/fetch-meta/' + ARTIST_ID, {
           headers: { 'X-Requested-With': 'XMLHttpRequest' }
         })
@@ -323,7 +323,13 @@ $discoFetched = !empty($artist['disco_fetched_at']);
           if (data && data.ok) renderMeta(data);
           else renderMeta({ bio: '' });
         })
-        .catch(function() { renderMeta({ bio: '' }); });
+        .catch(function() { renderMeta({ bio: '' }); })
+        // Eseguito in ogni caso (successo o errore), come un finally:
+        // sblocca la chiamata alla discografia SOLO quando fetch-meta
+        // ha finito e l'eventuale MBID è stato salvato in DB.
+        .then(function() {
+          if (typeof done === 'function') done();
+        });
     }
 
 
@@ -391,11 +397,20 @@ $discoFetched = !empty($artist['disco_fetched_at']);
     }
 
     function init() {
-      if (ALREADY_FETCHED) setupClamp();
-      else fetchMeta();
-      // discografia ufficiale: sempre caricata via AJAX
-      // (se gia' in cache il server risponde dal DB, veloce)
-      fetchDisco();
+      if (ALREADY_FETCHED) {
+        setupClamp();
+        // Bio già in DB → l'MBID (se esiste) è già disponibile:
+        // la discografia può partire subito.
+        fetchDisco();
+      } else {
+        // RACE CONDITION da evitare: fetch-discography dipende
+        // dall'MBID che viene trovato e salvato da fetch-meta.
+        // Con le due chiamate in parallelo, la discografia leggerebbe
+        // un MBID ancora vuoto e mostrerebbe "non disponibile"
+        // (prima "funzionava" solo perché il session lock di PHP
+        // serializzava le richieste per sbaglio).
+        fetchMeta(fetchDisco);
+      }
     }
 
     document.addEventListener('DOMContentLoaded', init);
