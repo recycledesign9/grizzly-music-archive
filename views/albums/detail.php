@@ -1709,16 +1709,40 @@ if ($albumTotalSec > 0) {
         btnConfirm.disabled = false;
         btnConfirm.className = 'btn btn-outline-secondary';
         btnConfirm.innerHTML = '<i class="bi bi-arrow-clockwise me-2"></i>Ricarica pagina';
-        btnConfirm.onclick = function() {
-          location.reload();
-        };
+        btnConfirm.onclick = softReload;
 
       } else {
         // Tutto OK: ricarica automatica dopo 1.5s
         btnConfirm.style.display = 'none';
-        setTimeout(function() {
+        setTimeout(softReload, 1500);
+      }
+    }
+
+    /* ----------------------------------------------------------------
+       Ricarica "morbida" post-upload: aggiorna il contenuto della
+       pagina via navigazione SPA (window._spaNavigate) invece di
+       location.reload(), così il player nel footer NON viene
+       distrutto e la riproduzione in corso continua indisturbata.
+       Il modal va chiuso PRIMA di navigare: il suo backdrop vive su
+       <body>, fuori da #page-content, e resterebbe orfano sopra la
+       pagina nuova. Fallback sul reload classico per sicurezza.
+    ---------------------------------------------------------------- */
+    function softReload() {
+      var doNav = function() {
+        if (typeof window._spaNavigate === 'function') {
+          window._spaNavigate(location.href, false);
+        } else {
           location.reload();
-        }, 1500);
+        }
+      };
+
+      var modalEl = document.getElementById('bulkUploadModal');
+      if (modalEl && modalEl.classList.contains('show')) {
+        modalEl.addEventListener('hidden.bs.modal', doNav, { once: true });
+        var inst = bootstrap.Modal.getInstance(modalEl);
+        if (inst) { inst.hide(); } else { doNav(); }
+      } else {
+        doNav();
       }
     }
 
