@@ -525,6 +525,15 @@ class AlbumController
         exit;
       }
 
+      // Rilascia il lock di sessione DOPO la verifica CSRF (che legge
+      // $_SESSION) e PRIMA delle chiamate esterne lente (MusicBrainz,
+      // Last.fm): senza questa riga l'endpoint bloccherebbe ogni altra
+      // richiesta dell'app finché il fetch non è concluso.
+      // Convenzione di progetto per tutti gli endpoint con I/O esterno.
+      if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+      }
+
       $artist = trim($_POST['artist'] ?? '');
       $title  = trim($_POST['title']  ?? '');
       $year   = (int)($_POST['year']  ?? 0);
@@ -1427,9 +1436,16 @@ class AlbumController
   {
     header('Content-Type: application/json');
 
+    // Rilascio immediato del lock di sessione — endpoint con I/O esterno
+    // lento (MusicBrainz / Cover Art Archive), vedi nota in apiDescription().
+    if (session_status() === PHP_SESSION_ACTIVE) {
+      session_write_close();
+    }
+
     try {
       $artist = $_GET['artist'] ?? '';
       $title  = $_GET['title'] ?? '';
+      $year   = (int)($_GET['year'] ?? 0);
 
       if (!$artist || !$title) {
         echo json_encode(['error' => 'Parametri mancanti']);

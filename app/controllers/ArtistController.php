@@ -73,6 +73,15 @@ class ArtistController
   // ----------------------------------------------------------
   private function fetchMeta(?int $id): void
   {
+    // FONDAMENTALE: rilascia SUBITO il lock di sessione. Questo endpoint
+    // fa I/O esterno lento (MusicBrainz, Last.fm, download immagine):
+    // senza questa riga terrebbe bloccata OGNI altra richiesta dell'app
+    // (navigazione, AJAX, player) finché non ha finito.
+    // Convenzione di progetto per tutti gli endpoint con I/O esterno.
+    if (session_status() === PHP_SESSION_ACTIVE) {
+      session_write_close();
+    }
+
     // Output JSON pulito
     while (ob_get_level()) {
       ob_end_clean();
@@ -162,6 +171,11 @@ class ArtistController
   // ----------------------------------------------------------
   private function fetchDiscography(?int $id): void
   {
+    // Rilascio immediato del lock di sessione — vedi nota in fetchMeta().
+    if (session_status() === PHP_SESSION_ACTIVE) {
+      session_write_close();
+    }
+
     while (ob_get_level()) {
       ob_end_clean();
     }
