@@ -397,6 +397,15 @@ class PlaylistController
 
         $rows = $this->getPlaylistTracks($id);
 
+        // Gli URL audio devono SEMPRE passare per l'endpoint di streaming
+        // (MediaController via MediaPathResolver): in produzione i file
+        // audio vivono su un path configurabile FUORI dalla webroot, quindi
+        // il vecchio percorso statico public/uploads/audio/ non li trova.
+        // Le cover invece restano statiche per progetto (sempre in webroot).
+        if (!class_exists('MediaPathResolver')) {
+            require_once BASE_PATH . '/app/services/MediaPathResolver.php';
+        }
+
         // Costruisce la struttura che PlaylistPlayer passa a Player.load()
         $tracks = [];
         foreach ($rows as $t) {
@@ -406,7 +415,7 @@ class PlaylistController
                 'position' => (int)$t['position'],
                 // src = null per le tracce senza file audio → Player le salta
                 'src'      => $t['audio_filename']
-                    ? BASE_URL . '/public/uploads/audio/' . $t['audio_filename']
+                    ? MediaPathResolver::getStreamUrl($t['audio_filename'])
                     : null,
                 'cover'    => $t['cover_local']
                     ? BASE_URL . '/public/uploads/' . $t['cover_local']
