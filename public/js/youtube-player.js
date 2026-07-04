@@ -341,6 +341,16 @@
     // Sblocca scroll e click sulla pagina sotto
     document.body.style.overflow = '';
     updateMinimizeIcon();
+    // Ripristina l'ultima posizione trascinata (ri-clampata alla viewport)
+    if (savedPos) {
+      var panel = getPanel();
+      if (panel) {
+        var r = panel.getBoundingClientRect();
+        var pos = clampPos(savedPos.left, savedPos.top, r.width, r.height);
+        applyPos(pos.left, pos.top);
+        savedPos = pos;
+      }
+    }
   }
 
   // Ri-espande il player a schermo intero centrato.
@@ -349,6 +359,98 @@
     lightbox.classList.remove('is-minimized');
     document.body.style.overflow = 'hidden';
     updateMinimizeIcon();
+    // Rimuove la posizione inline: il lightbox torna centrato.
+    // savedPos viene conservata per il prossimo minimize().
+    clearPos();
+  }
+
+  // ── Drag della finestra mini (PiP flottante) ────────────────
+  // Si trascina afferrando l'header. Usa i Pointer Events con
+  // setPointerCapture: funziona con mouse e touch e gli eventi
+  // di move restano sull'header anche passando sopra l'iframe.
+  var dragging = null;   // stato del drag corrente {dx, dy, w, h}
+  var savedPos = null;   // ultima posizione trascinata {left, top}
+
+  function getPanel() {
+    return document.getElementById('yt-lightbox-panel');
+  }
+
+  // Mantiene la finestra dentro la viewport con un margine di 8px
+  function clampPos(left, top, w, h) {
+    var margin = 8;
+    var maxL = window.innerWidth  - w - margin;
+    var maxT = window.innerHeight - h - margin;
+    return {
+      left: Math.min(Math.max(left, margin), Math.max(maxL, margin)),
+      top:  Math.min(Math.max(top,  margin), Math.max(maxT, margin))
+    };
+  }
+
+  // Passa dall'ancoraggio bottom/right (CSS) a coordinate left/top inline
+  function applyPos(left, top) {
+    lightbox.style.left   = left + 'px';
+    lightbox.style.top    = top + 'px';
+    lightbox.style.right  = 'auto';
+    lightbox.style.bottom = 'auto';
+  }
+
+  // Rimuove le coordinate inline → torna il posizionamento da CSS
+  function clearPos() {
+    lightbox.style.left   = '';
+    lightbox.style.top    = '';
+    lightbox.style.right  = '';
+    lightbox.style.bottom = '';
+  }
+
+  function onDragStart(e) {
+    if (!isMinimized) { return; }
+    // I bottoni dell'header (prev/next/riduci/chiudi) restano cliccabili
+    if (e.target.closest('button')) { return; }
+    var panel = getPanel();
+    if (!panel) { return; }
+
+    var rect = panel.getBoundingClientRect();
+    dragging = {
+      dx: e.clientX - rect.left,   // offset del puntatore dentro il pannello
+      dy: e.clientY - rect.top,
+      w:  rect.width,
+      h:  rect.height
+    };
+    lightbox.classList.add('is-dragging');
+    if (e.currentTarget.setPointerCapture) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+    e.preventDefault(); // evita selezione testo / scroll touch
+  }
+
+  function onDragMove(e) {
+    if (!dragging) { return; }
+    var pos = clampPos(
+      e.clientX - dragging.dx,
+      e.clientY - dragging.dy,
+      dragging.w,
+      dragging.h
+    );
+    applyPos(pos.left, pos.top);
+    savedPos = pos;
+  }
+
+  function onDragEnd() {
+    if (!dragging) { return; }
+    dragging = null;
+    lightbox.classList.remove('is-dragging');
+  }
+
+  // Se la finestra del browser viene ridimensionata, ri-clampa
+  // la posizione per non lasciare il player fuori schermo.
+  function onWindowResize() {
+    if (!isMinimized || !savedPos) { return; }
+    var panel = getPanel();
+    if (!panel) { return; }
+    var r = panel.getBoundingClientRect();
+    var pos = clampPos(savedPos.left, savedPos.top, r.width, r.height);
+    applyPos(pos.left, pos.top);
+    savedPos = pos;
   }
 
   function updateLabel(label) {
@@ -373,7 +475,12 @@
     }
     lightbox.classList.remove('is-open');
     lightbox.classList.remove('is-minimized');
+    lightbox.classList.remove('is-dragging');
     document.body.style.overflow = '';
+    // Reset posizione: alla prossima apertura riparte da bottom/right
+    clearPos();
+    savedPos = null;
+    dragging = null;
     isOpen = false;
     isQueueMode = false;
     isMinimized = false;
@@ -423,6 +530,16 @@
         if (isMinimized) { expand(); }
       });
     }
+
+    // Drag della finestra mini: si afferra l'header
+    var header = document.getElementById('yt-lightbox-header');
+    if (header && window.PointerEvent) {
+      header.addEventListener('pointerdown',   onDragStart);
+      header.addEventListener('pointermove',   onDragMove);
+      header.addEventListener('pointerup',     onDragEnd);
+      header.addEventListener('pointercancel', onDragEnd);
+    }
+    window.addEventListener('resize', onWindowResize);
 
     var prevBtn = document.getElementById('yt-prev');
     var nextBtn = document.getElementById('yt-next');
