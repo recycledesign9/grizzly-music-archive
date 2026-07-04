@@ -1,6 +1,20 @@
 <?php
 $pageTitle = $pageTitle ?? 'Music Archive';
 $baseUrl   = BASE_URL;
+
+// ------------------------------------------------------------
+// Cache-busting automatico degli asset locali: appende ?v=<mtime>
+// all'URL. L'header viene incluso PRIMA del footer, quindi la
+// definizione vive qui; il footer ha la stessa definizione con
+// guard function_exists e la salta senza conflitti.
+// ------------------------------------------------------------
+if (!function_exists('asset_v')) {
+  function asset_v(string $rel): string
+  {
+    $t = @filemtime(BASE_PATH . $rel);
+    return BASE_URL . $rel . ($t ? '?v=' . $t : '');
+  }
+}
 ?>
 <!DOCTYPE html>
 <html lang="it" data-bs-theme="auto">
@@ -18,7 +32,7 @@ $baseUrl   = BASE_URL;
     href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
   <link rel="stylesheet"
     href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-  <link rel="stylesheet" href="<?= $baseUrl ?>/public/css/app.css">
+  <link rel="stylesheet" href="<?= asset_v('/public/css/app.css') ?>">
 </head>
 
 <body>

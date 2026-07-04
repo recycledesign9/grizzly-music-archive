@@ -37,12 +37,28 @@
 
 <audio id="global-audio" preload="auto"></audio>
 
+<?php
+// ------------------------------------------------------------
+// Cache-busting automatico degli asset locali: appende ?v=<mtime>
+// all'URL, così ogni deploy (docker compose build ri-copia i file
+// e ne aggiorna il timestamp) invalida la cache del browser senza
+// bump manuali né hard refresh. I CDN restano senza ?v= perché
+// già versionati nell'URL.
+// ------------------------------------------------------------
+if (!function_exists('asset_v')) {
+  function asset_v(string $rel): string
+  {
+    $t = @filemtime(BASE_PATH . $rel);
+    return BASE_URL . $rel . ($t ? '?v=' . $t : '');
+  }
+}
+?>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
-<script src="<?= BASE_URL ?>/public/js/app.js"></script>
-<script src="<?= BASE_URL ?>/public/js/youtube-player.js"></script>
-<script src="<?= BASE_URL ?>/public/js/playlist-player.js"></script>
-<script src="<?= BASE_URL ?>/public/js/queue-panel.js"></script>
+<script src="<?= asset_v('/public/js/app.js') ?>"></script>
+<script src="<?= asset_v('/public/js/youtube-player.js') ?>"></script>
+<script src="<?= asset_v('/public/js/playlist-player.js') ?>"></script>
+<script src="<?= asset_v('/public/js/queue-panel.js') ?>"></script>
 </body>
 
 </html>
