@@ -351,27 +351,53 @@ if ($albumTotalSec > 0) {
                 </div>
                 <div class="track-actions">
                   <?php if ($t['audio_filename']): ?>
-                    <div class="d-flex align-items-center gap-2">
+                    <!-- Wrapper con classe dedicata: il handler di eliminazione
+                         audio lo individua via .track-audio-controls e lo
+                         sostituisce con "nessun audio" dopo la cancellazione.
+                         Contiene TUTTE le azioni legate al file audio, così
+                         spariscono insieme al file. -->
+                    <div class="d-flex align-items-center gap-2 track-audio-controls">
                       <audio controls preload="none" class="track-player">
                         <source src="<?= MediaPathResolver::getStreamUrl($t['audio_filename']) ?>"
                           type="<?= pathinfo($t['audio_filename'], PATHINFO_EXTENSION) === 'flac' ? 'audio/flac' : 'audio/mpeg' ?>">
                         Il tuo browser non supporta l'audio HTML5.
                       </audio>
-                      <a href="<?= MediaPathResolver::getDownloadUrl($t['audio_filename']) ?>"
-                        class="btn btn-xs btn-outline-secondary" download
-                        title="Scarica MP3">
-                        <i class="bi bi-download"></i>
-                      </a>
-                      <?php if (!empty($t['audio_file_id'])): ?>
+                      <!-- Aggiungi alla coda di riproduzione (Player.enqueue) -->
+                      <button type="button"
+                        class="btn btn-xs btn-outline-warning btn-enqueue-track"
+                        data-track-id="<?= (int)$t['id'] ?>"
+                        title="Aggiungi alla coda di riproduzione">
+                        <i class="bi bi-plus-lg"></i>
+                      </button>
+                      <!-- Azioni secondarie sul file audio -->
+                      <div class="dropdown">
                         <button type="button"
-                          class="btn btn-xs btn-outline-danger btn-delete-audio"
-                          data-audio-id="<?= (int)$t['audio_file_id'] ?>"
-                          data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
-                          data-csrf="<?= htmlspecialchars($_SESSION['csrf_token']) ?>"
-                          title="Rimuovi audio">
-                          <i class="bi bi-x-lg"></i>
+                          class="btn btn-xs btn-outline-secondary"
+                          data-bs-toggle="dropdown"
+                          aria-expanded="false"
+                          title="Altre azioni">
+                          <i class="bi bi-three-dots-vertical"></i>
                         </button>
-                      <?php endif; ?>
+                        <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+                          <li>
+                            <a class="dropdown-item small"
+                              href="<?= MediaPathResolver::getDownloadUrl($t['audio_filename']) ?>" download>
+                              <i class="bi bi-download me-2 text-muted"></i>Scarica MP3
+                            </a>
+                          </li>
+                          <?php if (!empty($t['audio_file_id'])): ?>
+                            <li>
+                              <button type="button"
+                                class="dropdown-item small text-danger btn-delete-audio"
+                                data-audio-id="<?= (int)$t['audio_file_id'] ?>"
+                                data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
+                                data-csrf="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
+                                <i class="bi bi-x-lg me-2"></i>Rimuovi audio
+                              </button>
+                            </li>
+                          <?php endif; ?>
+                        </ul>
+                      </div>
                     </div>
                   <?php else: ?>
                     <span class="text-muted small fst-italic">
@@ -2183,11 +2209,62 @@ if ($albumTotalSec > 0) {
         if (!btn) return;
         S.pendingAudioId = btn.dataset.audioId;
         S.pendingAudioCsrf = btn.dataset.csrf;
-        S.pendingAudioRow = btn.closest('.d-flex');
+        // Il bottone ora vive nel dropdown tre puntini: closest('.d-flex')
+        // risalirebbe fino al flex dell'intera riga e la cancellazione
+        // spazzerebbe via titolo, numero e tutti i controlli. Il target
+        // corretto è il wrapper dedicato dei controlli audio.
+        S.pendingAudioRow = btn.closest('.track-audio-controls') || btn.closest('.d-flex');
         var titleEl = document.getElementById('deleteAudioTrackTitle');
         if (titleEl) titleEl.textContent = '\u201c' + (btn.dataset.trackTitle || 'questa traccia') + '\u201d';
         var dam = document.getElementById('deleteAudioModal');
         if (dam) bootstrap.Modal.getOrCreateInstance(dam).show();
+      });
+
+      // --- Click btn-enqueue-track: aggiungi traccia alla coda ---
+      // La traccia viene pescata da window.__album (sempre aggiornato dalla
+      // pagina corrente) e decorata con artista/cover dell'album: il Player
+      // e il queue-panel usano i metadati per-traccia, indispensabili quando
+      // la coda contiene tracce di album diversi.
+      document.addEventListener('click', function(e) {
+        var btn = e.target.closest('.btn-enqueue-track');
+        if (!btn) return;
+        if (typeof Player === 'undefined' || typeof Player.enqueue !== 'function') return;
+        if (!window.__album || !window.__album.tracks) return;
+
+        var tid = parseInt(btn.dataset.trackId, 10);
+        var t = window.__album.tracks.find(function(x) {
+          return x && x.id === tid;
+        });
+        if (!t || !t.src) return;
+
+        var result = Player.enqueue({
+          id: t.id,
+          position: t.position,
+          title: t.title,
+          src: t.src,
+          artist: t.artist || window.__album.artist || '',
+          cover: t.cover || window.__album.cover || '',
+          albumId: window.__album.id || null
+        });
+
+        var icon = btn.querySelector('i');
+        if (result === 'queued' || result === 'playing') {
+          btn.classList.remove('enqueue-dup');
+          btn.classList.add('enqueue-ok');
+          if (icon) icon.className = 'bi bi-check-lg';
+          setTimeout(function() {
+            btn.classList.remove('enqueue-ok');
+            if (icon) icon.className = 'bi bi-plus-lg';
+          }, 1200);
+        } else if (result === 'duplicate') {
+          // Riavvia l'animazione anche su click ripetuti
+          btn.classList.remove('enqueue-dup');
+          void btn.offsetWidth;
+          btn.classList.add('enqueue-dup');
+          setTimeout(function() {
+            btn.classList.remove('enqueue-dup');
+          }, 800);
+        }
       });
 
       // --- Conferma elimina audio ---

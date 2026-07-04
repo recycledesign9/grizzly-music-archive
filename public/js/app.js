@@ -176,6 +176,12 @@ const Player = (function () {
       if (albumMeta.playlistId) {
         coverLink.href = BASE_URL + '/index.php?route=playlists/detail/' + albumMeta.playlistId;
         coverLink.title = 'Vai alla playlist';
+      } else if (t.albumId) {
+        // Segue la traccia CORRENTE: con la coda mista, la traccia in
+        // riproduzione può appartenere a un album diverso da quello che
+        // ha avviato il player — il link deve portare al SUO disco.
+        coverLink.href = BASE_URL + '/index.php?route=albums/detail/' + t.albumId;
+        coverLink.title = 'Vai al disco';
       } else if (albumMeta.id) {
         coverLink.href = BASE_URL + '/index.php?route=albums/detail/' + albumMeta.id;
         coverLink.title = 'Vai al disco';
@@ -263,7 +269,20 @@ const Player = (function () {
   // Carica tracce da album o playlist e avvia riproduzione
   function load(albumData, startIndex) {
     if (!albumData || !albumData.tracks || albumData.tracks.length === 0) return;
-    playlist = albumData.tracks;
+    // Ogni traccia entra in coda già "vestita" dei propri metadati
+    // (artist, cover, albumId), ereditandoli dall'album se non li ha.
+    // Così il queue-panel mostra SEMPRE l'artista sotto il titolo — sia
+    // per le tracce dell'album di partenza che per quelle accodate da
+    // altri album — e il link della cover può seguire la traccia corrente.
+    // Copie shallow: non si mutano gli oggetti di window.__album.
+    playlist = albumData.tracks.map(function (t) {
+      if (!t) return t;
+      return Object.assign({}, t, {
+        artist:  t.artist  || albumData.artist || '',
+        cover:   t.cover   || albumData.cover  || '',
+        albumId: t.albumId || albumData.id     || null
+      });
+    });
     albumMeta = {
       id: albumData.id || null,
       playlistId: albumData.playlistId || null,
@@ -328,6 +347,47 @@ const Player = (function () {
     if (idx !== -1) { playAt(idx); return; }
     // fallback: carica dall'album corrente se disponibile
     if (window.__album) { load(window.__album); }
+  }
+
+  // Accoda una traccia in fondo alla coda di riproduzione, anche se
+  // appartiene a un album diverso da quello in riproduzione.
+  // La traccia DEVE portarsi dietro i propri metadati (artist, cover):
+  // updateUI e queue-panel usano t.artist/t.cover con fallback su
+  // albumMeta, quindi una traccia "estranea" senza metadati propri
+  // erediterebbe artista e cover sbagliati.
+  //
+  // track: { id, position, title, src, artist, cover, albumId? }
+  // Ritorna: 'playing'   → player fermo, la traccia è partita subito
+  //          'queued'    → aggiunta in fondo senza interrompere l'ascolto
+  //          'duplicate' → già presente in coda (id duplicati romperebbero
+  //                        playTrack e l'evidenziazione, quindi bloccati)
+  //          'invalid'   → traccia senza src o senza id
+  function enqueue(track) {
+    if (!track || !track.src || !track.id) return 'invalid';
+
+    // Player fermo / coda vuota → comportati come un load a traccia singola
+    if (!playlist.length || cursor === -1) {
+      load({
+        id: track.albumId || null,
+        cover: track.cover || '',
+        artist: track.artist || '',
+        tracks: [track]
+      }, 0);
+      return 'playing';
+    }
+
+    if (playlist.some(t => t && t.id === track.id)) return 'duplicate';
+
+    playlist.push(track);
+
+    // Sincronizza stato globale (stessa disciplina di setPlaylist)
+    if (window.__PlaylistState) {
+      window.__PlaylistState.tracks = playlist.slice();
+      window.__PlaylistState.cursor = cursor;
+    }
+
+    notifyChange();
+    return 'queued';
   }
 
   // Riempimento barre seek e volume con gradiente inline
@@ -440,6 +500,7 @@ const Player = (function () {
   return {
     load,
     playTrack,
+    enqueue,
     refreshUI: updateUI,
     currentSrc: () => audio.src,
     currentIndex: () => cursor,
