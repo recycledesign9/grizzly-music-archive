@@ -280,10 +280,15 @@ class ArtistMetadataService
     {
         $empty = ['extract' => '', 'image' => '', 'url' => '', 'lang' => $lang, 'title' => ''];
 
-        // Titolo pagina via Wikidata (matching certo), altrimenti nome
-        $title = '';
+        // Titolo pagina via Wikidata (matching certo), altrimenti nome.
+        // $fromSitelink distingue i due casi: le pagine raggiunte via
+        // sitelink Wikidata sono garantite essere DELL'ARTISTA; quelle
+        // trovate per semplice nome vanno validate (vedi sotto).
+        $title        = '';
+        $fromSitelink = false;
         if ($wikidataId !== '') {
-            $title = $this->wikidataSitelinkTitle($wikidataId, $lang);
+            $title        = $this->wikidataSitelinkTitle($wikidataId, $lang);
+            $fromSitelink = ($title !== '');
         }
         if ($title === '') {
             $title = $name;
@@ -322,6 +327,17 @@ class ArtistMetadataService
             return $empty;
         }
 
+        // GUARDIA ANTI-OMONIMI da sostantivo comune (es. artista
+        // "Packaging" -> articolo sugli imballaggi, "Television" ->
+        // articolo sulla televisione). Si applica SOLO alle pagine
+        // trovate per semplice nome: l'estratto deve descrivere un
+        // soggetto musicale, altrimenti viene scartato — meglio
+        // nessuna bio che una sbagliata. Le pagine raggiunte via
+        // sitelink Wikidata sono match certi e passano senza esame.
+        if (!$fromSitelink && !$this->looksLikeMusicBio($extract)) {
+            return $empty;
+        }
+
         $image = $page['original']['source']
               ?? ($page['thumbnail']['source'] ?? '');
 
@@ -338,6 +354,43 @@ class ArtistMetadataService
             'lang'    => $lang,
             'title'   => $resolvedTitle,
         ];
+    }
+
+    /**
+     * Euristica: l'estratto Wikipedia descrive un soggetto musicale?
+     * Wikipedia dichiara "chi/cosa è" il soggetto nelle prime frasi
+     * dell'intro, quindi il controllo avviene su una finestra iniziale.
+     * Usata SOLO per le pagine trovate per nome (fallback), mai per
+     * quelle raggiunte via sitelink Wikidata (match certo).
+     * Nota: ' band' ha lo spazio davanti per non matchare "husband",
+     * "contraband" ecc.; 'cantautor'/'compositor' coprono le varianti
+     * maschili/femminili.
+     */
+    private function looksLikeMusicBio(string $extract): bool
+    {
+        $window = mb_strtolower(mb_substr($extract, 0, 800));
+
+        $keywords = [
+            // italiano
+            'gruppo musicale', 'duo musicale', 'trio musicale',
+            'progetto musicale', 'cantante', 'cantautor', 'musicista',
+            ' band', 'rapper', 'compositor', 'chitarrista', 'batterista',
+            'bassista', 'tastierista', 'polistrumentista', 'violinista',
+            'pianista', 'disc jockey', 'produttore discografico',
+            'etichetta discografica', 'discografia', 'direttore d\'orchestra',
+            // inglese
+            'musical group', 'music group', 'singer', 'musician',
+            'songwriter', 'record producer', 'music project', 'composer',
+            'music duo', 'discography', 'guitarist', 'drummer',
+        ];
+
+        foreach ($keywords as $kw) {
+            if (mb_strpos($window, $kw) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
