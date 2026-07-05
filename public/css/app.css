@@ -3729,3 +3729,26 @@ body:has(#sticky-player[style*="flex"]) {
     width: auto;
   }
 }
+
+/* ============================================================
+   Dropzone upload bulk (modal "Carica tracce in blocco")
+   ============================================================ */
+
+.bulk-dropzone {
+  border: 2px dashed var(--bs-border-color);
+  border-radius: 0.5rem;
+  padding: 1.25rem 1rem;
+  text-align: center;
+  color: var(--bs-secondary-color);
+  font-size: 0.9rem;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.bulk-dropzone.is-dragover {
+  border-color: var(--bs-warning);
+  background: rgba(var(--bs-warning-rgb), 0.08);
+  color: var(--bs-warning);
+}

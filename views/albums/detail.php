@@ -816,6 +816,12 @@ if ($albumTotalSec > 0) {
               style="display:none">
           </div>
 
+          <!-- Dropzone: trascina cartella o file (niente dialogo Chrome) -->
+          <div id="bulkDropZone" class="bulk-dropzone mb-3">
+            <i class="bi bi-box-arrow-in-down me-2"></i>
+            …oppure <strong>trascina qui</strong> la cartella dell'album o i file MP3 / FLAC
+          </div>
+
           <div id="bulkNoFilesHint" class="alert alert-light border small py-2">
             <i class="bi bi-info-circle me-1"></i>
             Nessun file selezionato. Usa uno dei pulsanti sopra per iniziare.
@@ -1155,6 +1161,113 @@ if ($albumTotalSec > 0) {
     if (filesInput) {
       filesInput.addEventListener('change', function() {
         processFiles(this.files);
+      });
+    }
+
+    /* ----------------------------------------------------------------
+       Drag & drop di cartelle o file nel modal.
+       Vantaggio: il trascinamento NON fa scattare il dialogo di
+       conferma di Chrome che appare col selettore di cartelle
+       (webkitdirectory). I file raccolti finiscono nella STESSA
+       pipeline dei pulsanti: processFiles() → matching → upload.
+    ---------------------------------------------------------------- */
+    var dropZone = document.getElementById('bulkDropZone');
+    var bulkModalContent = document.querySelector('#bulkUploadModal .modal-content');
+
+    /* Traversa ricorsivamente ciò che è stato rilasciato (file e/o
+       cartelle) e consegna l'elenco piatto di File alla callback.
+       Nota: readEntries() restituisce max ~100 voci per chiamata,
+       va richiamato finché non torna vuoto. */
+    function collectDroppedFiles(dataTransfer, done) {
+      var out = [];
+      var pending = 0;
+      var walked = false;
+
+      function maybeDone() {
+        if (walked && pending === 0) done(out);
+      }
+
+      function walkEntry(entry) {
+        if (!entry) return;
+        if (entry.isFile) {
+          pending++;
+          entry.file(
+            function(f) { out.push(f); pending--; maybeDone(); },
+            function() { pending--; maybeDone(); }
+          );
+        } else if (entry.isDirectory) {
+          pending++;
+          var reader = entry.createReader();
+          var readBatch = function() {
+            reader.readEntries(function(entries) {
+              if (!entries.length) { pending--; maybeDone(); return; }
+              for (var j = 0; j < entries.length; j++) walkEntry(entries[j]);
+              readBatch();
+            }, function() { pending--; maybeDone(); });
+          };
+          readBatch();
+        }
+      }
+
+      var items = dataTransfer.items;
+      if (items && items.length && items[0].webkitGetAsEntry) {
+        for (var i = 0; i < items.length; i++) {
+          var entry = items[i].webkitGetAsEntry();
+          if (entry) walkEntry(entry);
+        }
+        walked = true;
+        maybeDone();
+      } else {
+        // Fallback per browser senza webkitGetAsEntry: solo file piatti
+        done(Array.prototype.slice.call(dataTransfer.files || []));
+      }
+    }
+
+    /* Il drop è accettato solo nello step 1 (selezione file), per non
+       introdurre percorsi di stato nuovi durante anteprima e upload. */
+    function dropAllowed() {
+      return step1 && step1.style.display !== 'none';
+    }
+
+    if (bulkModalContent && dropZone) {
+      ['dragenter', 'dragover'].forEach(function(evName) {
+        bulkModalContent.addEventListener(evName, function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (dropAllowed()) dropZone.classList.add('is-dragover');
+        });
+      });
+
+      bulkModalContent.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        // Ignora i dragleave interni (passaggio tra elementi figli)
+        if (e.relatedTarget && bulkModalContent.contains(e.relatedTarget)) return;
+        dropZone.classList.remove('is-dragover');
+      });
+
+      bulkModalContent.addEventListener('drop', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.classList.remove('is-dragover');
+        if (!dropAllowed() || !e.dataTransfer) return;
+        collectDroppedFiles(e.dataTransfer, function(files) {
+          if (files.length) processFiles(files);
+        });
+      });
+    }
+
+    /* Guardia globale (una sola registrazione anche con la SPA):
+       se il modal è aperto, impedisce al browser di "aprire" un file
+       rilasciato per sbaglio fuori dal modal, che navigherebbe via
+       dalla pagina uccidendo player e upload. */
+    if (!window.__bulkDropDocGuard) {
+      window.__bulkDropDocGuard = true;
+      ['dragover', 'drop'].forEach(function(evName) {
+        document.addEventListener(evName, function(e) {
+          var m = document.getElementById('bulkUploadModal');
+          if (m && m.classList.contains('show')) e.preventDefault();
+        });
       });
     }
     if (btnReset) {
