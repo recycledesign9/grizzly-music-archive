@@ -3752,3 +3752,21 @@ body:has(#sticky-player[style*="flex"]) {
   background: rgba(var(--bs-warning-rgb), 0.08);
   color: var(--bs-warning);
 }
+
+
+/* ============================================================
+   Feedback "album accodato": lampeggio del bottone coda
+   nello sticky player.
+   ============================================================ */
+ 
+.sp-btn.sp-flash {
+  color: var(--bs-warning);
+  animation: sp-flash-pulse .4s ease 3;
+}
+ 
+@keyframes sp-flash-pulse {
+  50% {
+    background: rgba(var(--bs-warning-rgb), .25);
+    transform: scale(1.15);
+  }
+}

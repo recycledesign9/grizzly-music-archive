@@ -287,6 +287,11 @@ if ($albumTotalSec > 0) {
               </button>
             </li>
             <li>
+              <button class="dropdown-item" type="button" id="btnEnqueueAlbum">
+                <i class="bi bi-plus-lg me-2 text-warning"></i>Accoda alla riproduzione
+              </button>
+            </li>
+            <li>
               <hr class="dropdown-divider">
             </li>
           <?php endif; ?>
@@ -2401,6 +2406,45 @@ if ($albumTotalSec > 0) {
           setTimeout(function() {
             btn.classList.remove('enqueue-dup');
           }, 800);
+        }
+      });
+
+      // --- Click btnEnqueueAlbum: accoda l'INTERO disco alla coda ---
+      // Riusa Player.enqueue() traccia per traccia (stessa strada
+      // collaudata del bottone "+"): duplicati saltati in automatico,
+      // a player fermo parte la prima traccia e le altre si accodano.
+      document.addEventListener('click', function(e) {
+        var btn = e.target.closest('#btnEnqueueAlbum');
+        if (!btn) return;
+        if (typeof Player === 'undefined' || typeof Player.enqueue !== 'function') return;
+        if (!window.__album || !window.__album.tracks) return;
+
+        var added = 0;
+        window.__album.tracks.forEach(function(t) {
+          if (!t || !t.src || !t.id) return;
+          var r = Player.enqueue({
+            id: t.id,
+            position: t.position,
+            title: t.title,
+            src: t.src,
+            artist: t.artist || window.__album.artist || '',
+            cover: t.cover || window.__album.cover || '',
+            albumId: window.__album.id || null
+          });
+          if (r === 'queued' || r === 'playing') added++;
+        });
+
+        // Feedback: lampeggio del bottone coda nello sticky player
+        if (added > 0) {
+          var spQueue = document.getElementById('sp-queue');
+          if (spQueue) {
+            spQueue.classList.remove('sp-flash');
+            void spQueue.offsetWidth;
+            spQueue.classList.add('sp-flash');
+            setTimeout(function() {
+              spQueue.classList.remove('sp-flash');
+            }, 1200);
+          }
         }
       });
 
