@@ -111,6 +111,18 @@ class ArtistMetadataService
                 $result['image_source'] = 'wikidata';
             }
         }
+        if ($result['image_url'] === '') {
+            // d) Deezer (API pubblica, nessuna chiave richiesta): copre
+            //    gli artisti recenti o minori che hanno una pagina
+            //    Wikipedia senza immagine o non sono su Wikidata.
+            //    Il match sul nome è di uguaglianza esatta normalizzata
+            //    per non pescare omonimi (lezione "Packaging").
+            $dz = $this->deezerArtistImage($name);
+            if ($dz !== '') {
+                $result['image_url']    = $dz;
+                $result['image_source'] = 'deezer';
+            }
+        }
 
         // ---------- NAZIONALITA: fallback da Wikidata se manca ----------
         if ($result['country'] === '' && $wikidataId !== '') {
@@ -448,6 +460,69 @@ class ArtistMetadataService
     /**
      * Nazionalita da Wikidata: prova P495 (country of origin) poi P17.
      */
+    // ============================================================
+    // DEEZER (fallback immagine artista, nessuna API key richiesta)
+    // ============================================================
+
+    /**
+     * Cerca l'artista su Deezer e restituisce l'URL della foto in
+     * alta risoluzione, oppure '' se non trovato.
+     *
+     * Protezioni:
+     * - match di UGUAGLIANZA ESATTA sul nome normalizzato (minuscole,
+     *   spazi compattati): la ricerca Deezer è fuzzy e senza questo
+     *   controllo un artista di nicchia pescherebbe l'omonimo famoso;
+     * - scarto dell'immagine placeholder di default di Deezer,
+     *   riconoscibile dall'md5 vuoto nel percorso ('/artist//').
+     */
+    private function deezerArtistImage(string $name): string
+    {
+        $url  = 'https://api.deezer.com/search/artist?q=' . rawurlencode($name);
+        $data = $this->httpGetJson($url);
+
+        if (empty($data['data']) || !is_array($data['data'])) {
+            return '';
+        }
+
+        $wanted = $this->normalizeArtistName($name);
+
+        // Esamina solo i primi risultati: se il match esatto non è
+        // in cima, quasi certamente l'artista non è quello giusto.
+        $candidates = array_slice($data['data'], 0, 5);
+
+        foreach ($candidates as $a) {
+            if (empty($a['name'])) {
+                continue;
+            }
+            if ($this->normalizeArtistName($a['name']) !== $wanted) {
+                continue;
+            }
+
+            $img = $a['picture_xl'] ?? ($a['picture_big'] ?? '');
+            if ($img === '') {
+                continue;
+            }
+            // Placeholder Deezer: md5 vuoto nel percorso immagine
+            if (strpos($img, '/artist//') !== false) {
+                continue;
+            }
+
+            return $img;
+        }
+
+        return '';
+    }
+
+    /**
+     * Normalizzazione nome artista per confronto: minuscole, trim,
+     * spazi multipli compattati.
+     */
+    private function normalizeArtistName(string $n): string
+    {
+        $n = mb_strtolower(trim($n));
+        return preg_replace('/\s+/', ' ', $n);
+    }
+
     private function wikidataCountry(string $wikidataId): string
     {
         $url = 'https://www.wikidata.org/wiki/Special:EntityData/'
