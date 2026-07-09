@@ -169,7 +169,7 @@ $discoFetched = !empty($artist['disco_fetched_at']);
         <div class="disco-card__cover">
           <img src="<?= $a['cover_local']
                       ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
-                      : BASE_URL . '/public/img/placeholder.png' ?>"
+                      : ($a['cover_url'] ? htmlspecialchars($a['cover_url']) : BASE_URL . '/public/img/placeholder.png') ?>"
             alt="<?= htmlspecialchars($a['title']) ?>" loading="lazy">
           <span class="badge badge-format bg-<?= formatBadge($a['format_name']) ?> disco-card__fmt">
             <?= htmlspecialchars($a['format_name']) ?>

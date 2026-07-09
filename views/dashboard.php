@@ -88,7 +88,7 @@ require BASE_PATH . '/views/layout/header.php';
             <div class="grz-album-tile__cover">
               <img src="<?= $a['cover_local']
                           ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
-                          : BASE_URL . '/public/img/placeholder.png' ?>"
+                          : ($a['cover_url'] ? htmlspecialchars($a['cover_url']) : BASE_URL . '/public/img/placeholder.png') ?>"
                    alt="<?= htmlspecialchars($a['title']) ?>"
                    loading="lazy">
               <span class="badge badge-format <?= $badgeClass ?> grz-cover-badge">
