@@ -75,15 +75,18 @@ class AlbumMetadataService
         // usa il risultato UNA SOLA VOLTA
         if (!empty($discogs)) {
 
-            if (!empty($discogs['tracks'])) {
-
-                // Se Discogs ha PIÙ tracce → usa Discogs
-                if (
-                    !$isMbValid
-                    || count($discogs['tracks']) > count($result['tracks'])
-                ) {
-                    $result['tracks'] = $this->cleanTracks($discogs['tracks']);
-                }
+            // FIX: Discogs può solo MIGLIORARE o PAREGGIARE la tracklist,
+            // mai ridurla. Prima, quando $isMbValid era false (es. release
+            // MusicBrainz con "deluxe"/"anniversary" nel titolo), Discogs
+            // sovrascriveva SEMPRE a prescindere dal numero di tracce
+            // trovate — bastava un match Discogs sbagliato/parziale (singolo,
+            // sampler, edizione incompleta) per buttare via una tracklist
+            // MusicBrainz già corretta e completa.
+            if (
+                !empty($discogs['tracks'])
+                && count($discogs['tracks']) >= count($result['tracks'])
+            ) {
+                $result['tracks'] = $this->cleanTracks($discogs['tracks']);
             }
 
             if (empty($result['year']) && !empty($discogs['year'])) {
@@ -117,23 +120,17 @@ class AlbumMetadataService
         return $result;
     }
 
+    // Semplificata: la validazione "è la release giusta?" (tipo release,
+    // artista accreditato) avviene ORA a monte in pickBestRelease() —
+    // qui serve solo capire se ci fidiamo della tracklist MusicBrainz
+    // già trovata. Il vecchio controllo sulle parole "deluxe/anniversary"
+    // era il vero innesco del bug: bastava un titolo con quella parola
+    // per far scartare in blocco una tracklist completa e corretta,
+    // rimpiazzata poi ciecamente da Discogs (vedi fix in search()).
     private function isValidMb(array $mb, array $tracks): bool
     {
         if (empty($mb)) return false;
-        if (count($tracks) < 3) return false; // era 5, troppo restrittivo
-
-        $title = strtolower($mb['title'] ?? '');
-
-        $bad = [
-            'deluxe', 'remaster', 'remastered',
-            'expanded', 'anniversary', 'bonus'
-        ];
-
-        foreach ($bad as $w) {
-            if (strpos($title, $w) !== false) {
-                return false;
-            }
-        }
+        if (count($tracks) < 3) return false;
 
         return true;
     }
@@ -223,30 +220,55 @@ class AlbumMetadataService
         $data = $this->httpGetJson($url);
 
         if (!empty($data['releases'])) {
-            $best = $this->pickBestRelease($data['releases'], $album, $year);
+            $best = $this->pickBestRelease($data['releases'], $album, $year, $artist);
             if (!empty($best)) return $best;
         }
 
-        // 2 FALLBACK LARGO — senza anno per non perdere risultati
+        // 2 FALLBACK — stessi campi (artist/release) ma senza frase esatta
+        // e senza vincolo di anno: a volte il titolo ufficiale ha piccole
+        // differenze di punteggiatura. Resta comunque scoped sui campi
+        // artista/titolo — NON è più una ricerca a testo libero: era
+        // proprio questo il varco da cui passavano compilation "Various
+        // Artists" e omonimi, perché non c'era alcun vincolo sull'artista.
+        $query2 = 'release:(' . $album . ') AND artist:(' . $artist . ')';
+
         $url = 'https://musicbrainz.org/ws/2/release/?query='
-            . rawurlencode($artist . ' ' . $album)
-            . '&fmt=json&limit=10&inc=release-groups+labels+genres+media';
+            . rawurlencode($query2)
+            . '&fmt=json&limit=15&inc=release-groups+labels+genres+media';
 
         $data = $this->httpGetJson($url);
 
         if (!empty($data['releases'])) {
-            $best = $this->pickBestRelease($data['releases'], $album, $year);
+            $best = $this->pickBestRelease($data['releases'], $album, $year, $artist);
+            if (!empty($best)) return $best;
+        }
+
+        // 3 ULTIMA SPIAGGIA — ricerca libera, usata solo se le due
+        // precedenti non hanno trovato nulla. pickBestRelease() applica
+        // comunque i controlli hard su tipo release e artista accreditato,
+        // quindi anche qui non possono passare compilation o omonimi.
+        $url = 'https://musicbrainz.org/ws/2/release/?query='
+            . rawurlencode($artist . ' ' . $album)
+            . '&fmt=json&limit=15&inc=release-groups+labels+genres+media';
+
+        $data = $this->httpGetJson($url);
+
+        if (!empty($data['releases'])) {
+            $best = $this->pickBestRelease($data['releases'], $album, $year, $artist);
             if (!empty($best)) return $best;
         }
 
         return [];
     }
 
-    private function pickBestRelease(array $releases, string $album, int $year = 0): array
+    private function pickBestRelease(array $releases, string $album, int $year = 0, string $artist = ''): array
     {
         $album = strtolower($album);
 
-        // Parole nel titolo che identificano edizioni da evitare
+        // Parole nel titolo che identificano edizioni da evitare.
+        // Usate SOLO per penalizzare il punteggio tra candidati già validi
+        // — non per scartarli: una Deluxe Edition ha comunque la tracklist
+        // giusta (di solito l'originale + bonus track in coda).
         $avoidTitle = [
             'deluxe', 'bonus', 'remaster', 'remastered', 'reissue',
             'expanded', 'anniversary', 'special', 'collector',
@@ -281,6 +303,35 @@ class AlbumMetadataService
 
         foreach ($releases as $rel) {
             if (empty($rel['title'])) continue;
+
+            // ============ SCARTI HARD — non omonimi, non tipi sbagliati ============
+            //
+            // Prima questi controlli non esistevano: la scelta si basava
+            // solo sul punteggio di rilevanza di MusicBrainz, che NON
+            // garantisce che l'artista accreditato o il tipo di release
+            // siano quelli giusti (una compilation "Various Artists" con
+            // dentro una traccia dallo stesso titolo poteva tranquillamente
+            // "vincere" se il punteggio nativo era alto).
+
+            // Artista accreditato: scarta compilation "Various Artists" e omonimi.
+            if ($artist !== '' && !$this->artistCreditMatches($rel, $artist)) {
+                continue;
+            }
+
+            // Tipo release: scarta Single, EP, Broadcast, Compilation, Live,
+            // Soundtrack, Remix, ecc. — non sono mai l'album cercato.
+            $rg             = $rel['release-group'] ?? [];
+            $primaryType    = strtolower($rg['primary-type'] ?? '');
+            $secondaryTypes = array_map('strtolower', $rg['secondary-types'] ?? []);
+
+            if ($primaryType !== '' && $primaryType !== 'album') {
+                continue;
+            }
+            if (!empty($secondaryTypes)) {
+                continue;
+            }
+
+            // ============ PUNTEGGIO (solo tra i candidati sopravvissuti) ============
 
             $title = strtolower($rel['title']);
 
@@ -351,12 +402,49 @@ class AlbumMetadataService
         return $best ?? [];
     }
 
-    // FIX 2: getTracksFromMusicBrainzRelease ora prende SOLO
-    // il primo medium (Disc 1 / disco principale).
-    // In MusicBrainz i media sono sempre ordinati: il primo è l'album originale,
-    // i successivi sono bonus disc, disc 2, DVD, ecc.
-    // NON usare "il medium con più tracce" perché nelle edizioni Collector's
-    // il disco bonus può avere più tracce del disco principale.
+    // ----------------------------------------------------------
+    // Verifica che l'artista accreditato sulla release MusicBrainz
+    // corrisponda (con tolleranza) all'artista cercato. È il controllo
+    // che manca per bloccare il caso più insidioso: query "larghe" che
+    // agganciano compilation "Various Artists" o un omonimo che ha
+    // inciso un disco con lo stesso titolo dell'album cercato.
+    // ----------------------------------------------------------
+    private function artistCreditMatches(array $rel, string $artist): bool
+    {
+        $credit = $rel['artist-credit'] ?? [];
+        if (empty($credit)) {
+            // Nessun dato per verificare: non blocchiamo, per non perdere
+            // match legittimi quando MusicBrainz non restituisce il campo.
+            return true;
+        }
+
+        $phrase = '';
+        foreach ($credit as $c) {
+            $phrase .= ($c['name'] ?? '') . ($c['joinphrase'] ?? '');
+        }
+        $phrase = strtolower(trim($phrase));
+        $needle = strtolower(trim($artist));
+
+        if ($phrase === '' || $needle === '') {
+            return true;
+        }
+
+        // "Various Artists" è la bandiera rossa più comune per le compilation
+        if (strpos($phrase, 'various artist') !== false) {
+            return false;
+        }
+
+        similar_text($phrase, $needle, $percent);
+
+        return $percent >= 55.0;
+    }
+
+    // Prende SOLO il primo medium (disco/lato principale): in MusicBrainz
+    // i media sono sempre ordinati, il primo è l'album originale, i
+    // successivi sono bonus disc, disc 2, DVD, ecc. Un vinile singolo
+    // (anche a più lati, A/B/C/D) resta comunque UN solo medium, quindi
+    // questa regola non taglia via nessun lato dell'LP originale — taglia
+    // solo dischi/bonus AGGIUNTIVI di eventuali edizioni multi-disco.
     private function getTracksFromMusicBrainzRelease(string $mbid): array
     {
         $url  = 'https://musicbrainz.org/ws/2/release/' . $mbid . '?inc=recordings+media&fmt=json';
@@ -364,22 +452,18 @@ class AlbumMetadataService
 
         if (empty($data['media'])) return [];
 
+        $medium = $data['media'][0] ?? [];
+        if (empty($medium['tracks'])) return [];
+
         $tracks = [];
+        foreach ($medium['tracks'] as $t) {
+            if (empty($t['title'])) continue;
 
-        // PRENDE TUTTI I DISCHI (CD1, CD2, VINILE A/B/C/D ecc.)
-        foreach ($data['media'] as $medium) {
-
-            if (empty($medium['tracks'])) continue;
-
-            foreach ($medium['tracks'] as $t) {
-                if (empty($t['title'])) continue;
-
-                $tracks[] = [
-                    'position' => count($tracks) + 1,
-                    'title'    => $t['title'],
-                    'duration' => !empty($t['length']) ? (int)($t['length'] / 1000) : 0
-                ];
-            }
+            $tracks[] = [
+                'position' => count($tracks) + 1,
+                'title'    => $t['title'],
+                'duration' => !empty($t['length']) ? (int)($t['length'] / 1000) : 0
+            ];
         }
 
         return $tracks;
@@ -395,7 +479,7 @@ class AlbumMetadataService
             . '&artist='        . urlencode($artist)
             . '&release_title=' . urlencode($album)
             . ($year > 0 ? '&year=' . $year : '')
-            . '&per_page=5';
+            . '&per_page=15';
 
         $headers = ['Authorization: Discogs token=' . DISCOGS_TOKEN];
 
@@ -457,12 +541,25 @@ class AlbumMetadataService
             'bootleg', 'promo', 'edition', 'version'
         ];
 
+        // Formati che indicano quasi sempre un disco diverso dall'album
+        // completo (singolo, EP, sampler promozionale...): scarto hard,
+        // non solo penalità — prima non c'era nessun controllo sul
+        // formato e questi risultati potevano tranquillamente "vincere".
+        $avoidFormat = ['single', 'ep', 'sampler', 'promo', 'flexi-disc', 'maxi-single'];
+
         $best      = null;
         $bestScore = -9999;
 
         foreach ($results as $row) {
             $title = strtolower($row['title'] ?? '');
             if ($title === '') continue;
+
+            $formats = array_map('strtolower', $row['format'] ?? []);
+            $isBadFormat = false;
+            foreach ($avoidFormat as $f) {
+                if (in_array($f, $formats, true)) { $isBadFormat = true; break; }
+            }
+            if ($isBadFormat) continue;
 
             similar_text($album, $title, $score);
 
@@ -483,8 +580,9 @@ class AlbumMetadataService
                 else                $score -= 10;
             }
 
-            // Bonus master_id (release principale)
-            if (!empty($row['master_id'])) $score += 15;
+            // Bonus master_id (release principale) — alzato: è quasi
+            // sempre l'edizione di riferimento tra le tante ristampe
+            if (!empty($row['master_id'])) $score += 20;
 
             // Bonus presenza anno
             if (!empty($row['year'])) $score += 5;
@@ -654,11 +752,21 @@ class AlbumMetadataService
 
     // ----------------------------------------------------------
     // Scarica cover da URL remoto e salva in uploads/covers/
+    //
+    // FIX: la CDN immagini di Discogs (img.discogs.com/api-img.discogs.com)
+    // risponde 403 Forbidden a chi manda uno User-Agent generico/senza
+    // contatto — comportamento documentato e ricorrente (forum Discogs),
+    // non un problema di rete intermittente. Prima qui veniva mandato
+    // "MusicArchive/1.0" hardcoded, diverso (e "peggiore") di
+    // APP_USER_AGENT già usato con successo da httpGetJson() per le
+    // chiamate JSON. Ora è lo stesso ovunque.
     // ----------------------------------------------------------
     public function downloadCover(string $url): ?string
     {
         if (!defined('COVERS_PATH') || empty($url)) return null;
         if (!is_dir(COVERS_PATH)) mkdir(COVERS_PATH, 0755, true);
+
+        $ua = defined('APP_USER_AGENT') ? APP_USER_AGENT : 'MusicArchive/1.0';
 
         $ctx = stream_context_create([
             'http' => [
@@ -666,19 +774,42 @@ class AlbumMetadataService
                 'timeout'         => 20,
                 'follow_location' => true,
                 'max_redirects'   => 10,
-                'header'          => "User-Agent: MusicArchive/1.0\r\nAccept: image/*",
+                'header'          => "User-Agent: {$ua}\r\nAccept: image/*",
+                // Senza questo, su risposta non-2xx (es. 403) lo stream
+                // wrapper fallisce e basta, senza dare accesso allo status
+                // reale: impossibile capire perché. Con ignore_errors
+                // possiamo leggere $http_response_header anche sugli errori.
+                'ignore_errors'   => true,
             ],
             'ssl' => ['verify_peer' => false, 'verify_peer_name' => false],
         ]);
 
-        $imageData = @file_get_contents($url, false, $ctx);
-        if (!$imageData || strlen($imageData) < 500) return null;
+        $imageData  = @file_get_contents($url, false, $ctx);
+        $statusCode = $this->extractHttpStatus($http_response_header ?? []);
+
+        if ($imageData === false) {
+            $this->logCoverFailure($url, $statusCode, 'connection_failed');
+            return null;
+        }
+
+        if ($statusCode !== null && $statusCode >= 400) {
+            $this->logCoverFailure($url, $statusCode, 'http_error');
+            return null;
+        }
+
+        if (strlen($imageData) < 500) {
+            $this->logCoverFailure($url, $statusCode, 'too_small');
+            return null;
+        }
 
         $sig    = substr($imageData, 0, 4);
         $isJpeg = substr($sig, 0, 2) === "\xFF\xD8";
         $isPng  = $sig === "\x89PNG";
         $isWebp = substr($imageData, 8, 4) === 'WEBP';
-        if (!$isJpeg && !$isPng && !$isWebp) return null;
+        if (!$isJpeg && !$isPng && !$isWebp) {
+            $this->logCoverFailure($url, $statusCode, 'invalid_signature');
+            return null;
+        }
 
         $ext      = $isPng ? 'png' : ($isWebp ? 'webp' : 'jpg');
         $filename = bin2hex(random_bytes(8)) . '.' . $ext;
@@ -687,6 +818,43 @@ class AlbumMetadataService
         if (file_put_contents($dest, $imageData) !== false) {
             return 'covers/' . $filename;
         }
+
+        $this->logCoverFailure($url, $statusCode, 'write_failed');
         return null;
+    }
+
+    // Estrae l'ultimo status code HTTP da $http_response_header (l'ultimo,
+    // non il primo: con i redirect ce n'è uno per hop, l'ultimo è quello
+    // finale dopo aver seguito la catena).
+    private function extractHttpStatus(array $headers): ?int
+    {
+        $status = null;
+        foreach ($headers as $h) {
+            if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
+                $status = (int)$m[1];
+            }
+        }
+        return $status;
+    }
+
+    // Log leggero su file dei fallimenti di download cover: prima non
+    // esisteva nessuna traccia, quindi un 403 spariva nel nulla e non si
+    // poteva mai sapere se era un caso isolato o un pattern ricorrente.
+    private function logCoverFailure(string $url, ?int $statusCode, string $reason): void
+    {
+        if (!defined('BASE_PATH')) return;
+
+        $dir = BASE_PATH . '/cache';
+        if (!is_dir($dir)) @mkdir($dir, 0775, true);
+
+        $line = sprintf(
+            "[%s] reason=%s status=%s url=%s\n",
+            date('Y-m-d H:i:s'),
+            $reason,
+            $statusCode ?? 'n/a',
+            $url
+        );
+
+        @file_put_contents($dir . '/cover_download_errors.log', $line, FILE_APPEND | LOCK_EX);
     }
 }
