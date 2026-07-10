@@ -7,8 +7,9 @@ require_once BASE_PATH . '/app/models/Artist.php';
 $albumModel  = new Album();
 $artistModel = new Artist();
 $stats       = $albumModel->getStats();
-$recent      = $albumModel->getAll([], 'a.created_at', 'DESC');
-$recent      = array_slice($recent, 0, 24);
+// Scheda unica per album: getAll fornisce direttamente l'array
+// 'formats' di ogni scheda, ordinata per aggiunta più recente.
+$recent      = $albumModel->getAll([], 'a.created_at', 'DESC', 24, 0);
 $topArtists  = $artistModel->getTopArtists(5);
 $pageTitle   = 'Dashboard';
 
@@ -79,8 +80,12 @@ require BASE_PATH . '/views/layout/header.php';
     <!-- Tutte le celle presenti nell'HTML, visibilità gestita da JS -->
     <div class="grz-album-grid" id="recent-albums-grid">
       <?php foreach ($recent as $i => $a):
-        $fmt        = $a['format_name'] ?? '';
-        $badgeClass = formatBadgeClass($fmt);
+        // Tutti i formati posseduti della scheda (badge informativi:
+        // la scheda è una sola), sovrapposti alla cover via CSS.
+        // Fallback sulla colonna legacy per robustezza.
+        $tileFormats = !empty($a['formats'])
+          ? $a['formats']
+          : [['name' => $a['format_name'] ?? '']];
       ?>
         <div class="grz-album-cell">
           <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>"
@@ -91,9 +96,6 @@ require BASE_PATH . '/views/layout/header.php';
                           : ($a['cover_url'] ? htmlspecialchars($a['cover_url']) : BASE_URL . '/public/img/placeholder.png') ?>"
                    alt="<?= htmlspecialchars($a['title']) ?>"
                    loading="lazy">
-              <span class="badge badge-format <?= $badgeClass ?> grz-cover-badge">
-                <?= htmlspecialchars($fmt) ?>
-              </span>
             </div>
             <div class="grz-album-tile__info">
               <span class="grz-album-tile__title"><?= htmlspecialchars($a['title']) ?></span>
@@ -103,6 +105,13 @@ require BASE_PATH . '/views/layout/header.php';
               <?php endif; ?>
             </div>
           </a>
+          <div class="grz-tile-badges">
+            <?php foreach ($tileFormats as $fmt): ?>
+              <span class="badge badge-format <?= formatBadgeClass($fmt['name']) ?>">
+                <?= htmlspecialchars($fmt['name']) ?>
+              </span>
+            <?php endforeach; ?>
+          </div>
         </div>
       <?php endforeach; ?>
     </div>
@@ -307,7 +316,8 @@ function formatBadgeClass(string $format): string
   switch ($format) {
     case 'Vinile':       return 'bg-warning';
     case 'CD':           return 'bg-info';
-    case 'Musicassetta': return 'bg-success';
+    case 'Musicassetta':
+    case 'Tape':         return 'bg-success';
     case 'Digital':      return 'bg-primary';
     default:             return 'bg-secondary';
   }
@@ -318,7 +328,8 @@ function formatBadgeColor(string $format): string
   switch ($format) {
     case 'Vinile':       return 'warning';
     case 'CD':           return 'info';
-    case 'Musicassetta': return 'success';
+    case 'Musicassetta':
+    case 'Tape':         return 'success';
     case 'Digital':      return 'primary';
     default:             return 'secondary';
   }

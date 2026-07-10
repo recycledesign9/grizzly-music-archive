@@ -12,8 +12,15 @@ function srFmtClass(string $n): string {
     $n = strtolower($n);
     if (strpos($n, 'vinile') !== false || strpos($n, 'vinyl') !== false) return 'bg-warning';
     if (strpos($n, 'cd')    !== false) return 'bg-info';
-    if (strpos($n, 'cass')  !== false) return 'bg-success';
+    if (strpos($n, 'cass')  !== false || strpos($n, 'tape') !== false) return 'bg-success';
+    if (strpos($n, 'digital') !== false) return 'bg-primary';
     return 'bg-secondary';
+}
+
+// Tutti i formati della scheda, con fallback sulla colonna legacy
+function srFormats(array $a): array {
+    if (!empty($a['formats'])) return $a['formats'];
+    return [['name' => $a['format_name'] ?? '']];
 }
 ?>
 
@@ -103,9 +110,11 @@ function srFmtClass(string $n): string {
           <div class="sr-single-title"><?= htmlspecialchars($a['title']) ?></div>
           <div class="sr-single-artist"><?= htmlspecialchars($a['artist_name']) ?></div>
           <div class="sr-single-meta">
-            <span class="badge-format <?= srFmtClass($a['format_name']) ?>">
-              <?= htmlspecialchars($a['format_name']) ?>
-            </span>
+            <?php foreach (srFormats($a) as $fmt): ?>
+              <span class="badge-format <?= srFmtClass($fmt['name']) ?>">
+                <?= htmlspecialchars($fmt['name']) ?>
+              </span>
+            <?php endforeach; ?>
             <?php if (!empty($a['year'])): ?>
               <span class="sr-single-year"><?= (int)$a['year'] ?></span>
             <?php endif; ?>
@@ -153,9 +162,11 @@ function srFmtClass(string $n): string {
                 </a>
               </td>
               <td>
-                <span class="badge-format <?= srFmtClass($a['format_name']) ?>">
-                  <?= htmlspecialchars($a['format_name']) ?>
-                </span>
+                <?php foreach (srFormats($a) as $fmt): ?>
+                  <span class="badge-format <?= srFmtClass($fmt['name']) ?> me-1">
+                    <?= htmlspecialchars($fmt['name']) ?>
+                  </span>
+                <?php endforeach; ?>
               </td>
               <td class="text-muted"><?= htmlspecialchars($a['year'] ?? '—') ?></td>
             </tr>

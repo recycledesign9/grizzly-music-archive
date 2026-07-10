@@ -3770,3 +3770,47 @@ body:has(#sticky-player[style*="flex"]) {
     transform: scale(1.15);
   }
 }
+
+
+/* Profilo artista — card discografia */
+.disco-card-wrap {
+  position: relative;
+}
+.disco-card__badges {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  z-index: 2;
+}
+ 
+/* Dashboard — tile "Aggiunti di recente" */
+.grz-album-cell {
+  position: relative;
+}
+.grz-tile-badges {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  z-index: 2;
+}
+ 
+/* Badge come link: leggibilità sulla cover + feedback hover */
+.disco-card__badges .badge-format,
+.grz-tile-badges .badge-format {
+  text-decoration: none;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+.disco-card__badges .badge-format:hover,
+.grz-tile-badges .badge-format:hover,
+a.badge-format:hover {
+  filter: brightness(1.1);
+}
