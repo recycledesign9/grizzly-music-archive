@@ -25,8 +25,14 @@
  */
 class ArchiveTransfer
 {
-    /** Versione del formato di export (per compatibilità futura) */
-    private const FORMAT_VERSION = 1;
+    /**
+     * Versione del formato di export.
+     * v1: formati come colonna albums.format_id (schede separate)
+     * v2: formati multipli nella tabella ponte album_formats
+     * L'import accetta entrambe: per gli archivi v1 la tabella ponte
+     * viene ricostruita dalla colonna legacy (vedi import()).
+     */
+    private const FORMAT_VERSION = 2;
 
     /**
      * Tabelle nell'ORDINE DI IMPORT (FK-safe).
@@ -39,6 +45,7 @@ class ArchiveTransfer
         'labels',
         'artists',
         'albums',
+        'album_formats',
         'artist_discography',
         'tracks',
         'audio_files',
@@ -137,6 +144,11 @@ class ArchiveTransfer
             return [];
         }
 
+        // Tabella assente (DB non ancora migrato): dump vuoto, non fatale
+        if (!$this->tableExists($table)) {
+            return [];
+        }
+
         $rows = $this->db->query("SELECT * FROM `$table`")->fetchAll(PDO::FETCH_ASSOC);
 
         if ($table === 'settings') {
@@ -196,12 +208,31 @@ class ArchiveTransfer
             $this->db->beginTransaction();
 
             foreach (self::TABLES as $table) {
+                // Tabella assente su questo DB (non ancora migrato):
+                // la si salta senza far fallire l'intero import
+                if (!$this->tableExists($table)) {
+                    $counts[$table] = 0;
+                    continue;
+                }
                 $rows = $payload['tables'][$table] ?? [];
                 // svuota la tabella
                 $this->db->exec("DELETE FROM `$table`");
                 // reinserisce
                 $inserted = $this->insertRows($table, $rows);
                 $counts[$table] = $inserted;
+            }
+
+            // Retrocompatibilità archivi v1 (senza album_formats):
+            // ricostruisce la tabella ponte dalla colonna legacy
+            // albums.format_id, così ogni album importato mantiene
+            // il suo formato. INSERT IGNORE: innocuo sugli archivi v2.
+            if ($this->tableExists('album_formats') && empty($counts['album_formats'])) {
+                $this->db->exec("
+                    INSERT IGNORE INTO album_formats (album_id, format_id)
+                    SELECT id, format_id FROM albums WHERE format_id IS NOT NULL
+                ");
+                $counts['album_formats'] = (int)$this->db
+                    ->query('SELECT COUNT(*) FROM album_formats')->fetchColumn();
             }
 
             $this->db->commit();
@@ -277,12 +308,32 @@ class ArchiveTransfer
 
         $data = ['__format' => self::FORMAT_VERSION, 'tables' => []];
         foreach (self::TABLES as $table) {
-            $data['tables'][$table] = $this->db->query("SELECT * FROM `$table`")->fetchAll(PDO::FETCH_ASSOC);
+            $data['tables'][$table] = $this->dumpTableRaw($table);
         }
 
         $path = $dir . '/backup-before-import-' . date('Ymd-His') . '.json';
         @file_put_contents($path, json_encode($data, JSON_UNESCAPED_UNICODE));
         return $path;
+    }
+
+    /** Verifica l'esistenza di una tabella nel database corrente. */
+    private function tableExists(string $table): bool
+    {
+        $stmt = $this->db->prepare('SHOW TABLES LIKE :t');
+        $stmt->execute([':t' => $table]);
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
+     * Dump grezzo di una tabella per il backup pre-import
+     * (senza il filtro settings di dumpTable). Tabella assente → [].
+     */
+    private function dumpTableRaw(string $table): array
+    {
+        if (!in_array($table, self::TABLES, true) || !$this->tableExists($table)) {
+            return [];
+        }
+        return $this->db->query("SELECT * FROM `$table`")->fetchAll(PDO::FETCH_ASSOC);
     }
 
     /**
