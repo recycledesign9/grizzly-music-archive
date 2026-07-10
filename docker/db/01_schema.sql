@@ -127,6 +127,25 @@ CREATE TABLE `albums` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Table: album_formats
+-- Bridge table: formats owned per album (one card, multiple formats).
+-- Source of truth for formats; albums.format_id is kept in sync as the
+-- primary format (lowest format id) for legacy/display purposes.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE `album_formats` (
+  `album_id`  INT(10)    UNSIGNED NOT NULL,
+  `format_id` TINYINT(3) UNSIGNED NOT NULL,
+  PRIMARY KEY (`album_id`, `format_id`),
+  KEY `idx_af_format` (`format_id`),
+  CONSTRAINT `fk_af_album`
+    FOREIGN KEY (`album_id`)  REFERENCES `albums` (`id`)
+    ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `fk_af_format`
+    FOREIGN KEY (`format_id`) REFERENCES `formats` (`id`)
+    ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Table: artist_discography
 -- Cached official artist discography from MusicBrainz release-groups.
 -- This is separate from local albums: it can contain albums not owned yet.

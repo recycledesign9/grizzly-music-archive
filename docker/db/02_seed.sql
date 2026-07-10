@@ -83,6 +83,11 @@ INSERT INTO `albums` (`id`, `artist_id`, `genre_id`, `label_id`, `format_id`, `t
 (11, 7, 5,  5,  2, 'Ten',                          'ten-11',                       1991, 'Very Good', 1, NULL, NULL, NULL, '9154cfe5-ef58-458f-b5d4-eb6ca3e404c4'),
 (12, 8, 7,  2,  1, 'AM',                           'am-12',                        2013, 'Mint',      1, NULL, NULL, NULL, '700950cf-5491-4349-87f8-5b85b40f0340');
 
+-- ── Album formats (bridge) ──────────────────────────────────────────────────
+-- One row per owned format; derived from the demo albums' primary format.
+INSERT INTO `album_formats` (`album_id`, `format_id`)
+SELECT `id`, `format_id` FROM `albums`;
+
 -- ── Tracks ────────────────────────────────────────────────────────────────────
 -- Abbey Road (album 1)
 INSERT INTO `tracks` (`album_id`, `position`, `title`, `duration_sec`) VALUES
