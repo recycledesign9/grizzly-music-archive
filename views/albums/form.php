@@ -44,7 +44,18 @@ function selectedId($key, $album, $old)
 require BASE_PATH . '/views/layout/header.php';
 
 $currentArtistId  = selectedId('artist_id', $album, $old);
-$currentFormatId  = selectedId('format_id', $album, $old);
+
+// Formati correnti (checkbox multipli): priorità al vecchio input
+// del form (validazione fallita), poi ai formati della scheda in
+// modifica, con fallback sulla colonna legacy format_id.
+$currentFormatIds = [];
+if (!empty($old['format_ids']) && is_array($old['format_ids'])) {
+  $currentFormatIds = array_map('intval', $old['format_ids']);
+} elseif (!empty($album['formats'])) {
+  $currentFormatIds = array_map('intval', array_column($album['formats'], 'id'));
+} elseif (!empty($album['format_id'])) {
+  $currentFormatIds = [(int)$album['format_id']];
+}
 $currentGenreId   = selectedId('genre_id', $album, $old);
 $currentLabelId   = selectedId('label_id', $album, $old);
 $currentCondition = isset($old['condition'])
@@ -148,29 +159,45 @@ $artistNameValue = isset($old['artist_name'])
                 <?php endif; ?>
               </div>
 
-              <div class="col-6">
+              <div class="col-12 col-lg-8">
                 <label class="form-label fw-semibold">
-                  Formato <span class="text-danger">*</span>
+                  Formati posseduti <span class="text-danger">*</span>
                 </label>
-                <select
-                  name="format_id"
-                  class="form-select <?= !empty($errors['format_id']) ? 'is-invalid' : '' ?>"
-                  required>
-                  <option value="">Seleziona…</option>
-                  <?php foreach ($formats as $f): ?>
-                    <option
-                      value="<?= (int)$f['id'] ?>"
-                      <?= ((int)$currentFormatId === (int)$f['id']) ? 'selected' : '' ?>>
-                      <?= htmlspecialchars($f['name'], ENT_QUOTES, 'UTF-8') ?>
-                    </option>
+                <!-- Checkbox multipli: la scheda è una, i formati sono
+                     un suo attributo (es. vinile E CD dello stesso album).
+                     Ordinati per id (Vinile, CD, Musicassetta, Digital).
+                     Il campo occupa 2/3 della riga: i quattro checkbox
+                     stanno su una riga con spaziatura normale, senza
+                     compressioni; su mobile il campo prende tutta la
+                     larghezza e le voci vanno a capo in modo pulito. -->
+                <?php
+                $formatsRow = $formats;
+                usort($formatsRow, function ($a, $b) {
+                  return (int)$a['id'] - (int)$b['id'];
+                });
+                ?>
+                <div class="d-flex flex-wrap align-items-center column-gap-3 row-gap-1 pt-1">
+                  <?php foreach ($formatsRow as $f): ?>
+                    <div class="form-check text-nowrap">
+                      <input
+                        class="form-check-input <?= !empty($errors['format_ids']) ? 'is-invalid' : '' ?>"
+                        type="checkbox"
+                        name="format_ids[]"
+                        id="formatCheck<?= (int)$f['id'] ?>"
+                        value="<?= (int)$f['id'] ?>"
+                        <?= in_array((int)$f['id'], $currentFormatIds, true) ? 'checked' : '' ?>>
+                      <label class="form-check-label" for="formatCheck<?= (int)$f['id'] ?>">
+                        <?= htmlspecialchars($f['name'], ENT_QUOTES, 'UTF-8') ?>
+                      </label>
+                    </div>
                   <?php endforeach; ?>
-                </select>
-                <?php if (!empty($errors['format_id'])): ?>
-                  <div class="invalid-feedback d-block"><?= htmlspecialchars($errors['format_id'], ENT_QUOTES, 'UTF-8') ?></div>
+                </div>
+                <?php if (!empty($errors['format_ids'])): ?>
+                  <div class="text-danger small mt-1"><?= htmlspecialchars($errors['format_ids'], ENT_QUOTES, 'UTF-8') ?></div>
                 <?php endif; ?>
               </div>
 
-              <div class="col-6">
+              <div class="col-12 col-lg-4">
                 <label class="form-label fw-semibold">Anno</label>
                 <input
                   type="number"

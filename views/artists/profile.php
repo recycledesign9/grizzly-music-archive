@@ -164,6 +164,13 @@ $discoFetched = !empty($artist['disco_fetched_at']);
 
   <div class="artist-discography">
     <?php foreach ($albums as $a): ?>
+      <?php
+      // Tutti i formati posseduti della scheda (badge informativi:
+      // la scheda è una sola). Fallback sulla colonna legacy.
+      $cardFormats = !empty($a['formats'])
+        ? $a['formats']
+        : [['name' => $a['format_name']]];
+      ?>
       <a class="disco-card album-card"
         href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>">
         <div class="disco-card__cover">
@@ -171,8 +178,12 @@ $discoFetched = !empty($artist['disco_fetched_at']);
                       ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
                       : ($a['cover_url'] ? htmlspecialchars($a['cover_url']) : BASE_URL . '/public/img/placeholder.png') ?>"
             alt="<?= htmlspecialchars($a['title']) ?>" loading="lazy">
-          <span class="badge badge-format bg-<?= formatBadge($a['format_name']) ?> disco-card__fmt">
-            <?= htmlspecialchars($a['format_name']) ?>
+          <span class="disco-card__fmt d-flex flex-wrap gap-1">
+            <?php foreach ($cardFormats as $fmt): ?>
+              <span class="badge badge-format bg-<?= formatBadge($fmt['name']) ?>">
+                <?= htmlspecialchars($fmt['name']) ?>
+              </span>
+            <?php endforeach; ?>
           </span>
         </div>
         <div class="disco-card__body">
@@ -430,6 +441,7 @@ function formatBadge($f)
     case 'CD':
       return 'info';
     case 'Musicassetta':
+    case 'Tape':
       return 'success';
     case 'Digital':
       return 'primary';

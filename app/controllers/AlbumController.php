@@ -115,6 +115,9 @@ class AlbumController
       $page = 1;
     }
 
+    // Scheda unica per album: i formati sono un attributo della
+    // scheda (array 'formats' fornito da getAll), niente più
+    // raggruppamenti. Conteggio e paginazione sono per titoli.
     $totalRecords = $this->albumModel->countAll($filters);
     $totalPages   = max(1, (int)ceil($totalRecords / $perPage));
 
@@ -256,10 +259,75 @@ class AlbumController
       return;
     }
 
-    // Gestione artista — stringa libera o id esistente
-    $artistId = !empty($_POST['artist_id'])
+    // -------------------------------------------------------
+    // Formati selezionati: interi validati contro la tabella
+    // formats (whitelist), deduplicati.
+    // -------------------------------------------------------
+    $validFormatIds = array_map('intval', array_column($this->albumModel->getFormats(), 'id'));
+    $formatIds = array_values(array_intersect(
+      array_unique(array_map('intval', (array)($_POST['format_ids'] ?? []))),
+      $validFormatIds
+    ));
+
+    if (empty($formatIds)) {
+      $errors = ['format_ids' => 'Seleziona almeno un formato valido.'];
+      if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && $_SERVER['HTTP_X_REQUESTED_WITH'] === 'XMLHttpRequest') {
+        header('Content-Type: application/json');
+        echo json_encode(['errors' => $errors]);
+        exit;
+      }
+      $_SESSION['form_errors'] = $errors;
+      $_SESSION['form_old']    = $_POST;
+      $route = $id ? "albums/edit/$id" : 'albums/create';
+      $this->redirect($route);
+      return;
+    }
+
+    // -------------------------------------------------------
+    // Controllo duplicati — stesso artista + titolo (il formato
+    // non conta più: per aggiungere un formato si MODIFICA la
+    // scheda esistente). L'artista viene risolto in SOLA LETTURA
+    // (findByName): se l'inserimento viene bloccato non deve
+    // restare nel DB un artista orfano creato da findOrCreate.
+    // In modifica ($id) il record corrente viene escluso.
+    // -------------------------------------------------------
+    $checkArtistId = !empty($_POST['artist_id'])
       ? (int)$_POST['artist_id']
-      : $this->artistModel->findOrCreate($_POST['artist_name'] ?? '');
+      : $this->artistModel->findByName($_POST['artist_name'] ?? '');
+
+    if ($checkArtistId) {
+      $duplicate = $this->albumModel->findDuplicate(
+        $checkArtistId,
+        trim($_POST['title'] ?? ''),
+        $id
+      );
+
+      if ($duplicate) {
+        $errors = [
+          'duplicate' => 'Questo album è già in archivio. '
+            . 'Per aggiungere un formato (es. il CD oltre al vinile) apri la scheda esistente, '
+            . 'premi Modifica e spunta il nuovo formato.',
+        ];
+
+        // Stesso flusso errori della validazione
+        if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && $_SERVER['HTTP_X_REQUESTED_WITH'] === 'XMLHttpRequest') {
+          header('Content-Type: application/json');
+          echo json_encode(['errors' => $errors]);
+          exit;
+        }
+        $_SESSION['form_errors'] = $errors;
+        $_SESSION['form_old']    = $_POST;
+        $route = $id ? "albums/edit/$id" : 'albums/create';
+        $this->redirect($route);
+        return;
+      }
+    }
+
+    // Gestione artista — stringa libera o id esistente.
+    // Riusa l'id già risolto in lettura; crea l'artista solo ora,
+    // a controllo duplicati superato.
+    $artistId = $checkArtistId
+      ?: $this->artistModel->findOrCreate($_POST['artist_name'] ?? '');
 
     // Gestione label (crea se nuova)
     $labelId = $this->resolveLabel($_POST);
@@ -296,7 +364,9 @@ class AlbumController
       'artist_id'   => $artistId,
       'genre_id'    => $genreId,
       'label_id'    => $labelId,
-      'format_id'   => (int)$_POST['format_id'],
+      // Colonna legacy sincronizzata: formato principale
+      // (la fonte di verità è album_formats, vedi syncFormats)
+      'format_id'   => min($formatIds),
       'title'       => trim($_POST['title']),
       'year' => $yearFinal,
       'condition'   => $_POST['condition']   ?? 'Very Good',
@@ -314,6 +384,9 @@ class AlbumController
     } else {
       $albumId = $this->albumModel->create($data);
     }
+
+    // Sincronizza la tabella ponte dei formati (fonte di verità)
+    $this->albumModel->syncFormats($albumId, $formatIds);
 
     // Invalida la cache delle descrizioni Wikipedia: se artista/titolo
     // sono cambiati (o se prima il disco non aveva ancora una scheda),
@@ -425,8 +498,8 @@ class AlbumController
     if (empty(trim($post['title'] ?? ''))) {
       $errors['title'] = 'Il titolo è obbligatorio.';
     }
-    if (empty($post['format_id'])) {
-      $errors['format_id'] = 'Seleziona un formato.';
+    if (empty($post['format_ids']) || !is_array($post['format_ids'])) {
+      $errors['format_ids'] = 'Seleziona almeno un formato.';
     }
     if (empty($post['artist_id']) && empty(trim($post['artist_name'] ?? ''))) {
       $errors['artist'] = 'Inserisci il nome artista.';

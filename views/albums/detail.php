@@ -123,11 +123,20 @@ if ($albumTotalSec > 0) {
         alt="Cover <?= htmlspecialchars($album['title']) ?>">
     </div>
 
-    <!-- Badge formato / genere -->
+    <!-- Badge formati / genere -->
     <div class="d-flex flex-wrap gap-2 mb-3">
-      <span class="badge badge-format bg-<?= formatBadge($album['format_name']) ?>">
-        <?= htmlspecialchars($album['format_name']) ?>
-      </span>
+      <?php
+      // Tutti i formati posseduti (tabella ponte), con fallback
+      // sulla colonna legacy per robustezza.
+      $albumFormats = !empty($album['formats'])
+        ? $album['formats']
+        : [['name' => $album['format_name']]];
+      ?>
+      <?php foreach ($albumFormats as $fmt): ?>
+        <span class="badge badge-format bg-<?= formatBadge($fmt['name']) ?>">
+          <?= htmlspecialchars($fmt['name']) ?>
+        </span>
+      <?php endforeach; ?>
       <?php if ($album['genre_name']): ?>
         <span class="badge badge-genre"><?= htmlspecialchars($album['genre_name']) ?></span>
       <?php endif; ?>
@@ -2577,6 +2586,7 @@ function formatBadge(string $f): string
     case 'CD':
       return 'info';
     case 'Musicassetta':
+    case 'Tape':
       return 'success';
     default:
       return 'secondary';

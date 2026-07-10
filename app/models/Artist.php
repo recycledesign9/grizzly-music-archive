@@ -16,6 +16,20 @@ class Artist {
         return $stmt->fetch();
     }
 
+    // Lookup in SOLA LETTURA: cerca l'artista per nome senza mai
+    // crearlo. Usato dal controllo duplicati in AlbumController::save()
+    // per non lasciare artisti orfani se l'inserimento viene bloccato.
+    public function findByName(string $name): ?int {
+        $name = trim($name);
+        if ($name === '') return null;
+
+        $stmt = $this->db->prepare("SELECT id FROM artists WHERE name = :name LIMIT 1");
+        $stmt->execute([':name' => $name]);
+        $row = $stmt->fetch();
+
+        return $row ? (int)$row['id'] : null;
+    }
+
     public function findOrCreate(string $name): int {
         $name = trim($name);
         $stmt = $this->db->prepare("SELECT id FROM artists WHERE name = :name LIMIT 1");
@@ -29,20 +43,71 @@ class Artist {
         return (int)$this->db->lastInsertId();
     }
 
+    // Album dell'artista (scheda unica): una riga per album con
+    //   formats       → array [id, name] dei formati posseduti
+    //   editions      → compat con le viste dell'ex raggruppamento
+    //   edition_count → numero formati
+    // Colonne invariate rispetto a prima (a.* + format_name legacy,
+    // genre_name, track_count): la disambiguazione MusicBrainz che
+    // legge solo 'title' resta compatibile.
     public function getAlbums(int $artistId): array {
         $stmt = $this->db->prepare("
             SELECT a.*, f.name AS format_name, g.name AS genre_name,
-                   COUNT(t.id) AS track_count
+                   (
+                     SELECT COUNT(*)
+                     FROM tracks t
+                     WHERE t.album_id = a.id
+                   ) AS track_count,
+                   (
+                     SELECT GROUP_CONCAT(CONCAT(f2.id, ':::', f2.name) ORDER BY f2.id SEPARATOR '|||')
+                     FROM album_formats af2
+                     JOIN formats f2 ON af2.format_id = f2.id
+                     WHERE af2.album_id = a.id
+                   ) AS formats_raw
             FROM albums a
             LEFT JOIN formats f ON a.format_id = f.id
             LEFT JOIN genres  g ON a.genre_id  = g.id
-            LEFT JOIN tracks  t ON a.id = t.album_id
             WHERE a.artist_id = :id
-            GROUP BY a.id
             ORDER BY a.year ASC, a.title ASC
         ");
         $stmt->execute([':id' => $artistId]);
-        return $stmt->fetchAll();
+
+        $rows = $stmt->fetchAll();
+
+        foreach ($rows as &$row) {
+            $row['formats'] = $this->parseFormats($row['formats_raw'] ?? null);
+            unset($row['formats_raw']);
+
+            // Compatibilità con le viste dell'ex raggruppamento:
+            // i "link edizione" puntano tutti alla stessa scheda.
+            $editions = [];
+            foreach ($row['formats'] as $f) {
+                $editions[] = ['id' => (int)$row['id'], 'format_name' => $f['name']];
+            }
+            $row['editions']      = $editions;
+            $row['edition_count'] = count($editions);
+        }
+        unset($row);
+
+        return $rows;
+    }
+
+    // Trasforma "id:::Nome|||id:::Nome" (GROUP_CONCAT) in
+    // array di formati [['id' => int, 'name' => string], ...]
+    private function parseFormats(?string $raw): array {
+        $out = [];
+        if (!$raw) return $out;
+
+        foreach (explode('|||', $raw) as $chunk) {
+            $parts = explode(':::', $chunk, 2);
+            if (count($parts) === 2 && $parts[0] !== '') {
+                $out[] = [
+                    'id'   => (int)$parts[0],
+                    'name' => $parts[1],
+                ];
+            }
+        }
+        return $out;
     }
 
     public function getTopArtists(int $limit = 10): array {
@@ -64,20 +129,28 @@ class Artist {
     // (totale album, conteggio per formato, range anni, generi)
     // ----------------------------------------------------------
     public function getAlbumStats(int $artistId): array {
+        // total/anni dalle schede; conteggi per formato dalla tabella
+        // ponte: un album vinile+CD conta 1 vinile E 1 CD.
         $stmt = $this->db->prepare("
             SELECT
-                COUNT(*)                                              AS total,
+                (SELECT COUNT(*) FROM albums WHERE artist_id = :id_total)              AS total,
                 SUM(CASE WHEN f.name = 'Vinile'        THEN 1 ELSE 0 END) AS vinili,
                 SUM(CASE WHEN f.name = 'CD'            THEN 1 ELSE 0 END) AS cd,
-                SUM(CASE WHEN f.name = 'Musicassetta' THEN 1 ELSE 0 END) AS cassette,
+                SUM(CASE WHEN f.name IN ('Musicassetta', 'Tape') THEN 1 ELSE 0 END) AS cassette,
                 SUM(CASE WHEN f.name = 'Digital'      THEN 1 ELSE 0 END) AS digital,
-                MIN(NULLIF(a.year, 0))                                AS year_min,
-                MAX(NULLIF(a.year, 0))                                AS year_max
-            FROM albums a
-            LEFT JOIN formats f ON a.format_id = f.id
+                (SELECT MIN(NULLIF(year, 0)) FROM albums WHERE artist_id = :id_ymin)   AS year_min,
+                (SELECT MAX(NULLIF(year, 0)) FROM albums WHERE artist_id = :id_ymax)   AS year_max
+            FROM album_formats af
+            JOIN albums a       ON af.album_id  = a.id
+            LEFT JOIN formats f ON af.format_id = f.id
             WHERE a.artist_id = :id
         ");
-        $stmt->execute([':id' => $artistId]);
+        $stmt->execute([
+            ':id'       => $artistId,
+            ':id_total' => $artistId,
+            ':id_ymin'  => $artistId,
+            ':id_ymax'  => $artistId,
+        ]);
         $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
         // Generi distinti presenti per l'artista

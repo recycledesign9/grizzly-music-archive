@@ -161,9 +161,19 @@ require BASE_PATH . '/views/layout/header.php';
             </td>
 
             <td>
-              <span class="badge badge-format bg-<?= formatBadge($a['format_name']) ?>">
-                <?= htmlspecialchars($a['format_name']) ?>
-              </span>
+              <?php
+              // Tutti i formati posseduti della scheda (badge
+              // informativi: la scheda è una sola). Fallback sulla
+              // colonna legacy per robustezza.
+              $rowFormats = !empty($a['formats'])
+                ? $a['formats']
+                : [['name' => $a['format_name']]];
+              ?>
+              <?php foreach ($rowFormats as $fmt): ?>
+                <span class="badge badge-format bg-<?= formatBadge($fmt['name']) ?> me-1">
+                  <?= htmlspecialchars($fmt['name']) ?>
+                </span>
+              <?php endforeach; ?>
             </td>
 
             <td><?= htmlspecialchars($a['year'] ?? '—') ?></td>
@@ -215,7 +225,7 @@ require BASE_PATH . '/views/layout/header.php';
 
     <!-- Info record -->
     <div class="small text-muted">
-      Visualizzati <?= $pagination['from'] ?>–<?= $pagination['to'] ?> di <?= $pagination['total'] ?> dischi
+      Visualizzati <?= $pagination['from'] ?>–<?= $pagination['to'] ?> di <?= $pagination['total'] ?> titoli
     </div>
 
     <!-- Paginazione numerica — solo se servono più pagine -->
@@ -317,6 +327,7 @@ function formatBadge(string $f): string
     case 'CD':
       return 'info';
     case 'Musicassetta':
+    case 'Tape':
       return 'success';
     default:
       return 'secondary';
