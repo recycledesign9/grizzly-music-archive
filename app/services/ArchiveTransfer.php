@@ -316,10 +316,21 @@ class ArchiveTransfer
         return $path;
     }
 
-    /** Verifica l'esistenza di una tabella nel database corrente. */
+    /**
+     * Verifica l'esistenza di una tabella nel database corrente.
+     * Usa information_schema e NON "SHOW TABLES LIKE ?": quest'ultima
+     * non è supportata dai prepared statement NATIVI di MySQL/MariaDB
+     * (l'app gira con PDO::ATTR_EMULATE_PREPARES = false) e mandava
+     * in errore l'export alla prima chiamata.
+     */
     private function tableExists(string $table): bool
     {
-        $stmt = $this->db->prepare('SHOW TABLES LIKE :t');
+        $stmt = $this->db->prepare('
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = DATABASE()
+              AND table_name   = :t
+        ');
         $stmt->execute([':t' => $table]);
         return (bool)$stmt->fetchColumn();
     }
