@@ -1083,6 +1083,17 @@ foreach ($tracks as $t) {
 
     if (btnYoutube) {
       btnYoutube.onclick = function() {
+        /* Mutua esclusione: qui YouTube parte in un'ALTRA SCHEDA del
+           browser, fuori dal controllo dell'app (nessun evento arriva
+           al nostro codice). L'audio nativo va quindi messo in pausa
+           ADESSO, dentro il gesto di click — dopo sarebbe impossibile.
+           I percorsi lightbox interni hanno già la loro regola in
+           youtube-player.js/app.js: questo era l'unico buco. */
+        var nativeAudio = document.getElementById('global-audio');
+        if (nativeAudio && !nativeAudio.paused && nativeAudio.src) {
+          nativeAudio.pause();
+        }
+
         var missing = parseInt(btnYoutube.dataset.missing, 10) || 0;
 
         // Scheda aperta subito, dentro il gesto utente
