@@ -66,6 +66,10 @@ function srArtistImage(array $ar): string {
   <div class="row g-2 align-items-end">
     <div class="col-12 col-lg-4">
       <label class="form-label fw-semibold small mb-1">Artista o titolo</label>
+      <!-- Niente minlength: la validazione nativa del browser
+           bloccherebbe il submit con il suo tooltip, impedendo al
+           banner in stile app (renderizzato dal server) di comparire.
+           La regola dei 2 caratteri resta applicata lato server. -->
       <input type="search" name="q" class="form-control"
         placeholder="Cerca artista o titolo…" autofocus
         value="<?= htmlspecialchars($q ?? '') ?>">
@@ -125,6 +129,12 @@ function srArtistImage(array $ar): string {
     </div>
   </div>
 </form>
+
+<?php if ($q !== '' && strlen($q) < 2): ?>
+  <div class="alert alert-warning">
+    <i class="bi bi-exclamation-triangle me-2"></i>Inserisci almeno 2 caratteri per la ricerca testuale<?= !empty($didSearch) ? ' — risultati filtrati ignorando il testo.' : '.' ?>
+  </div>
+<?php endif; ?>
 
 <?php if (empty($didSearch)): ?>
 
