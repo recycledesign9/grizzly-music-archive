@@ -558,6 +558,9 @@ class AlbumController
     $dest = COVERS_PATH . '/' . $name;
     if (!is_dir(COVERS_PATH)) mkdir(COVERS_PATH, 0755, true);
     if (move_uploaded_file($file['tmp_name'], $dest)) {
+      // Normalizza alla fonte (max 1200px, q85) — best-effort;
+      // le GIF vengono ignorate dall'optimizer (animazioni intatte)
+      ImageOptimizer::optimize($dest);
       return 'covers/' . $name;
     }
     return null;

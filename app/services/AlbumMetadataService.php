@@ -816,6 +816,8 @@ class AlbumMetadataService
         $dest     = COVERS_PATH . '/' . $filename;
 
         if (file_put_contents($dest, $imageData) !== false) {
+            // Normalizza alla fonte (max 1200px, q85) — best-effort
+            ImageOptimizer::optimize($dest);
             return 'covers/' . $filename;
         }
 
