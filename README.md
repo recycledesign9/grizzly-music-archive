@@ -119,6 +119,13 @@ ALLOWED_HOSTS=music.yourdomain.com,192.168.1.x:8080,grizzly.local:8080
 
 When Grizzly Music Archive is behind a reverse proxy such as Nginx Proxy Manager, SSL should normally terminate at the proxy. In that case, the app container can continue to run over HTTP internally.
 
+> ⚠️ **Access control notice**
+> Grizzly Music Archive is designed as a **self-hosted application for personal use**, meant to run inside your own network or private infrastructure. The application itself has **no built-in authentication**: anyone who can reach the URL has full read/write access to the archive (adding, editing and deleting albums, uploading files, and consuming external API quota).
+>
+> The reverse proxy scenarios above refer to **environment configuration and controlled remote access** (e.g. VPN, LAN hostnames, or a proxy restricted at the network level) — **not** to exposing the app as an open public service.
+>
+> If your setup makes the app reachable from the internet, protect it at the proxy or network level, for example with **Basic Authentication / Access Lists in Nginx Proxy Manager**, an IP allow-list, or a VPN (WireGuard, Tailscale). Do not expose an unprotected instance on a public domain.
+
 ### 3 — Start
 
 ```bash
@@ -356,9 +363,10 @@ All configuration is via environment variables. See `.env.example` for the full 
 
 ## 🔒 Security Notes
 
+- **No built-in authentication** — the app is intended for personal, self-hosted use inside a trusted network. If it is reachable from outside your LAN, restrict access at the reverse proxy or network level (Basic Auth / Access Lists, IP allow-list, VPN). See the *Access control notice* in the installation section.
 - Never commit `.env` to version control
 - Set `DEBUG=false` in any non-local environment
-- The `public/uploads/` directory is served by Apache; audio files outside the web root (configurable via Settings) are streamed through PHP with proper authentication
+- The `public/uploads/` directory is served by Apache; audio files outside the web root (configurable via Settings) are streamed through PHP with strict path validation
 - All database queries use PDO prepared statements
 - File uploads are validated by MIME type and extension server-side
 

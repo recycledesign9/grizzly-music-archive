@@ -355,6 +355,7 @@ foreach ($tracks as $t) {
     var PLAYLIST_ID = <?= (int)$playlist['id'] ?>;
     var PLAYLIST_NAME = <?= json_encode($playlist['name']) ?>;
     var BASE = '<?= BASE_URL ?>';
+    var CSRF_TOKEN = <?= json_encode($_SESSION['csrf_token'] ?? '') ?>;
     // youtube_id già risolti, in ordine di posizione (per il bottone YouTube)
     var YT_IDS = <?= json_encode(array_values($ytIds)) ?>;
 
@@ -1136,7 +1137,9 @@ foreach ($tracks as $t) {
                 'X-Requested-With': 'XMLHttpRequest',
                 'Content-Type': 'application/x-www-form-urlencoded'
               },
-              body: 'playlist_id=' + encodeURIComponent(PLAYLIST_ID) + '&limit=8'
+              body: 'playlist_id=' + encodeURIComponent(PLAYLIST_ID) +
+                    '&limit=8' +
+                    '&csrf_token=' + encodeURIComponent(CSRF_TOKEN)
             })
             .then(function(r) { return r.json(); })
             .then(function(d) {

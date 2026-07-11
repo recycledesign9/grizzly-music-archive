@@ -17,9 +17,15 @@
  * youtube_status='not_found' e NON vengono ritentate per 30 giorni,
  * per non bruciare quota sugli stessi fallimenti.
  *
+ * Sicurezza: richiede il token CSRF di sessione (stesso pattern degli
+ * altri endpoint POST del progetto). La sessione viene chiusa subito
+ * dopo la lettura del token per non trattenere il lock durante le
+ * chiamate lente alla YouTube API.
+ *
  * POST params:
- *   playlist_id (int) — id della playlist
- *   limit       (int) — tracce da risolvere in questa chiamata (default 8, max 15)
+ *   csrf_token  (string) — token CSRF di sessione
+ *   playlist_id (int)    — id della playlist
+ *   limit       (int)    — tracce da risolvere in questa chiamata (default 8, max 15)
  *
  * Response JSON:
  *   {
@@ -40,13 +46,6 @@ require_once dirname(__DIR__) . '/config/config.php';
 require_once dirname(__DIR__) . '/config/database.php';
 require_once dirname(__DIR__) . '/app/services/YouTubeSearchService.php';
 
-// Regola del progetto: nessun processo lungo deve trattenere il lock
-// di sessione. Qui la sessione normalmente non è attiva (endpoint
-// standalone), ma il guard è gratuito e a prova di refactoring futuri.
-if (session_status() === PHP_SESSION_ACTIVE) {
-    session_write_close();
-}
-
 while (ob_get_level()) {
     ob_end_clean();
 }
@@ -57,6 +56,28 @@ header('Content-Type: application/json; charset=utf-8');
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
     echo json_encode(['success' => false, 'error' => 'Metodo non consentito.']);
+    exit;
+}
+
+// — CSRF check ————————————————————————————————————————————
+// La sessione serve solo per leggere il token: viene chiusa
+// IMMEDIATAMENTE dopo (regola del progetto: nessun endpoint con I/O
+// lento deve trattenere il lock di sessione).
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    session_start();
+}
+$csrfSession = $_SESSION['csrf_token'] ?? '';
+session_write_close();
+
+$csrfPost = $_POST['csrf_token'] ?? '';
+if (
+    !is_string($csrfPost)
+    || $csrfPost === ''
+    || $csrfSession === ''
+    || !hash_equals($csrfSession, $csrfPost)
+) {
+    http_response_code(403);
+    echo json_encode(['success' => false, 'error' => 'Token CSRF non valido.']);
     exit;
 }
 
