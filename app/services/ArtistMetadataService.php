@@ -67,6 +67,17 @@ class ArtistMetadataService
             $wikidataId = $this->extractWikidataId($mb['relations'] ?? []);
         }
 
+        // ---------- IMMAGINE, fonte prioritaria: DEEZER ----------
+        // Foto quadrate e uniformi, API pubblica senza chiave.
+        // Il match sul nome è di uguaglianza esatta normalizzata
+        // per non pescare omonimi (lezione "Packaging"); in caso
+        // di mancato match si scende sulla catena Wikipedia/Wikidata.
+        $dz = $this->deezerArtistImage($name);
+        if ($dz !== '') {
+            $result['image_url']    = $dz;
+            $result['image_source'] = 'deezer';
+        }
+
         // ---------- 2+3) WIKIPEDIA IT (intro completa + immagine) ----------
         $wiki = $this->fetchWikipedia($wikidataId, $name, 'it');
 
@@ -80,7 +91,7 @@ class ArtistMetadataService
             $result['bio_source'] = 'wikipedia';
             $result['bio_lang']   = $wiki['lang'];
             $result['bio_url']    = $wiki['url'];
-            if (!empty($wiki['image'])) {
+            if ($result['image_url'] === '' && !empty($wiki['image'])) {
                 $result['image_url']    = $wiki['image'];
                 $result['image_source'] = 'wikimedia';
             }
@@ -111,19 +122,6 @@ class ArtistMetadataService
                 $result['image_source'] = 'wikidata';
             }
         }
-        if ($result['image_url'] === '') {
-            // d) Deezer (API pubblica, nessuna chiave richiesta): copre
-            //    gli artisti recenti o minori che hanno una pagina
-            //    Wikipedia senza immagine o non sono su Wikidata.
-            //    Il match sul nome è di uguaglianza esatta normalizzata
-            //    per non pescare omonimi (lezione "Packaging").
-            $dz = $this->deezerArtistImage($name);
-            if ($dz !== '') {
-                $result['image_url']    = $dz;
-                $result['image_source'] = 'deezer';
-            }
-        }
-
         // ---------- NAZIONALITA: fallback da Wikidata se manca ----------
         if ($result['country'] === '' && $wikidataId !== '') {
             $country = $this->wikidataCountry($wikidataId);
@@ -624,6 +622,9 @@ class ArtistMetadataService
         if (@file_put_contents($dest, $bytes) === false) {
             return null;
         }
+
+        // Normalizza alla fonte (max 1200px, q85) — best-effort
+        ImageOptimizer::optimize($dest);
 
         return 'artists/' . $name;
     }
