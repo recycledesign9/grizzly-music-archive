@@ -3492,8 +3492,8 @@ body:has(#sticky-player[style*="flex"]) {
 
 /* Badge Digital nel sistema badge-format esistente (dark mode) */
 [data-bs-theme="dark"] .badge-format.bg-primary {
-  background: rgba(99, 102, 241, 0.18) !important;
-  color: #a5b4fc !important;
+  background: #154f9b !important;
+  color: #f4f4f4 !important;
   border: 0.5px solid rgba(99, 102, 241, 0.35);
 }
 
@@ -3753,24 +3753,22 @@ body:has(#sticky-player[style*="flex"]) {
   color: var(--bs-warning);
 }
 
-
 /* ============================================================
    Feedback "album accodato": lampeggio del bottone coda
    nello sticky player.
    ============================================================ */
- 
+
 .sp-btn.sp-flash {
   color: var(--bs-warning);
-  animation: sp-flash-pulse .4s ease 3;
+  animation: sp-flash-pulse 0.4s ease 3;
 }
- 
+
 @keyframes sp-flash-pulse {
   50% {
-    background: rgba(var(--bs-warning-rgb), .25);
+    background: rgba(var(--bs-warning-rgb), 0.25);
     transform: scale(1.15);
   }
 }
-
 
 /* Profilo artista — card discografia */
 .disco-card-wrap {
@@ -3785,7 +3783,7 @@ body:has(#sticky-player[style*="flex"]) {
   gap: 4px;
   z-index: 2;
 }
- 
+
 /* Dashboard — tile "Aggiunti di recente" */
 .grz-album-cell {
   position: relative;
@@ -3800,7 +3798,7 @@ body:has(#sticky-player[style*="flex"]) {
   gap: 4px;
   z-index: 2;
 }
- 
+
 /* Badge come link: leggibilità sulla cover + feedback hover */
 .disco-card__badges .badge-format,
 .grz-tile-badges .badge-format {
@@ -3813,4 +3811,28 @@ body:has(#sticky-player[style*="flex"]) {
 .grz-tile-badges .badge-format:hover,
 a.badge-format:hover {
   filter: brightness(1.1);
+}
+
+
+/* ============================================================
+   RICERCA — avatar artisti nei risultati
+   ============================================================ */
+.sr-artist-row {
+  align-items: center;
+}
+.sr-artist-avatar {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: var(--bs-tertiary-bg);
+  border: 1px solid var(--bs-border-color);
+}
+.sr-artist-avatar--empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bs-secondary-color);
+  font-size: 1.25rem;
 }

@@ -22,6 +22,14 @@ function srFormats(array $a): array {
     if (!empty($a['formats'])) return $a['formats'];
     return [['name' => $a['format_name'] ?? '']];
 }
+
+// URL immagine artista: locale, poi remota, altrimenti stringa vuota
+// (la vista mostra un avatar segnaposto con icona)
+function srArtistImage(array $ar): string {
+    if (!empty($ar['image_local'])) return BASE_URL . '/public/uploads/' . htmlspecialchars($ar['image_local']);
+    if (!empty($ar['image_url']))   return htmlspecialchars($ar['image_url']);
+    return '';
+}
 ?>
 
 <!-- Header -->
@@ -49,25 +57,88 @@ function srFormats(array $a): array {
   </a>
 </div>
 
-<?php if (!isset($_GET['q'])): ?>
+<!-- Form di ricerca: sempre visibile, con i filtri avanzati
+     dell'archivio. Submit GET classico (stesso pattern dei filtri
+     di list.php), quindi compatibile con la navigazione SPA. -->
+<form method="get" action="<?= BASE_URL ?>/index.php" class="card card-body mb-4 shadow-sm p-3">
+  <input type="hidden" name="route" value="search/index">
+
+  <div class="row g-2 align-items-end">
+    <div class="col-12 col-lg-4">
+      <label class="form-label fw-semibold small mb-1">Artista o titolo</label>
+      <input type="search" name="q" class="form-control"
+        placeholder="Cerca artista o titolo…" autofocus
+        value="<?= htmlspecialchars($q ?? '') ?>">
+    </div>
+
+    <div class="col-6 col-lg-2">
+      <label class="form-label small text-muted mb-1">Formato</label>
+      <select name="format_id" class="form-select">
+        <option value="">Tutti</option>
+        <?php foreach ($formats as $f): ?>
+          <option value="<?= (int)$f['id'] ?>" <?= ($filters['format_id'] ?? 0) == $f['id'] ? 'selected' : '' ?>>
+            <?= htmlspecialchars($f['name']) ?>
+          </option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+
+    <div class="col-6 col-lg-2">
+      <label class="form-label small text-muted mb-1">Genere</label>
+      <select name="genre_id" class="form-select">
+        <option value="">Tutti</option>
+        <?php foreach ($genres as $g): ?>
+          <option value="<?= (int)$g['id'] ?>" <?= ($filters['genre_id'] ?? 0) == $g['id'] ? 'selected' : '' ?>>
+            <?= htmlspecialchars($g['name']) ?>
+          </option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+
+    <div class="col-6 col-lg-2">
+      <label class="form-label small text-muted mb-1">Etichetta</label>
+      <select name="label_id" class="form-select">
+        <option value="">Tutte</option>
+        <?php foreach ($labels as $l): ?>
+          <option value="<?= (int)$l['id'] ?>" <?= ($filters['label_id'] ?? 0) == $l['id'] ? 'selected' : '' ?>>
+            <?= htmlspecialchars($l['name']) ?>
+          </option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+
+    <div class="col-6 col-lg-1">
+      <label class="form-label small text-muted mb-1">Anno</label>
+      <input type="number" name="year" class="form-control"
+        placeholder="Anno" min="1900" max="<?= date('Y') ?>"
+        value="<?= !empty($filters['year']) ? (int)$filters['year'] : '' ?>">
+    </div>
+
+    <div class="col-6 col-lg-1 d-flex gap-1">
+      <button type="submit" class="btn btn-warning flex-grow-1" title="Cerca">
+        <i class="bi bi-search"></i>
+      </button>
+      <a href="<?= BASE_URL ?>/index.php?route=search/index"
+        class="btn btn-outline-secondary" title="Azzera">
+        <i class="bi bi-x-circle"></i>
+      </a>
+    </div>
+  </div>
+</form>
+
+<?php if (empty($didSearch)): ?>
 
   <div class="text-center py-5 text-muted">
     <i class="bi bi-search display-4 d-block mb-3 opacity-25"></i>
-    <p>Inizia a cercare un artista o un album.</p>
-  </div>
-
-<?php elseif (strlen($q) < 2): ?>
-
-  <div class="alert alert-warning">
-    <i class="bi bi-exclamation-triangle me-2"></i>Inserisci almeno 2 caratteri.
+    <p>Cerca per artista o titolo, oppure usa i filtri per esplorare l'archivio.</p>
   </div>
 
 <?php elseif (empty($albums) && empty($artists)): ?>
 
   <div class="text-center py-5 text-muted">
     <i class="bi bi-inbox display-4 d-block mb-3 opacity-25"></i>
-    <p class="mb-1">Nessun risultato per <strong>"<?= htmlspecialchars($q) ?>"</strong></p>
-    <p class="small">Prova con un termine diverso.</p>
+    <p class="mb-1">Nessun risultato<?= $q !== '' ? ' per <strong>"' . htmlspecialchars($q) . '"</strong>' : '' ?>.</p>
+    <p class="small">Prova con un termine diverso o allarga i filtri.</p>
   </div>
 
 <?php else: ?>
@@ -79,6 +150,14 @@ function srFormats(array $a): array {
     <?php foreach ($artists as $ar): ?>
       <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= $ar['id'] ?>"
          class="sr-artist-row">
+        <?php $img = srArtistImage($ar); ?>
+        <?php if ($img !== ''): ?>
+          <img src="<?= $img ?>" alt="<?= htmlspecialchars($ar['name']) ?>"
+               class="sr-artist-avatar" loading="lazy"
+               onerror="this.outerHTML='<span class=\'sr-artist-avatar sr-artist-avatar--empty\'><i class=\'bi bi-person-fill\'></i></span>'">
+        <?php else: ?>
+          <span class="sr-artist-avatar sr-artist-avatar--empty"><i class="bi bi-person-fill"></i></span>
+        <?php endif; ?>
         <span class="sr-artist-name"><?= htmlspecialchars($ar['name']) ?></span>
         <span class="sr-artist-count"><?= (int)$ar['album_count'] ?> album in archivio</span>
         <i class="bi bi-chevron-right sr-artist-arrow"></i>
