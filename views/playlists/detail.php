@@ -192,17 +192,22 @@ foreach ($tracks as $t) {
             data-track-id="<?= (int)$t['track_id'] ?>"
             style="display:none;width:1.1rem;height:1.1rem;cursor:pointer;margin:0">
 
-          <!-- Handle drag -->
-          <span class="drag-handle text-muted flex-shrink-0"
-            style="cursor:grab;font-size:1.1rem"
-            title="Trascina per riordinare">
-            <i class="bi bi-grip-vertical"></i>
-          </span>
-
-          <!-- Numero posizione + slot icona animata (tra drag-handle e numero) -->
-          <span class="pl-track-pos-wrap text-muted small flex-shrink-0">
-            <span class="pl-track-playing-icon" style="display:none"></span>
-            <span class="pl-track-num"><?= (int)$t['position'] ?></span>
+          <!-- Cella unica handle + posizione: elimina lo spazio morto
+               tra grip e numero. Il numero diventa icona eq in
+               riproduzione (slot .pl-track-playing-icon), come nella
+               vista album. .drag-handle resta elemento autonomo perché
+               Sortable, i listener touch e la modalità selezione
+               (visibility) lo referenziano direttamente. -->
+          <span class="pl-pos-cell flex-shrink-0">
+            <span class="drag-handle text-muted"
+              style="cursor:grab;font-size:1.1rem"
+              title="Trascina per riordinare">
+              <i class="bi bi-grip-vertical"></i>
+            </span>
+            <span class="pl-track-pos-wrap text-muted small">
+              <span class="pl-track-playing-icon" style="display:none"></span>
+              <span class="pl-track-num"><?= (int)$t['position'] ?></span>
+            </span>
           </span>
 
           <!-- Cover album piccola — cliccabile verso il dettaglio album -->
