@@ -1,6 +1,15 @@
 <?php
 $pageTitle = 'Archivio';
 require BASE_PATH . '/views/layout/header.php';
+
+// Filtri avanzati attivi: su mobile apre il pannello collassato
+// e alimenta il contatore sul toggle.
+$advCount = count(array_filter([
+  $filters['format_id'] ?? '',
+  $filters['genre_id'] ?? '',
+  $filters['label_id'] ?? '',
+  $filters['year'] ?? '',
+]));
 ?>
 
 <div class="d-flex justify-content-between align-items-center mb-3">
@@ -14,7 +23,8 @@ require BASE_PATH . '/views/layout/header.php';
 </div>
 
 <!-- Filtri -->
-<form method="get" action="<?= BASE_URL ?>/index.php" class="card card-body mb-4 shadow-sm p-3">
+<form method="get" action="<?= BASE_URL ?>/index.php"
+  class="card card-body mb-4 shadow-sm p-3 filters-form<?= $advCount > 0 ? ' filters-open' : '' ?>">
   <input type="hidden" name="route" value="albums/list">
   <input type="hidden" name="page" value="1">
   <input type="hidden" name="per_page" value="<?= $pagination['per_page'] ?>">
@@ -28,7 +38,7 @@ require BASE_PATH . '/views/layout/header.php';
         value="<?= htmlspecialchars($filters['q']) ?>">
     </div>
 
-    <div class="col-6 col-md-2">
+    <div class="col-6 col-md-2 adv-filter">
       <select name="format_id" class="form-select form-select-sm">
         <option value="">Tutti i formati</option>
         <?php foreach ($formats as $f): ?>
@@ -39,7 +49,7 @@ require BASE_PATH . '/views/layout/header.php';
       </select>
     </div>
 
-    <div class="col-6 col-md-2">
+    <div class="col-6 col-md-2 adv-filter">
       <select name="genre_id" class="form-select form-select-sm">
         <option value="">Tutti i generi</option>
         <?php foreach ($genres as $g): ?>
@@ -50,7 +60,7 @@ require BASE_PATH . '/views/layout/header.php';
       </select>
     </div>
 
-    <div class="col-6 col-md-2">
+    <div class="col-6 col-md-2 adv-filter">
       <select name="label_id" class="form-select form-select-sm">
         <option value="">Tutte le etichette</option>
         <?php foreach ($labels as $l): ?>
@@ -61,19 +71,27 @@ require BASE_PATH . '/views/layout/header.php';
       </select>
     </div>
 
-    <div class="col-6 col-md-1">
+    <div class="col-6 col-md-1 adv-filter">
       <input type="number" name="year" class="form-control form-control-sm"
         placeholder="Anno" min="1900" max="<?= date('Y') ?>"
         value="<?= $filters['year'] ?: '' ?>">
     </div>
 
-    <div class="col-6 col-md-1">
+    <div class="col-4 d-md-none">
+      <button type="button"
+        class="btn btn-sm btn-outline-secondary w-100 btn-adv-toggle"
+        onclick="this.closest('form').classList.toggle('filters-open')">
+        <i class="bi bi-sliders me-1"></i>Filtri<?= $advCount > 0 ? ' · ' . $advCount : '' ?>
+      </button>
+    </div>
+
+    <div class="col-4 col-md-1">
       <button type="submit" class="btn btn-sm btn-primary w-100">
         <i class="bi bi-funnel-fill"></i>
       </button>
     </div>
 
-    <div class="col-6 col-md-1">
+    <div class="col-4 col-md-1">
       <a href="<?= BASE_URL ?>/index.php?route=albums/list"
         class="btn btn-sm btn-outline-secondary w-100">
         <i class="bi bi-x-circle"></i>
@@ -87,7 +105,43 @@ require BASE_PATH . '/views/layout/header.php';
   <div class="alert alert-info">Nessun disco trovato.</div>
 <?php else: ?>
 
-  <div class="table-responsive shadow-sm rounded">
+  <!-- Lista mobile: card compatte, tap sulla riga → dettaglio.
+       Modifica ed eliminazione restano nel dropdown della scheda. -->
+  <div class="m-card-list d-md-none shadow-sm">
+    <?php foreach ($albums as $a): ?>
+      <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>" class="m-card">
+        <img src="<?= $a['cover_local']
+                    ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
+                    : BASE_URL . '/public/img/placeholder.png' ?>"
+          class="m-card-cover" alt="" loading="lazy">
+        <div class="m-card-body">
+          <div class="m-card-title"><?= htmlspecialchars($a['title']) ?></div>
+          <div class="m-card-sub"><?= htmlspecialchars($a['artist_name']) ?></div>
+          <div class="m-card-meta">
+            <?php
+            $rowFormats = !empty($a['formats'])
+              ? $a['formats']
+              : [['name' => $a['format_name']]];
+            ?>
+            <?php foreach ($rowFormats as $fmt): ?>
+              <span class="badge badge-format bg-<?= formatBadge($fmt['name']) ?>">
+                <?= htmlspecialchars($fmt['name']) ?>
+              </span>
+            <?php endforeach; ?>
+            <?php if (!empty($a['year'])): ?>
+              <span><?= (int)$a['year'] ?></span>
+            <?php endif; ?>
+            <?php if (!empty($a['track_count'])): ?>
+              <span><?= (int)$a['track_count'] ?> tracce</span>
+            <?php endif; ?>
+          </div>
+        </div>
+        <i class="bi bi-chevron-right m-card-arrow"></i>
+      </a>
+    <?php endforeach; ?>
+  </div>
+
+  <div class="table-responsive shadow-sm rounded d-none d-md-block">
     <table class="table table-hover table-sm align-middle mb-0">
       <thead class="table-dark">
         <tr>
