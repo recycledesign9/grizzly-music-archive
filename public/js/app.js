@@ -192,44 +192,33 @@ const Player = (function () {
     document.querySelectorAll('.track-item').forEach(li => {
       const tid = parseInt(li.dataset.trackId || 0);
       li.classList.remove('track-playing');
-      // Pulisce l'icona: svuota lo slot statico (playlist) o rimuove l'icona inserita (album)
-      const oldSlot = li.querySelector('.pl-track-playing-icon');
-      if (oldSlot) {
-        oldSlot.innerHTML = '';
-        oldSlot.className = 'pl-track-playing-icon';
-        oldSlot.style.display = 'none';
-      } else {
-        // Ripristina il numero originale nello span album (se era stato sostituito)
-        const posSpan = li.querySelector('.text-muted.small');
-        if (posSpan && posSpan.dataset.origText) {
-          posSpan.textContent = posSpan.dataset.origText;
-          delete posSpan.dataset.origText;
-        } else {
-          li.querySelector('.track-playing-icon')?.remove();
-        }
+
+      const slot = li.querySelector('.pl-track-playing-icon');
+      if (slot) {
+        slot.innerHTML = '';
+        slot.className = 'pl-track-playing-icon';
+        slot.style.display = 'none';
       }
+
+      const albumNum = !slot ? li.querySelector('.text-muted.small') : null;
+      if (albumNum && albumNum.dataset.origText) {
+        albumNum.textContent = albumNum.dataset.origText;
+        delete albumNum.dataset.origText;
+      }
+
       const btn = li.querySelector('.btn-track-play');
 
       if (tid === t.id) {
         li.classList.add('track-playing');
-        // Cerca prima lo slot dedicato nelle righe playlist (.pl-track-playing-icon)
-        // Quello slot è dentro il wrapper flex della posizione, non sposta nulla.
-        // Fallback: riga album — inserisce l'icona dopo il numero posizione come prima.
-        const playlistSlot = li.querySelector('.pl-track-playing-icon');
-        if (playlistSlot) {
-          playlistSlot.innerHTML = '<span class="bar"></span><span class="bar"></span><span class="bar"></span>';
-          playlistSlot.className = 'pl-track-playing-icon track-playing-icon';
-          playlistSlot.style.display = '';
-        } else {
-          // Riga album: nasconde il numero e mostra l'icona dentro lo stesso span
-          // così il layout flex della riga non si sposta
-          const posSpan = li.querySelector('.text-muted.small');
-          if (posSpan) {
-            posSpan.dataset.origText = posSpan.dataset.origText || posSpan.textContent;
-            posSpan.innerHTML = '<span class="track-playing-icon" style="display:inline-flex">'
-              + '<span class="bar"></span><span class="bar"></span><span class="bar"></span>'
-              + '</span>';
-          }
+        if (slot) {
+          slot.innerHTML = '<span class="bar"></span><span class="bar"></span><span class="bar"></span>';
+          slot.className = 'pl-track-playing-icon track-playing-icon';
+          slot.style.display = '';
+        } else if (albumNum) {
+          albumNum.dataset.origText = albumNum.dataset.origText || albumNum.textContent;
+          albumNum.innerHTML = '<span class="track-playing-icon" style="display:inline-flex">'
+            + '<span class="bar"></span><span class="bar"></span><span class="bar"></span>'
+            + '</span>';
         }
         if (btn) { btn.innerHTML = '<i class="bi bi-pause-fill"></i>'; btn.title = 'Pausa'; }
       } else {
@@ -457,6 +446,24 @@ const Player = (function () {
 
   seek.addEventListener('input', () => {
     if (audio.duration) audio.currentTime = (seek.value / 100) * audio.duration;
+    updateFill(seek, '#ffc107');
+  });
+
+  // Tap-to-seek per touch: iOS Safari non sposta il valore di un
+  // range al tap sulla track (richiede il drag del thumb), ma sulla
+  // progress line mobile il thumb è invisibile. Il tap posiziona
+  // direttamente; il drag successivo prosegue nativo perché il thumb
+  // finisce sotto il dito. Limitato a pointerType touch: col mouse
+  // il click sulla track funziona già nativamente.
+  seek.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    if (!audio.duration) return;
+    const rect = seek.getBoundingClientRect();
+    if (!rect.width) return;
+    let ratio = (e.clientX - rect.left) / rect.width;
+    ratio = Math.min(1, Math.max(0, ratio));
+    seek.value = Math.round(ratio * 100);
+    audio.currentTime = ratio * audio.duration;
     updateFill(seek, '#ffc107');
   });
 

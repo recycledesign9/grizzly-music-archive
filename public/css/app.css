@@ -428,18 +428,133 @@ body:has(#sticky-player[style*="flex"]) {
   padding-bottom: 72px;
 }
 
-@media (max-width: 576px) {
-  .sp-progress-wrap {
+/* ── Player sticky: dispositivi touch ──
+   Criterio di capacità, non di larghezza: vale anche per tablet
+   e telefoni in landscape (>576px). Volume e stop spariscono
+   perché il volume si regola dal dispositivo; il thumb della
+   seek resta sempre visibile perché su touch l'hover non esiste. */
+@media (pointer: coarse) {
+  #sp-stop,
+  .sp-volume-wrap {
+    display: none !important;
+  }
+
+  .sp-seek::-webkit-slider-thumb {
+    opacity: 1;
+  }
+}
+
+/* ── Player sticky: schermi stretti ──
+   La seek diventa una progress line di 3px agganciata al bordo
+   superiore del player, a tutta larghezza. L'input range resta
+   alto 20px (area di tocco), ma dipinge solo il content-box di
+   3px: background-clip con !important perché il gradiente di
+   riempimento è inline (updateFill in app.js) e il suo shorthand
+   resetterebbe il clip a border-box. Tap-to-seek in app.js. */
+@media (max-width: 575.98px) {
+  body:has(#sticky-player[style*="flex"]) {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+
+  .sticky-player {
+    padding: 0 12px;
+    padding-bottom: env(safe-area-inset-bottom);
+    height: calc(72px + env(safe-area-inset-bottom));
+    gap: 10px;
+  }
+
+  .sticky-player::before {
     display: none;
   }
+
+  .sp-progress-wrap {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    max-width: none;
+    margin: 0;
+    gap: 0;
+    z-index: 1;
+  }
+
+  .sp-time {
+    display: none;
+  }
+
+  .sp-seek {
+    height: 20px;
+    padding: 0 0 17px;
+    background-clip: content-box !important;
+    border-radius: 0;
+  }
+
+  .sp-seek::-webkit-slider-thumb {
+    opacity: 0;
+  }
+  .sp-seek:active::-webkit-slider-thumb {
+    opacity: 1;
+  }
+  .sp-seek::-moz-range-thumb {
+    opacity: 0;
+  }
+  .sp-seek:active::-moz-range-thumb {
+    opacity: 1;
+  }
+
+  #sp-stop,
   .sp-volume-wrap {
-    min-width: 80px;
+    display: none !important;
   }
-  .sp-volume {
-    width: 52px;
+
+  .sp-controls {
+    gap: 4px;
   }
+
+  .sp-btn {
+    width: 40px;
+    height: 40px;
+    font-size: 17px;
+  }
+
+  .sp-btn-main {
+    width: 46px;
+    height: 46px;
+    font-size: 19px;
+  }
+
   .sp-meta {
-    max-width: 130px;
+    max-width: none;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .sp-cover img {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* ── Player sticky: schermi molto stretti (iPhone SE) ── */
+@media (max-width: 400px) {
+  .sticky-player {
+    gap: 8px;
+    padding: 0 10px;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .sp-btn {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+  .sp-btn-main {
+    width: 42px;
+    height: 42px;
+    font-size: 18px;
+  }
+  .sp-cover img {
+    width: 40px;
+    height: 40px;
   }
 }
 
@@ -531,7 +646,7 @@ body:has(#sticky-player[style*="flex"]) {
 }
 
 /* leggermente più piccolo su mobile */
-@media (max-width: 576px) {
+@media (max-width: 575.98px) {
   .navbar-logo {
     height: 28px;
   }
@@ -563,7 +678,7 @@ body:has(#sticky-player[style*="flex"]) {
 }
 
 /* Mobile */
-@media (max-width: 576px) {
+@media (max-width: 575.98px) {
   .brand-title {
     font-size: 16px;
   }
@@ -947,7 +1062,7 @@ body:has(#sticky-player[style*="flex"]) {
   cursor: pointer;
 }
 
-@media (max-width: 576px) {
+@media (max-width: 575.98px) {
   #yt-lightbox.is-minimized #yt-lightbox-panel {
     width: 260px;
   }
@@ -957,7 +1072,7 @@ body:has(#sticky-player[style*="flex"]) {
 
 
 /* ——— Mobile ——— */
-@media (max-width: 576px) {
+@media (max-width: 575.98px) {
   #yt-lightbox {
     align-items: center;
     justify-content: center;
@@ -1745,37 +1860,42 @@ body:has(#sticky-player[style*="flex"]) {
 }
 
 /* ============================================================
-   Playlist detail — wrapper posizione traccia con slot icona animata
+   Playlist detail — wrapper posizione traccia
    ============================================================ */
 
-/* Il numero di posizione diventa un wrapper flex orizzontale.
-   L'icona animata occupa uno spazio fisso a sinistra del numero,
-   così il layout della riga non si sposta mai. */
+.pl-pos-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .pl-track-pos-wrap {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-width: 2.8rem;
+  min-width: 1.3rem;
   justify-content: flex-end;
   flex-shrink: 0;
 }
 
-/* Slot per l'icona animata — occupa spazio fisso anche quando vuoto */
 .pl-track-playing-icon {
   display: none;
   width: 14px;
   flex-shrink: 0;
 }
 
-/* Quando attivo eredita gli stili .track-playing-icon */
 .pl-track-playing-icon.track-playing-icon {
   display: inline-flex !important;
 }
 
-/* Numero della traccia */
 .pl-track-num {
   min-width: 1.2rem;
   text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.track-item.track-playing .pl-track-num {
+  display: none;
 }
 
 /* ============================================================
@@ -1910,39 +2030,62 @@ body:has(#sticky-player[style*="flex"]) {
   }
 }
 
-/* ── MOBILE: titolo sopra, controlli in una riga sotto ── */
+/* ── MOBILE: tracklist album su riga singola ──
+   numero/eq · titolo (clamp 2 righe, durata sotto) · play · menu ⋮
+   I controlli espansi desktop (coda, dropdown audio, YouTube,
+   playlist) sono nascosti via utility d-none d-md-* nel markup e
+   confluiscono nel menu unico .track-mobile-menu della riga. */
 @media (max-width: 767.98px) {
-  /* La riga manda a capo il wrapper azioni */
   .track-item > .d-flex {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center !important;
-    row-gap: 0.5rem !important;
+    gap: 0.65rem !important;
   }
 
-  /* Numero resta a sinistra */
   .track-item > .d-flex > span:first-child {
     flex: 0 0 auto;
   }
 
-  /* Titolo occupa il resto della prima riga */
   .track-item > .d-flex > .flex-grow-1 {
-    flex: 1 1 0;
+    flex: 1 1 auto;
     min-width: 0;
   }
 
-  /* Le azioni vanno tutte a capo, su una riga propria, rientrate sotto il titolo */
+  .track-item > .d-flex > .flex-grow-1 > .fw-semibold {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-size: 0.95rem;
+    line-height: 1.25;
+  }
+
+  .track-item > .d-flex > .flex-grow-1 > .text-muted.small {
+    display: block;
+    margin-left: 0 !important;
+    margin-top: 2px;
+    font-size: 0.78rem;
+  }
+
   .track-actions {
-    flex-basis: 100%;
-    margin-left: 1.8rem;
-    flex-wrap: wrap;
     gap: 0.4rem;
   }
 
-  /* Player audio nativo compatto ma leggibile */
+  /* Cintura: il player nativo è già nascosto da app.js */
   audio.track-player {
-    width: 150px;
-    max-width: 150px;
-    height: 30px;
+    display: none !important;
+  }
+
+  .track-actions .btn-track-play,
+  .track-mobile-menu > .btn {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    border-radius: 8px;
   }
 }
 
@@ -2132,33 +2275,6 @@ body:has(#sticky-player[style*="flex"]) {
 
   .album-detail-sidebar .album-meta-row dd {
     font-size: 0.78rem;
-  }
-}
-
-/* ── Player sticky: schermi molto piccoli ── */
-@media (max-width: 400px) {
-  .sticky-player {
-    gap: 8px;
-    padding: 0 10px;
-  }
-  .sp-meta {
-    max-width: 100px;
-  }
-  .sp-btn {
-    width: 30px;
-    height: 30px;
-    font-size: 15px;
-  }
-  .sp-btn-main {
-    width: 36px;
-    height: 36px;
-    font-size: 15px;
-  }
-  .sp-volume-wrap {
-    min-width: 60px;
-  }
-  .sp-volume {
-    width: 40px;
   }
 }
 
@@ -2958,7 +3074,7 @@ body:has(#sticky-player[style*="flex"]) {
   gap: 5px;
 }
 
-@media (max-width: 767px) {
+@media (max-width: 767.98px) {
   .sr-single-wrap {
     grid-template-columns: 1fr;
     gap: 1.5rem;
@@ -3722,7 +3838,7 @@ body:has(#sticky-player[style*="flex"]) {
 }
 
 /* Mobile: pannello a tutta larghezza */
-@media (max-width: 576px) {
+@media (max-width: 575.98px) {
   .qp-panel {
     right: 12px;
     left: 12px;
@@ -3835,4 +3951,258 @@ a.badge-format:hover {
   justify-content: center;
   color: var(--bs-secondary-color);
   font-size: 1.25rem;
+}
+/* ============================================================
+   Mobile responsive — playlist list & playlist detail refinements
+   ============================================================ */
+
+@media (max-width: 767.98px) {
+  .pl-list-row.is-player-playing .pl-row-name::after,
+  .pl-list-row.is-player-paused .pl-row-name::after {
+    display: none !important;
+  }
+
+  .pl-list-row {
+    padding: 12px 14px;
+    column-gap: 10px;
+  }
+
+  .pl-col-actions {
+    gap: 2px;
+  }
+}
+
+@media (max-width: 575.98px) {
+  #playlistTrackList .track-item {
+    padding: 10px 12px !important;
+    gap: 10px !important;
+  }
+
+  #playlistTrackList .pl-pos-cell {
+    gap: 2px;
+  }
+
+  #playlistTrackList .track-item .drag-handle {
+    opacity: 0.4;
+    font-size: 1rem;
+    padding: 8px 6px;
+    margin: -8px -6px;
+    min-width: 26px;
+    text-align: center;
+  }
+  #playlistTrackList .track-item .drag-handle:active {
+    opacity: 1;
+  }
+
+  #playlistTrackList .pl-track-pos-wrap {
+    min-width: 1.1rem;
+    gap: 2px;
+  }
+  #playlistTrackList .pl-track-num {
+    min-width: 0.9rem;
+    font-size: 0.78rem;
+    opacity: 0.6;
+  }
+
+  #playlistTrackList .track-item > a > img {
+    width: 52px !important;
+    height: 52px !important;
+    border-radius: 7px;
+  }
+
+  #playlistTrackList .track-item .flex-grow-1 {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  #playlistTrackList .track-item .fw-semibold.text-truncate {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    line-height: 1.25;
+    font-size: 0.95rem;
+  }
+
+  #playlistTrackList .track-item .small.text-muted.text-truncate {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.78rem;
+    margin-top: 2px;
+  }
+
+  #playlistTrackList .track-item > .badge {
+    display: none;
+  }
+
+  #playlistTrackList .track-item .btn-track-play,
+  #playlistTrackList .track-item .btn.btn-xs {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    font-size: 1rem;
+    border-radius: 8px;
+  }
+}
+
+@media (max-width: 380px) {
+  #playlistTrackList .track-item {
+    padding: 9px 10px !important;
+    gap: 8px !important;
+  }
+  #playlistTrackList .track-item > a > img {
+    width: 46px !important;
+    height: 46px !important;
+  }
+}
+
+/* ============================================================
+   Mobile — lista album a card (archivio e risultati ricerca)
+   Alternativa d-md-none alle tabelle, che su telefono richiedono
+   scroll orizzontale: riga interamente tappabile verso il
+   dettaglio, titolo/artista su due righe, badge formato e anno.
+   Modifica ed eliminazione restano nella scheda album.
+   ============================================================ */
+.m-card-list {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bs-body-bg);
+}
+
+.m-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  min-height: 64px;
+  text-decoration: none;
+  color: inherit;
+  border-bottom: 1px solid var(--bs-border-color);
+}
+
+.m-card:last-child {
+  border-bottom: none;
+}
+
+.m-card:active {
+  background: rgba(var(--bs-warning-rgb), 0.08);
+}
+
+.m-card-cover {
+  width: 52px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.m-card-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.m-card-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1.25;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.m-card-sub {
+  font-size: 0.78rem;
+  color: var(--bs-secondary-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+.m-card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--bs-secondary-color);
+}
+
+.m-card-meta .badge,
+.m-card-meta .badge-format {
+  font-size: 0.62rem;
+  padding: 2px 8px;
+}
+
+.m-card-arrow {
+  flex-shrink: 0;
+  color: var(--bs-secondary-color);
+  opacity: 0.5;
+  font-size: 0.85rem;
+}
+
+/* ── Filtri avanzati collassabili su mobile ──
+   Le colonne .adv-filter spariscono sotto md e riappaiono con
+   .filters-open sul form, toggle via onclick inline (SPA-safe,
+   nessun listener da riagganciare dopo la navigazione). Il form
+   arriva già aperto dal server quando ci sono filtri attivi. */
+@media (max-width: 767.98px) {
+  .filters-form .adv-filter {
+    display: none;
+  }
+
+  .filters-form.filters-open .adv-filter {
+    display: block;
+  }
+
+  .filters-form.filters-open .btn-adv-toggle {
+    color: var(--bs-warning);
+    border-color: var(--bs-warning);
+  }
+}
+
+/* ============================================================
+   Touch — tap target (pointer: coarse)
+   Layer unico per i dispositivi touch, telefoni E tablet anche
+   sopra i breakpoint mobile: porta i controlli compatti a
+   un'area di tocco adeguata (~38-40px) senza toccare il layout
+   con mouse. In coda al file per vincere la cascata a parità
+   di specificità.
+   ============================================================ */
+@media (pointer: coarse) {
+  .btn-xs {
+    min-width: 38px;
+    min-height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .btn-yt {
+    width: 38px;
+    height: 38px;
+  }
+
+  .dropdown-menu .dropdown-item {
+    padding-top: 0.55rem;
+    padding-bottom: 0.55rem;
+  }
+
+  .pagination .page-link {
+    padding: 0.5rem 0.75rem;
+  }
+
+  /* Area di tocco estesa del grip senza alterare il layout:
+     il padding è compensato dal margin negativo, il footprint
+     visivo resta identico. */
+  .drag-handle {
+    padding: 8px 6px;
+    margin: -8px -6px;
+  }
 }
