@@ -30,6 +30,15 @@ function srArtistImage(array $ar): string {
     if (!empty($ar['image_url']))   return htmlspecialchars($ar['image_url']);
     return '';
 }
+
+// Filtri avanzati attivi: su mobile apre il pannello collassato
+// e alimenta il contatore sul toggle.
+$advCount = count(array_filter([
+  $filters['format_id'] ?? '',
+  $filters['genre_id'] ?? '',
+  $filters['label_id'] ?? '',
+  $filters['year'] ?? '',
+]));
 ?>
 
 <!-- Header -->
@@ -48,6 +57,7 @@ function srArtistImage(array $ar): string {
           if (!empty($artists)) $parts[] = count($artists) . ' ' . (count($artists) === 1 ? 'artista' : 'artisti');
           if (!empty($albums))  $parts[] = count($albums) . ' album';
           echo implode(' · ', $parts);
+          if (!empty($hasValidText)) echo ' · ordinati per rilevanza';
         ?>
       </p>
     <?php endif; ?>
@@ -60,7 +70,8 @@ function srArtistImage(array $ar): string {
 <!-- Form di ricerca: sempre visibile, con i filtri avanzati
      dell'archivio. Submit GET classico (stesso pattern dei filtri
      di list.php), quindi compatibile con la navigazione SPA. -->
-<form method="get" action="<?= BASE_URL ?>/index.php" class="card card-body mb-4 shadow-sm p-3">
+<form method="get" action="<?= BASE_URL ?>/index.php"
+  class="card card-body mb-4 shadow-sm p-3 filters-form<?= $advCount > 0 ? ' filters-open' : '' ?>">
   <input type="hidden" name="route" value="search/index">
 
   <div class="row g-2 align-items-end">
@@ -75,7 +86,7 @@ function srArtistImage(array $ar): string {
         value="<?= htmlspecialchars($q ?? '') ?>">
     </div>
 
-    <div class="col-6 col-lg-2">
+    <div class="col-6 col-lg-2 adv-filter">
       <label class="form-label small text-muted mb-1">Formato</label>
       <select name="format_id" class="form-select">
         <option value="">Tutti</option>
@@ -87,7 +98,7 @@ function srArtistImage(array $ar): string {
       </select>
     </div>
 
-    <div class="col-6 col-lg-2">
+    <div class="col-6 col-lg-2 adv-filter">
       <label class="form-label small text-muted mb-1">Genere</label>
       <select name="genre_id" class="form-select">
         <option value="">Tutti</option>
@@ -99,7 +110,7 @@ function srArtistImage(array $ar): string {
       </select>
     </div>
 
-    <div class="col-6 col-lg-2">
+    <div class="col-6 col-lg-2 adv-filter">
       <label class="form-label small text-muted mb-1">Etichetta</label>
       <select name="label_id" class="form-select">
         <option value="">Tutte</option>
@@ -111,11 +122,19 @@ function srArtistImage(array $ar): string {
       </select>
     </div>
 
-    <div class="col-6 col-lg-1">
+    <div class="col-6 col-lg-1 adv-filter">
       <label class="form-label small text-muted mb-1">Anno</label>
       <input type="number" name="year" class="form-control"
         placeholder="Anno" min="1900" max="<?= date('Y') ?>"
         value="<?= !empty($filters['year']) ? (int)$filters['year'] : '' ?>">
+    </div>
+
+    <div class="col-6 d-md-none">
+      <button type="button"
+        class="btn btn-outline-secondary w-100 btn-adv-toggle"
+        onclick="this.closest('form').classList.toggle('filters-open')">
+        <i class="bi bi-sliders me-1"></i>Filtri<?= $advCount > 0 ? ' · ' . $advCount : '' ?>
+      </button>
     </div>
 
     <div class="col-6 col-lg-1 d-flex gap-1">
@@ -130,7 +149,7 @@ function srArtistImage(array $ar): string {
   </div>
 </form>
 
-<?php if ($q !== '' && strlen($q) < 2): ?>
+<?php if (!empty($textQueryTooShort)): ?>
   <div class="alert alert-warning">
     <i class="bi bi-exclamation-triangle me-2"></i>Inserisci almeno 2 caratteri per la ricerca testuale<?= !empty($didSearch) ? ' — risultati filtrati ignorando il testo.' : '.' ?>
   </div>
@@ -168,7 +187,9 @@ function srArtistImage(array $ar): string {
         <?php else: ?>
           <span class="sr-artist-avatar sr-artist-avatar--empty"><i class="bi bi-person-fill"></i></span>
         <?php endif; ?>
-        <span class="sr-artist-name"><?= htmlspecialchars($ar['name']) ?></span>
+        <span class="sr-artist-name">
+          <?= htmlspecialchars($ar['name']) ?>
+        </span>
         <span class="sr-artist-count"><?= (int)$ar['album_count'] ?> album in archivio</span>
         <i class="bi bi-chevron-right sr-artist-arrow"></i>
       </a>
@@ -216,8 +237,33 @@ function srArtistImage(array $ar): string {
 
     <?php else: ?>
 
-      <!-- Più album: tabella con cover 72px -->
-      <table class="sr-table">
+      <!-- Più album — mobile: card compatte, tap → dettaglio -->
+      <div class="m-card-list d-md-none shadow-sm">
+        <?php foreach ($albums as $a): ?>
+          <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>" class="m-card">
+            <img src="<?= srCover($a) ?>" class="m-card-cover" alt="" loading="lazy"
+              onerror="this.src='<?= BASE_URL ?>/public/img/placeholder.png'">
+            <div class="m-card-body">
+              <div class="m-card-title"><?= htmlspecialchars($a['title']) ?></div>
+              <div class="m-card-sub"><?= htmlspecialchars($a['artist_name']) ?></div>
+              <div class="m-card-meta">
+                <?php foreach (srFormats($a) as $fmt): ?>
+                  <span class="badge-format <?= srFmtClass($fmt['name']) ?>">
+                    <?= htmlspecialchars($fmt['name']) ?>
+                  </span>
+                <?php endforeach; ?>
+                <?php if (!empty($a['year'])): ?>
+                  <span><?= (int)$a['year'] ?></span>
+                <?php endif; ?>
+              </div>
+            </div>
+            <i class="bi bi-chevron-right m-card-arrow"></i>
+          </a>
+        <?php endforeach; ?>
+      </div>
+
+      <!-- Più album — desktop: tabella con cover 72px -->
+      <table class="sr-table d-none d-md-table">
         <thead>
           <tr>
             <th class="sr-cover-cell">Cover</th>
