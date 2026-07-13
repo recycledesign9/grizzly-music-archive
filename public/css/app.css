@@ -4478,4 +4478,13 @@ a.badge-format:hover {
     padding: 8px 6px;
     margin: -8px -6px;
   }
+
+  /* iOS Safari ingrandisce automaticamente la pagina al focus su
+     qualsiasi campo con font-size sotto i 16px. Vale per tutti i
+     form (filtri archivio, ricerca, form album), non solo per un
+     campo specifico. */
+  .form-control,
+  .form-select {
+    font-size: 16px;
+  }
 }
