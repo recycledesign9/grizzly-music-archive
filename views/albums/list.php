@@ -141,127 +141,124 @@ $advCount = count(array_filter([
     <?php endforeach; ?>
   </div>
 
-  <div class="table-responsive shadow-sm rounded d-none d-md-block">
-    <table class="table table-hover table-sm align-middle mb-0">
-      <thead class="table-dark">
-        <tr>
-          <th style="width:60px">Cover</th>
+  <!-- Archivio desktop: righe ibride nel linguaggio grz- del dashboard
+       (cover, badge overlay, gerarchia titolo/artista) invece della
+       tabella Bootstrap grezza. L'ordinamento resta sugli stessi
+       header link; solo la resa delle righe cambia da <tr> a blocchi
+       flex. condition/copies arrivano già da Album::getAll(), qui
+       finalmente mostrati. -->
+  <div class="grz-archive-list d-none d-md-block shadow-sm">
+    <div class="grz-archive-head">
+      <span class="grz-col-cover"></span>
+      <a class="grz-col-title" href="<?= BASE_URL ?>/index.php?<?= http_build_query(array_merge($filters, [
+                                            'route' => 'albums/list',
+                                            'order' => 'a.title',
+                                            'dir'   => ($order === 'a.title' && $dir === 'ASC') ? 'DESC' : 'ASC',
+                                            'per_page' => $pagination['per_page'],
+                                            'page' => 1
+                                          ])) ?>">Titolo</a>
+      <a class="grz-col-artist" href="<?= BASE_URL ?>/index.php?<?= http_build_query(array_merge($filters, [
+                                            'route' => 'albums/list',
+                                            'order' => 'ar.name',
+                                            'dir'   => ($order === 'ar.name' && $dir === 'ASC') ? 'DESC' : 'ASC',
+                                            'per_page' => $pagination['per_page'],
+                                            'page' => 1
+                                          ])) ?>">Artista</a>
+      <span class="grz-col-genre">Genere</span>
+      <span class="grz-col-format">Formato</span>
+      <a class="grz-col-year" href="<?= BASE_URL ?>/index.php?<?= http_build_query(array_merge($filters, [
+                                            'route' => 'albums/list',
+                                            'order' => 'a.year',
+                                            'dir'   => ($order === 'a.year' && $dir === 'ASC') ? 'DESC' : 'ASC',
+                                            'per_page' => $pagination['per_page'],
+                                            'page' => 1
+                                          ])) ?>">Anno</a>
+      <span class="grz-col-tracks">Tracce</span>
+      <span class="grz-col-actions">Azioni</span>
+    </div>
 
-          <th>
-            <a href="<?= BASE_URL ?>/index.php?<?= http_build_query(array_merge($filters, [
-                                                  'route' => 'albums/list',
-                                                  'order' => 'a.title',
-                                                  'dir'   => ($order === 'a.title' && $dir === 'ASC') ? 'DESC' : 'ASC',
-                                                  'per_page' => $pagination['per_page'],
-                                                  'page' => 1
-                                                ])) ?>" class="text-white text-decoration-none">
-              Titolo
-            </a>
-          </th>
+    <?php foreach ($albums as $a): ?>
+      <?php
+      $rowFormats = !empty($a['formats'])
+        ? $a['formats']
+        : [['name' => $a['format_name']]];
+      $hasAudio = (int)($a['audio_file_count'] ?? 0) > 0;
+      $audioTitle = $hasAudio
+        ? (int)$a['audio_file_count'] . ' file audio caricati'
+        : 'Nessun file audio caricato';
+      ?>
+      <div class="grz-archive-row">
+        <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>" class="grz-col-cover">
+          <img src="<?= $a['cover_local']
+                      ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
+                      : BASE_URL . '/public/img/placeholder.png' ?>"
+            alt="" loading="lazy" draggable="false">
+        </a>
 
-          <th>
-            <a href="<?= BASE_URL ?>/index.php?<?= http_build_query(array_merge($filters, [
-                                                  'route' => 'albums/list',
-                                                  'order' => 'ar.name',
-                                                  'dir'   => ($order === 'ar.name' && $dir === 'ASC') ? 'DESC' : 'ASC',
-                                                  'per_page' => $pagination['per_page'],
-                                                  'page' => 1
-                                                ])) ?>" class="text-white text-decoration-none">
-              Artista
-            </a>
-          </th>
+        <div class="grz-col-title">
+          <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>" class="grz-ar-title">
+            <?= htmlspecialchars($a['title']) ?>
+          </a>
+          <?php if ((int)($a['copies'] ?? 1) > 1): ?>
+            <span class="grz-ar-copies">×<?= (int)$a['copies'] ?></span>
+          <?php endif; ?>
+        </div>
 
-          <th>Formato</th>
+        <div class="grz-col-artist">
+          <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= $a['artist_id'] ?>" class="grz-ar-artist">
+            <?= htmlspecialchars($a['artist_name']) ?>
+          </a>
+        </div>
 
-          <th>
-            <a href="<?= BASE_URL ?>/index.php?<?= http_build_query(array_merge($filters, [
-                                                  'route' => 'albums/list',
-                                                  'order' => 'a.year',
-                                                  'dir'   => ($order === 'a.year' && $dir === 'ASC') ? 'DESC' : 'ASC',
-                                                  'per_page' => $pagination['per_page'],
-                                                  'page' => 1
-                                                ])) ?>" class="text-white text-decoration-none">
-              Anno
-            </a>
-          </th>
+        <div class="grz-col-genre">
+          <?= !empty($a['genre_name']) ? htmlspecialchars($a['genre_name']) : '<span class="text-muted">—</span>' ?>
+        </div>
 
-          <th>Genere</th>
-          <th>Tracce</th>
-          <th class="text-end">Azioni</th>
-        </tr>
-      </thead>
+        <div class="grz-col-format">
+          <?php foreach ($rowFormats as $fmt): ?>
+            <span class="badge badge-format bg-<?= formatBadge($fmt['name']) ?>">
+              <?= htmlspecialchars($fmt['name']) ?>
+            </span>
+          <?php endforeach; ?>
+        </div>
 
-      <tbody>
-        <?php foreach ($albums as $a): ?>
-          <tr>
-            <td>
-              <img src="<?= $a['cover_local']
-                          ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
-                          : BASE_URL . '/public/img/placeholder.png' ?>"
-                class="cover-mini rounded">
-            </td>
+        <div class="grz-col-year"><?= !empty($a['year']) ? (int)$a['year'] : '—' ?></div>
 
-            <td>
-              <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>"
-                class="link-album fw-semibold">
-                <?= htmlspecialchars($a['title']) ?>
+        <div class="grz-col-tracks" title="<?= $audioTitle ?>">
+          <?php if ($a['track_count']): ?>
+            <i class="bi <?= $hasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?>"></i><?= (int)$a['track_count'] ?>
+          <?php else: ?>
+            —
+          <?php endif; ?>
+        </div>
+
+        <div class="grz-col-actions dropdown">
+          <button type="button" class="btn btn-xs btn-outline-secondary"
+            data-bs-toggle="dropdown" aria-expanded="false" title="Azioni">
+            <i class="bi bi-three-dots-vertical"></i>
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+            <li>
+              <a class="dropdown-item small" href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>">
+                <i class="bi bi-eye me-2 text-muted"></i>Dettaglio
               </a>
-            </td>
-            <td>
-              <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= $a['artist_id'] ?>"
-                class="link-artist">
-                <?= htmlspecialchars($a['artist_name']) ?>
+            </li>
+            <li>
+              <a class="dropdown-item small" href="<?= BASE_URL ?>/index.php?route=albums/edit/<?= $a['id'] ?>">
+                <i class="bi bi-pencil me-2 text-muted"></i>Modifica
               </a>
-            </td>
-
-            <td>
-              <?php
-              // Tutti i formati posseduti della scheda (badge
-              // informativi: la scheda è una sola). Fallback sulla
-              // colonna legacy per robustezza.
-              $rowFormats = !empty($a['formats'])
-                ? $a['formats']
-                : [['name' => $a['format_name']]];
-              ?>
-              <?php foreach ($rowFormats as $fmt): ?>
-                <span class="badge badge-format bg-<?= formatBadge($fmt['name']) ?> me-1">
-                  <?= htmlspecialchars($fmt['name']) ?>
-                </span>
-              <?php endforeach; ?>
-            </td>
-
-            <td><?= htmlspecialchars($a['year'] ?? '—') ?></td>
-            <td><?= htmlspecialchars($a['genre_name'] ?? '—') ?></td>
-
-            <td class="text-center">
-              <?= $a['track_count'] ?: '—' ?>
-            </td>
-
-            <td class="text-end">
-              <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>"
-                class="btn btn-xs btn-outline-primary" title="Dettaglio">
-                <i class="bi bi-eye"></i>
-              </a>
-
-              <a href="<?= BASE_URL ?>/index.php?route=albums/edit/<?= $a['id'] ?>"
-                class="btn btn-xs btn-outline-secondary" title="Modifica">
-                <i class="bi bi-pencil"></i>
-              </a>
-
-              <button type="button"
-                class="btn btn-xs btn-outline-danger"
-                data-bs-toggle="modal"
-                data-bs-target="#deleteModal"
-                data-id="<?= $a['id'] ?>"
-                data-title="<?= htmlspecialchars($a['title']) ?>"
-                title="Elimina">
-                <i class="bi bi-trash"></i>
+            </li>
+            <li>
+              <button type="button" class="dropdown-item small text-danger"
+                data-bs-toggle="modal" data-bs-target="#deleteModal"
+                data-id="<?= $a['id'] ?>" data-title="<?= htmlspecialchars($a['title']) ?>">
+                <i class="bi bi-trash me-2"></i>Elimina
               </button>
-            </td>
-          </tr>
-        <?php endforeach; ?>
-      </tbody>
-    </table>
+            </li>
+          </ul>
+        </div>
+      </div>
+    <?php endforeach; ?>
   </div>
 
   <!-- BARRA INFERIORE — sempre visibile -->
@@ -282,35 +279,42 @@ $advCount = count(array_filter([
       Visualizzati <?= $pagination['from'] ?>–<?= $pagination['to'] ?> di <?= $pagination['total'] ?> titoli
     </div>
 
-    <!-- Paginazione numerica — solo se servono più pagine -->
-    <?php if ($totalPages > 1): ?>
-      <nav>
-        <ul class="pagination pagination-sm mb-0">
+    <!-- Paginazione numerica — solo se servono più pagine.
+         Finestra attorno alla pagina corrente + prima/ultima pagina,
+         con "…" per i salti: utile anche quando l'archivio cresce
+         e le pagine diventano tante. -->
+    <?php if ($totalPages > 1):
+      $pageItems = [1];
+      for ($p = $currentPage - 1; $p <= $currentPage + 1; $p++) {
+        if ($p > 1 && $p < $totalPages) $pageItems[] = $p;
+      }
+      if ($totalPages > 1) $pageItems[] = $totalPages;
+      $pageItems = array_values(array_unique($pageItems));
+      sort($pageItems);
+    ?>
+      <nav class="grz-pagination" aria-label="Paginazione">
+        <a class="grz-page-btn grz-page-nav<?= $currentPage <= 1 ? ' disabled' : '' ?>"
+          href="<?= $currentPage <= 1 ? '#' : BASE_URL . '/index.php?' . http_build_query(array_merge($baseParams, ['page' => $currentPage - 1])) ?>"
+          aria-label="Pagina precedente">
+          <i class="bi bi-chevron-left"></i>
+        </a>
 
-          <li class="page-item <?= $currentPage <= 1 ? 'disabled' : '' ?>">
-            <a class="page-link"
-              href="<?= $currentPage <= 1 ? '#' : BASE_URL . '/index.php?' . http_build_query(array_merge($baseParams, ['page' => $currentPage - 1])) ?>">
-              &laquo;
-            </a>
-          </li>
+        <?php $prev = 0; foreach ($pageItems as $p): ?>
+          <?php if ($p - $prev > 1): ?>
+            <span class="grz-page-ellipsis">…</span>
+          <?php endif; ?>
+          <a class="grz-page-btn<?= $p == $currentPage ? ' active' : '' ?>"
+            href="<?= BASE_URL . '/index.php?' . http_build_query(array_merge($baseParams, ['page' => $p])) ?>">
+            <?= $p ?>
+          </a>
+          <?php $prev = $p; ?>
+        <?php endforeach; ?>
 
-          <?php for ($p = 1; $p <= $totalPages; $p++): ?>
-            <li class="page-item <?= $p == $currentPage ? 'active' : '' ?>">
-              <a class="page-link"
-                href="<?= BASE_URL . '/index.php?' . http_build_query(array_merge($baseParams, ['page' => $p])) ?>">
-                <?= $p ?>
-              </a>
-            </li>
-          <?php endfor; ?>
-
-          <li class="page-item <?= $currentPage >= $totalPages ? 'disabled' : '' ?>">
-            <a class="page-link"
-              href="<?= $currentPage >= $totalPages ? '#' : BASE_URL . '/index.php?' . http_build_query(array_merge($baseParams, ['page' => $currentPage + 1])) ?>">
-              &raquo;
-            </a>
-          </li>
-
-        </ul>
+        <a class="grz-page-btn grz-page-nav<?= $currentPage >= $totalPages ? ' disabled' : '' ?>"
+          href="<?= $currentPage >= $totalPages ? '#' : BASE_URL . '/index.php?' . http_build_query(array_merge($baseParams, ['page' => $currentPage + 1])) ?>"
+          aria-label="Pagina successiva">
+          <i class="bi bi-chevron-right"></i>
+        </a>
       </nav>
     <?php endif; ?>
 
@@ -387,5 +391,7 @@ function formatBadge(string $f): string
       return 'secondary';
   }
 }
+
+
 
 ?>

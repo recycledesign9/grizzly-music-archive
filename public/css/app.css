@@ -4168,6 +4168,279 @@ a.badge-format:hover {
 }
 
 /* ============================================================
+   Archivio desktop — righe ibride nel linguaggio grz-
+   Colonne reali (non tutto ammassato a sinistra): le stesse
+   classi .grz-col-* fissano larghezza/flex sia in .grz-archive-head
+   che in .grz-archive-row, così le due si allineano sempre senza
+   duplicare i valori. Nessuna classe .table toccata: zero rischio
+   sulle altre viste che usano ancora tabelle Bootstrap.
+   ============================================================ */
+.grz-archive-list {
+  border: 1px solid var(--grz-border);
+  border-radius: var(--grz-radius-lg);
+  overflow: hidden;
+  background: var(--bs-body-bg);
+}
+
+.grz-archive-head,
+.grz-archive-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 16px;
+}
+
+.grz-archive-head {
+  background: var(--grz-surface-3);
+  border-bottom: 1px solid var(--grz-border);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--grz-text-2);
+}
+.grz-archive-head a {
+  color: inherit;
+  text-decoration: none;
+}
+.grz-archive-head a:hover {
+  color: var(--grz-amber-dim);
+}
+
+.grz-archive-row {
+  border-bottom: 1px solid var(--grz-border);
+  transition: background 0.12s ease;
+}
+.grz-archive-row:last-child {
+  border-bottom: none;
+}
+.grz-archive-row:hover {
+  background: rgba(var(--bs-warning-rgb), 0.05);
+}
+
+/* Larghezze condivise fra intestazione e righe */
+.grz-col-cover {
+  width: 56px;
+  flex-shrink: 0;
+}
+.grz-col-title {
+  flex: 1.3 1 0;
+  min-width: 0;
+}
+.grz-col-artist {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.grz-col-genre {
+  flex: 0.8 1 0;
+  min-width: 0;
+}
+.grz-col-format {
+  width: 150px;
+  flex-shrink: 0;
+}
+.grz-col-year {
+  width: 56px;
+  flex-shrink: 0;
+  text-align: center;
+}
+.grz-col-tracks {
+  width: 68px;
+  flex-shrink: 0;
+  text-align: center;
+}
+.grz-col-actions {
+  width: 36px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+/* Contenuto colonna Cover */
+.grz-archive-row .grz-col-cover {
+  display: block;
+  position: relative;
+  height: 56px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--grz-surface-3);
+}
+.grz-archive-row .grz-col-cover:hover img {
+  opacity: 0.85;
+}
+.grz-archive-row .grz-col-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+/* Contenuto colonna Titolo */
+.grz-archive-row .grz-col-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.grz-ar-title {
+  display: inline-block;
+  max-width: 100%;
+  min-width: 0;
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: var(--grz-text-1);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+.grz-ar-title:hover {
+  color: var(--grz-amber-dim);
+}
+.grz-ar-copies {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--grz-text-2);
+  flex-shrink: 0;
+}
+
+/* Contenuto colonna Artista */
+.grz-archive-row .grz-col-artist {
+  overflow: hidden;
+}
+.grz-ar-artist {
+  display: inline-block;
+  max-width: 100%;
+  font-size: 0.85rem;
+  color: var(--grz-text-2);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+.grz-ar-artist:hover {
+  color: var(--grz-text-1);
+  text-decoration: underline;
+}
+
+/* Contenuto colonna Genere */
+.grz-archive-row .grz-col-genre {
+  font-size: 0.82rem;
+  color: var(--grz-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Contenuto colonna Formato + stato audio */
+.grz-archive-row .grz-col-format {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.grz-col-format .badge-format {
+  font-size: 0.62rem;
+  padding: 2px 8px;
+}
+
+/* Contenuto colonna Anno */
+.grz-archive-row .grz-col-year {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--grz-amber-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Contenuto colonna Tracce */
+.grz-archive-row .grz-col-tracks {
+  font-size: 0.8rem;
+  color: var(--grz-text-2);
+}
+.grz-archive-row .grz-col-tracks i {
+  margin-right: 4px;
+  font-size: 0.72rem;
+}
+
+/* Stato audio: stessa icona tracce, colorata invece di un pallino
+   a parte — verde piena se il disco ha file audio, ambra vuota
+   se non ne ha ancora. */
+.grz-archive-row .grz-col-tracks i.grz-track-audio {
+  color: #16a34a;
+}
+.grz-archive-row .grz-col-tracks i.grz-track-noaudio {
+  color: #d97706;
+}
+[data-bs-theme="dark"] .grz-archive-row .grz-col-tracks i.grz-track-audio {
+  color: #4ade80;
+}
+[data-bs-theme="dark"] .grz-archive-row .grz-col-tracks i.grz-track-noaudio {
+  color: #fbbf24;
+}
+
+/* ============================================================
+   Paginazione — stile grz- al posto del blu Bootstrap di default.
+   Pillole quadrate con bordo, pagina attiva piena in ambra.
+   ============================================================ */
+.grz-pagination {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.grz-page-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--grz-border);
+  background: var(--bs-body-bg);
+  color: var(--grz-text-2);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+.grz-page-btn:hover {
+  background: var(--grz-surface-3);
+  color: var(--grz-text-1);
+  border-color: var(--grz-border);
+}
+.grz-page-btn.active {
+  background: var(--grz-amber);
+  border-color: var(--grz-amber);
+  color: #3f1c08;
+}
+.grz-page-btn.active:hover {
+  background: var(--grz-amber);
+  color: #3f1c08;
+}
+.grz-page-btn.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.grz-page-nav {
+  color: var(--grz-text-2);
+}
+.grz-page-ellipsis {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 32px;
+  color: var(--grz-text-2);
+  font-size: 0.82rem;
+}
+
+/* ============================================================
    Touch — tap target (pointer: coarse)
    Layer unico per i dispositivi touch, telefoni E tablet anche
    sopra i breakpoint mobile: porta i controlli compatti a

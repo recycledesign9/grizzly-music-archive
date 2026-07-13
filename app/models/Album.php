@@ -73,7 +73,12 @@ class Album
            FROM album_formats af2
            JOIN formats f2 ON af2.format_id = f2.id
            WHERE af2.album_id = a.id
-         ) AS formats_raw
+         ) AS formats_raw,
+         (
+           SELECT COUNT(*)
+           FROM audio_files af3
+           WHERE af3.album_id = a.id
+         ) AS audio_file_count
   FROM albums a
   LEFT JOIN artists ar ON a.artist_id = ar.id
   LEFT JOIN formats  f ON a.format_id = f.id
