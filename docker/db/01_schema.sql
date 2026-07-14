@@ -23,6 +23,7 @@ DROP TABLE IF EXISTS `playlists`;
 DROP TABLE IF EXISTS `audio_files`;
 DROP TABLE IF EXISTS `tracks`;
 DROP TABLE IF EXISTS `artist_discography`;
+DROP TABLE IF EXISTS `album_formats`;
 DROP TABLE IF EXISTS `albums`;
 DROP TABLE IF EXISTS `artists`;
 DROP TABLE IF EXISTS `formats`;
@@ -44,7 +45,15 @@ CREATE TABLE `artists` (
   `bio_lang`          VARCHAR(5)   COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `bio_url`           VARCHAR(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `bio_fetched_at`    TIMESTAMP NULL DEFAULT NULL,
+  `bio_status`        VARCHAR(10)  COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none'
+                      COMMENT 'ok | error | none — outcome of the last bio fetch attempt',
+  `bio_fetch_version` SMALLINT UNSIGNED NOT NULL DEFAULT 1
+                      COMMENT 'Fetch-logic version at save time (ArtistMetadataService::BIO_LOGIC_VERSION)',
   `disco_fetched_at`  TIMESTAMP NULL DEFAULT NULL,
+  `disco_status`      VARCHAR(10)  COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none'
+                      COMMENT 'ok | error | none — outcome of the last discography fetch attempt',
+  `disco_fetch_version` SMALLINT UNSIGNED NOT NULL DEFAULT 5
+                      COMMENT 'Fetch-logic version at save time (ArtistMetadataService::DISCOGRAPHY_LOGIC_VERSION)',
   `image_url`         VARCHAR(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `image_local`       VARCHAR(300) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `image_source`      VARCHAR(40)  COLLATE utf8mb4_unicode_ci DEFAULT NULL,

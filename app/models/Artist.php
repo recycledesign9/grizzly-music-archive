@@ -171,7 +171,13 @@ class Artist {
     // Salva i metadati recuperati dalle API esterne.
     // Aggiorna solo le colonne passate (whitelist), niente DROP.
     // ----------------------------------------------------------
-    public function updateMeta(int $id, array $data): void {
+    // $status: 'ok' se la ricerca MusicBrainz è andata a buon fine
+    // (anche con bio/immagine non trovate: è un "non trovato" confermato),
+    // 'error' se la chiamata a MusicBrainz è proprio fallita (rete/timeout):
+    // in quel caso needsBioRefetch() la ritenterà da sola dopo un cooldown,
+    // invece di restare vuota per sempre. $version va confrontato con
+    // ArtistMetadataService::BIO_LOGIC_VERSION.
+    public function updateMeta(int $id, array $data, string $status = 'ok', int $version = 0): void {
         $allowed = [
             'mb_artist_id', 'bio', 'bio_source', 'bio_lang', 'bio_url',
             'image_url', 'image_local', 'image_source',
@@ -188,16 +194,78 @@ class Artist {
             }
         }
 
-        if (empty($set)) {
-            return;
-        }
-
-        // Marca sempre il momento del fetch della bio
+        // Marca SEMPRE tentativo + esito + versione, anche se nessun campo
+        // dati è cambiato (es. tentativo fallito senza nulla da salvare):
+        // serve al retry-cooldown e al version bump. Se non lo facessimo,
+        // un fallimento non lascerebbe traccia e verrebbe ritentato ad ogni
+        // singola visita della pagina, invece che dopo un cooldown.
         $set[] = "`bio_fetched_at` = NOW()";
+        $set[] = "`bio_status` = :bio_status";
+        $set[] = "`bio_fetch_version` = :bio_fetch_version";
+        $params[':bio_status']        = $status;
+        $params[':bio_fetch_version'] = $version;
 
         $sql = "UPDATE artists SET " . implode(', ', $set) . " WHERE id = :id";
         $stmt = $this->db->prepare($sql);
         $stmt->execute($params);
+    }
+
+    // ----------------------------------------------------------
+    // CACHE — decide se un fetch (bio o discografia) va ripetuto.
+    // ----------------------------------------------------------
+
+    /**
+     * @param ?string $fetchedAt      Timestamp DB dell'ultimo tentativo (o null)
+     * @param ?string $status         'ok' | 'error' | null
+     * @param ?int    $storedVersion  Versione della logica al momento del fetch
+     * @param int     $currentVersion Versione attuale della logica (costante nel service)
+     * @param int     $errorCooldownMinutes  Minuti di attesa prima di ritentare un errore
+     */
+    private function needsRefetch(
+        ?string $fetchedAt,
+        ?string $status,
+        ?int $storedVersion,
+        int $currentVersion,
+        int $errorCooldownMinutes = 180
+    ): bool {
+        // Mai tentato prima.
+        if ($fetchedAt === null) {
+            return true;
+        }
+        // La logica di fetch è cambiata da quando è stato salvato questo
+        // artista: forza un ri-fetch, così un fix (come quello del
+        // 2026-07 sulla discografia) si applica da solo alla prossima
+        // visita, senza bisogno di toccare il DB a mano.
+        if ((int) $storedVersion < $currentVersion) {
+            return true;
+        }
+        // Ultimo tentativo fallito (non "non trovato": proprio fallito):
+        // ritenta automaticamente, ma non ad ogni richiesta — altrimenti
+        // un MusicBrainz giù per un'ora martellerebbe l'API a ogni pageview.
+        if ($status === 'error') {
+            $elapsedMinutes = (time() - strtotime($fetchedAt)) / 60;
+            return $elapsedMinutes >= $errorCooldownMinutes;
+        }
+        // Stato 'ok': anche con dati vuoti è un "non trovato" confermato.
+        return false;
+    }
+
+    public function needsBioRefetch(array $artist, int $currentVersion): bool {
+        return $this->needsRefetch(
+            $artist['bio_fetched_at']    ?? null,
+            $artist['bio_status']        ?? null,
+            $artist['bio_fetch_version'] ?? 0,
+            $currentVersion
+        );
+    }
+
+    public function needsDiscographyRefetch(array $artist, int $currentVersion): bool {
+        return $this->needsRefetch(
+            $artist['disco_fetched_at']    ?? null,
+            $artist['disco_status']        ?? null,
+            $artist['disco_fetch_version'] ?? 0,
+            $currentVersion
+        );
     }
 
     // ----------------------------------------------------------
@@ -216,32 +284,51 @@ class Artist {
         return $stmt->fetchAll();
     }
 
-    // Salva (sostituisce) la discografia ufficiale dell'artista e
-    // marca disco_fetched_at. Idempotente: ripulisce prima di inserire.
-    public function saveDiscography(int $artistId, array $items): void {
+    // Salva (sostituisce) la discografia ufficiale dell'artista e marca
+    // tentativo/stato/versione. Idempotente: ripulisce prima di inserire.
+    //
+    // $status: 'ok' se la chiamata a MusicBrainz è andata a buon fine
+    // (anche a zero risultati: è confermato), 'error' se la richiesta è
+    // proprio fallita — in quel caso NON tocchiamo le righe già salvate
+    // in precedenza (meglio tenere l'ultima discografia buona che
+    // cancellarla per un errore di rete), ma aggiorniamo comunque
+    // tentativo/stato/versione così needsDiscographyRefetch() ritenta da
+    // sola dopo un cooldown. $version va confrontato con
+    // ArtistMetadataService::DISCOGRAPHY_LOGIC_VERSION.
+    public function saveDiscography(int $artistId, array $items, string $status = 'ok', int $version = 0): void {
         $this->db->beginTransaction();
         try {
-            $del = $this->db->prepare("DELETE FROM artist_discography WHERE artist_id = :id");
-            $del->execute([':id' => $artistId]);
+            if ($status === 'ok') {
+                $del = $this->db->prepare("DELETE FROM artist_discography WHERE artist_id = :id");
+                $del->execute([':id' => $artistId]);
 
-            if (!empty($items)) {
-                $ins = $this->db->prepare("
-                    INSERT INTO artist_discography
-                        (artist_id, mb_release_group_id, title, year)
-                    VALUES (:aid, :rg, :title, :year)
-                ");
-                foreach ($items as $it) {
-                    $ins->execute([
-                        ':aid'   => $artistId,
-                        ':rg'    => ($it['mb_release_group_id'] ?? '') ?: null,
-                        ':title' => $it['title'] ?? '',
-                        ':year'  => $it['year'] ?? null,
-                    ]);
+                if (!empty($items)) {
+                    $ins = $this->db->prepare("
+                        INSERT INTO artist_discography
+                            (artist_id, mb_release_group_id, title, year)
+                        VALUES (:aid, :rg, :title, :year)
+                    ");
+                    foreach ($items as $it) {
+                        $ins->execute([
+                            ':aid'   => $artistId,
+                            ':rg'    => ($it['mb_release_group_id'] ?? '') ?: null,
+                            ':title' => $it['title'] ?? '',
+                            ':year'  => $it['year'] ?? null,
+                        ]);
+                    }
                 }
             }
 
-            $upd = $this->db->prepare("UPDATE artists SET disco_fetched_at = NOW() WHERE id = :id");
-            $upd->execute([':id' => $artistId]);
+            $upd = $this->db->prepare("
+                UPDATE artists
+                SET disco_fetched_at = NOW(), disco_status = :status, disco_fetch_version = :version
+                WHERE id = :id
+            ");
+            $upd->execute([
+                ':id'      => $artistId,
+                ':status'  => $status,
+                ':version' => $version,
+            ]);
 
             $this->db->commit();
         } catch (Throwable $e) {

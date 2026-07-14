@@ -101,14 +101,17 @@ class ArtistController
         return;
       }
 
-      // Se la bio è GIÀ stata recuperata in passato, non rifacciamo
-      // le chiamate esterne: serviamo quanto già salvato in DB.
-      if (!empty($artist['bio_fetched_at'])) {
+      require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
+
+      // Rifetch solo se: mai tentato, oppure la logica di fetch è
+      // cambiata (version bump), oppure l'ultimo tentativo è fallito ed
+      // è passato il cooldown — vedi Artist::needsBioRefetch(). In tutti
+      // gli altri casi (incluso "cercato ma non trovato") serviamo la cache.
+      if (!$this->artistModel->needsBioRefetch($artist, ArtistMetadataService::BIO_LOGIC_VERSION)) {
         echo json_encode($this->metaPayload($artist));
         return;
       }
 
-      require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
       $service = new ArtistMetadataService();
 
       // Titoli degli album locali dell'artista: usati dal service per
@@ -116,6 +119,13 @@ class ArtistController
       $localTitles = array_column($this->artistModel->getAlbums($id), 'title');
 
       $meta = $service->fetchByName($artist['name'], $localTitles);
+
+      // Indica se la ricerca MusicBrainz è andata a buon fine (vedi
+      // ArtistMetadataService::fetchByName). Se è fallita per un errore
+      // di rete/timeout marchiamo 'error': verrà ritentata da sola dopo
+      // un cooldown, invece di restare vuota per sempre.
+      $fetchOk = (bool) ($meta['fetch_ok'] ?? true);
+      unset($meta['fetch_ok']);
 
       // Download immagine in locale (best-effort)
       if (!empty($meta['image_url'])) {
@@ -125,9 +135,8 @@ class ArtistController
         }
       }
 
-      // Persistenza: salviamo SEMPRE (anche con bio vuota, così
-      // bio_fetched_at viene valorizzato e non ritentiamo a ogni visita)
-      $this->artistModel->updateMeta($id, $meta);
+      $status = $fetchOk ? 'ok' : 'error';
+      $this->artistModel->updateMeta($id, $meta, $status, ArtistMetadataService::BIO_LOGIC_VERSION);
 
       // Ricarica per servire i path definitivi
       $fresh = $this->artistModel->getById($id);
@@ -194,8 +203,14 @@ class ArtistController
         return;
       }
 
-      // Gia' in cache? servi dal DB senza richiamare MusicBrainz.
-      if (!empty($artist['disco_fetched_at'])) {
+      require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
+
+      // Gia' in cache E ancora valida (stessa versione della logica di
+      // fetch, nessun errore da ritentare)? servi dal DB senza richiamare
+      // MusicBrainz. Il version bump fa sì che le discografie già in
+      // cache con l'algoritmo vecchio (troncato) si aggiornino da sole
+      // alla prossima visita, senza bisogno di toccare il DB a mano.
+      if (!$this->artistModel->needsDiscographyRefetch($artist, ArtistMetadataService::DISCOGRAPHY_LOGIC_VERSION)) {
         echo json_encode([
           'ok'    => true,
           'items' => $this->artistModel->getDiscography($id),
@@ -203,18 +218,25 @@ class ArtistController
         return;
       }
 
-      // Serve l'MBID artista (ottenuto col fetch della bio).
+      // Serve l'MBID artista (ottenuto col fetch della bio). Non è un
+      // errore: semplicemente la bio non è ancora stata recuperata, non
+      // marchiamo nulla così si potrà ritentare subito dopo il fetch-meta.
       $mbid = $artist['mb_artist_id'] ?? '';
       if ($mbid === '') {
         echo json_encode(['ok' => true, 'items' => []]);
         return;
       }
 
-      require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
       $service = new ArtistMetadataService();
+      $result  = $service->fetchDiscography($mbid);
 
-      $items = $service->fetchDiscography($mbid);
-      $this->artistModel->saveDiscography($id, $items);
+      $status = ($result['ok'] ?? true) ? 'ok' : 'error';
+      $this->artistModel->saveDiscography(
+        $id,
+        $result['items'] ?? [],
+        $status,
+        ArtistMetadataService::DISCOGRAPHY_LOGIC_VERSION
+      );
 
       echo json_encode([
         'ok'    => true,

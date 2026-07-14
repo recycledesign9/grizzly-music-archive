@@ -29,6 +29,61 @@ class ArtistMetadataService
     /** Soglia minima di confidenza sul match MusicBrainz */
     private const MB_MIN_SCORE = 85;
 
+    /**
+     * Versioni della logica di fetch. Da incrementare OGNI VOLTA che si
+     * modifica in modo sostanziale l'algoritmo di recupero — non la
+     * frequenza di chiamata, ma cosa/come viene cercato o filtrato.
+     * ArtistController confronta questi valori con quelli salvati sul
+     * singolo artista (Artist::needsBioRefetch/needsDiscographyRefetch):
+     * se la versione salvata è più vecchia, il fetch riparte da solo alla
+     * prossima visita, senza bisogno di toccare il DB a mano.
+     *
+     * BIO e DISCOGRAFIA hanno versioni indipendenti perché evolvono per
+     * conto proprio (oggi cambia la discografia, la bio no: non ha senso
+     * ri-martellare bio/immagini di tutti gli artisti per un fix che le
+     * riguarda solo di striscio).
+     */
+    public const BIO_LOGIC_VERSION = 1;
+
+    /**
+     * v2: fix del 2026-07 — la discografia veniva letta da /release
+     * (una entry per ogni edizione fisica ufficiale) invece che da
+     * /release-group (una entry per album), il che troncava la
+     * discografia di artisti con molte ristampe prima di arrivare agli
+     * album più recenti (bug riscontrato su Pearl Jam, fermo al 2009).
+     *
+     * v3: fix del 2026-07 — il passaggio a /release-group in v2 aveva
+     * eliminato per distrazione il controllo status=official che il
+     * vecchio codice su /release faceva gratuitamente. Risultato: un
+     * release-group con primary-type Album e nessun secondary-type ma
+     * SENZA alcuna release ufficiale dietro (bootleg, ristampe grigie
+     * di registrazioni radio/broadcast) passava comunque il filtro.
+     * Casi confermati: "Tilburg 1993" (Alice in Chains, release con
+     * status=Bootleg), "Radio Transmissions 1995-2000" (Pearl Jam,
+     * raccolta di broadcast ripubblicata da un'etichetta di bootleg).
+     *
+     * v4: fix del 2026-07 — l'implementazione di v3 aggiungeva
+     * '&inc=releases' alla STESSA query browse-per-artista paginata:
+     * questa combinazione specifica è tornata sempre con lista di
+     * release annidate vuota per OGNI release-group (non solo i
+     * bootleg), quindi la verifica "ha una release ufficiale" falliva
+     * sempre e la discografia risultava vuota per tutti — bug peggiore
+     * di quello che doveva risolvere, perché scriveva quel vuoto in
+     * cache con stato 'ok'. v4 verifica ogni album candidato con una
+     * lookup dedicata (/release-group/{id}?inc=releases&status=official),
+     * più lenta ma su un comportamento documentato in modo inequivocabile.
+     *
+     * v5: fix del 2026-07 — v4 era corretta ma troppo lenta: una
+     * chiamata HTTP throttled per OGNI candidato (15-30 album = 15-30
+     * secondi abbondanti, superando anche il minuto). v5 sostituisce le
+     * N lookup singole con una scansione unica a blocchi da 100 release
+     * (stessa query del vecchio codice pre-v2, usata pero' solo per
+     * CONFERMARE i candidati già noti, non più come fonte primaria di
+     * titoli/anni): tipicamente 1-3 chiamate invece di N, con lo stesso
+     * identico risultato — vedi confirmOfficialReleaseGroups().
+     */
+    public const DISCOGRAPHY_LOGIC_VERSION = 5;
+
     /** Lunghezza massima bio salvata (caratteri) per non esagerare */
     private const BIO_MAX_CHARS = 2200;
 
@@ -51,6 +106,16 @@ class ArtistMetadataService
 
         // ---------- 1) MUSICBRAINZ : match + metadati ----------
         $mb = $this->searchMusicBrainzArtist($name, $localAlbumTitles);
+
+        // Estrae il flag di esito (vedi searchMusicBrainzArtist): indica
+        // se la RICERCA MusicBrainz è andata a buon fine, indipendentemente
+        // dal fatto che abbia trovato un match. Usato da ArtistController
+        // per decidere se la cache va marcata 'ok' o 'error' (da ritentare).
+        $fetchOk = true;
+        if (array_key_exists('_fetch_ok', $mb)) {
+            $fetchOk = (bool) $mb['_fetch_ok'];
+            unset($mb['_fetch_ok']);
+        }
 
         $wikidataId = '';
         if (!empty($mb)) {
@@ -141,6 +206,8 @@ class ArtistMetadataService
             }
         }
 
+        $result['fetch_ok'] = $fetchOk;
+
         return $result;
     }
 
@@ -154,11 +221,18 @@ class ArtistMetadataService
             . '?query=' . urlencode('artist:"' . $name . '"')
             . '&fmt=json&limit=5';
 
-        $data = $this->httpGetJson($url);
+        $resp = $this->httpGetJsonWithStatus($url);
         usleep(self::MB_THROTTLE_US);
 
+        // Segnala se la RICERCA (non il lookup successivo) è andata a
+        // buon fine: è la chiamata portante, da cui dipende la decisione
+        // di fetchByName() se marcare la cache come confermata o da
+        // ritentare. Propagata via chiave interna, rimossa da fetchByName().
+        $fetchOk = $resp['ok'];
+        $data    = $resp['data'];
+
         if (empty($data['artists'])) {
-            return [];
+            return ['_fetch_ok' => $fetchOk];
         }
 
         // Raccoglie TUTTI i candidati sopra soglia (non solo il primo):
@@ -173,7 +247,7 @@ class ArtistMetadataService
             }
         }
         if (empty($candidates)) {
-            return [];
+            return ['_fetch_ok' => $fetchOk];
         }
 
         // Disambiguazione: se c'è più di un candidato e conosciamo gli album
@@ -214,11 +288,13 @@ class ArtistMetadataService
             $full = $this->httpGetJson($lookupUrl);
             usleep(self::MB_THROTTLE_US);
             if (!empty($full['id'])) {
-                $full['score'] = $best['score'] ?? 0;
+                $full['score']     = $best['score'] ?? 0;
+                $full['_fetch_ok'] = true; // la ricerca primaria è comunque riuscita
                 return $full;
             }
         }
 
+        $best['_fetch_ok'] = true;
         return $best;
     }
 
@@ -636,14 +712,25 @@ class ArtistMetadataService
     /**
      * Recupera l'elenco degli ALBUM IN STUDIO UFFICIALI dell'artista.
      *
-     * Strategia: interroga le RELEASE con status=official e type=album,
-     * poi le raggruppa per release-group (così le varie edizioni ufficiali
-     * dello stesso album contano una volta sola). In questo modo i bootleg
-     * e le voci non ufficiali (che non hanno alcuna release "official")
-     * vengono automaticamente esclusi.
+     * Strategia: interroga direttamente i RELEASE-GROUP dell'artista
+     * (endpoint /release-group, non /release), filtrando per primary-type
+     * "Album" senza secondary-type (niente live, compilation, remix...).
      *
-     * Filtra inoltre per primary-type "Album" senza secondary-type, così
-     * restano solo gli studio album (niente live, compilation, remix...).
+     * NOTA IMPORTANTE (fix): la versione precedente interrogava /release
+     * (una entry per OGNI edizione/pressaggio fisico ufficiale — ogni
+     * paese, ogni formato, ogni ristampa) e poi raggruppava per
+     * release-group lato PHP. Per artisti con un catalogo di ristampe
+     * ampio (es. Pearl Jam ha centinaia di release ufficiali distinte
+     * contando tutte le edizioni nazionali dei primi album) questo
+     * esauriva il guard di paginazione (max 6 pagine × 100 = 600 release)
+     * prima ancora di raggiungere le release degli album più recenti,
+     * perché MusicBrainz non restituisce le release in ordine
+     * cronologico di uscita. Risultato: la discografia si fermava a
+     * metà, dando l'illusione (falsa) che MusicBrainz non conoscesse
+     * gli album successivi. Interrogando /release-group si ottiene
+     * invece UNA riga per album (indipendentemente da quante edizioni
+     * fisiche esistano), quindi per la stragrande maggioranza degli
+     * artisti basta una sola pagina.
      *
      * @return array[] ['title' => string, 'year' => ?int,
      *                  'mb_release_group_id' => string] ordinato per anno.
@@ -652,38 +739,38 @@ class ArtistMetadataService
     {
         $mbArtistId = trim($mbArtistId);
         if ($mbArtistId === '') {
-            return [];
+            return ['ok' => true, 'items' => []];
         }
 
-        // Raccoglie per release-group: tiene il primo anno (più vecchio).
-        $byGroup = []; // rg_id => ['title'=>..., 'year'=>..., 'rg'=>...]
-        $seen    = []; // titoli normalizzati (deduplica finale)
+        // STEP 1 — candidati (titolo/anno) da /release-group: una riga per
+        // album indipendentemente da quante edizioni fisiche esistano
+        // (fix v2, niente troncamento su cataloghi con molte ristampe).
+        $candidates = []; // titolo normalizzato => ['rgId','title','year']
+        $fetchOk    = true;
 
-        // Paginazione release ufficiali di tipo album.
         $limit  = 100;
         $offset = 0;
         $guard  = 0;
 
         do {
-            $url = 'https://musicbrainz.org/ws/2/release'
+            $url = 'https://musicbrainz.org/ws/2/release-group'
                 . '?artist=' . rawurlencode($mbArtistId)
-                . '&type=album&status=official'
-                . '&inc=release-groups'
+                . '&type=album'
                 . '&fmt=json&limit=' . $limit . '&offset=' . $offset;
 
-            $data = $this->httpGetJson($url);
+            $resp = $this->httpGetJsonWithStatus($url);
             usleep(self::MB_THROTTLE_US);
 
-            $releases = $data['releases'] ?? [];
-            $total    = (int) ($data['release-count'] ?? count($releases));
+            if (!$resp['ok']) {
+                $fetchOk = false;
+                break;
+            }
 
-            foreach ($releases as $rel) {
-                $rg = $rel['release-group'] ?? null;
-                if (!$rg) {
-                    continue;
-                }
+            $data   = $resp['data'];
+            $groups = $data['release-groups'] ?? [];
+            $total  = (int) ($data['release-group-count'] ?? count($groups));
 
-                // Solo studio album: primary "Album", nessun secondary-type
+            foreach ($groups as $rg) {
                 $primary   = $rg['primary-type'] ?? '';
                 $secondary = $rg['secondary-types'] ?? [];
                 if (strcasecmp($primary, 'Album') !== 0 || !empty($secondary)) {
@@ -691,26 +778,24 @@ class ArtistMetadataService
                 }
 
                 $rgId  = $rg['id'] ?? '';
-                $title = trim($rg['title'] ?? ($rel['title'] ?? ''));
+                $title = trim($rg['title'] ?? '');
                 if ($rgId === '' || $title === '') {
                     continue;
                 }
 
-                // Anno: preferisci la first-release-date del release-group
                 $year = null;
-                $fr   = $rg['first-release-date'] ?? ($rel['date'] ?? '');
+                $fr   = $rg['first-release-date'] ?? '';
                 if ($fr !== '' && preg_match('/^(\d{4})/', $fr, $m)) {
                     $year = (int) $m[1];
                 }
 
-                if (!isset($byGroup[$rgId])) {
-                    $byGroup[$rgId] = ['title' => $title, 'year' => $year, 'rg' => $rgId];
-                } elseif ($year !== null) {
-                    // mantieni l'anno più vecchio se ne arriva uno valido
-                    $cur = $byGroup[$rgId]['year'];
-                    if ($cur === null || $year < $cur) {
-                        $byGroup[$rgId]['year'] = $year;
-                    }
+                // Dedup per titolo QUI, prima della verifica ufficiale. A
+                // parità di titolo, tiene il candidato con l'anno
+                // valorizzato (di solito quello con dati più completi,
+                // es. "Blindness" vs "blindness").
+                $key = preg_replace('/\s+/', ' ', mb_strtolower($title));
+                if (!isset($candidates[$key]) || ($candidates[$key]['year'] === null && $year !== null)) {
+                    $candidates[$key] = ['rgId' => $rgId, 'title' => $title, 'year' => $year];
                 }
             }
 
@@ -718,19 +803,26 @@ class ArtistMetadataService
             $guard++;
         } while ($offset < $total && $guard < 6);
 
-        // Deduplica per titolo e costruisci l'output
+        // STEP 2 — quali candidati hanno ALMENO UNA release ufficiale
+        // dietro? Una scansione unica a blocchi da 100 (non una chiamata
+        // per candidato: con 15-30 album significava 15-30 chiamate
+        // sequenziali da oltre un secondo l'una, quindi anche un minuto
+        // pieno) — vedi confirmOfficialReleaseGroups().
         $out = [];
-        foreach ($byGroup as $g) {
-            $key = preg_replace('/\s+/', ' ', mb_strtolower($g['title']));
-            if (isset($seen[$key])) {
-                continue;
+        if ($fetchOk && !empty($candidates)) {
+            $confirmedIds = $this->confirmOfficialReleaseGroups(
+                $mbArtistId,
+                array_column($candidates, 'rgId')
+            );
+            foreach ($candidates as $cand) {
+                if (in_array($cand['rgId'], $confirmedIds, true)) {
+                    $out[] = [
+                        'title'               => $cand['title'],
+                        'year'                => $cand['year'],
+                        'mb_release_group_id' => $cand['rgId'],
+                    ];
+                }
             }
-            $seen[$key] = true;
-            $out[] = [
-                'title'               => $g['title'],
-                'year'                => $g['year'],
-                'mb_release_group_id' => $g['rg'],
-            ];
         }
 
         // Ordina per anno (senza anno in fondo)
@@ -743,7 +835,89 @@ class ArtistMetadataService
             return $ya - $yb;
         });
 
-        return $out;
+        return ['ok' => $fetchOk, 'items' => $out];
+    }
+
+    /**
+     * Conferma quali dei $candidateRgIds hanno almeno una release con
+     * status=Official, scansionando le release ufficiali di tipo album
+     * dell'artista A BLOCCHI DA 100 (query identica a quella del vecchio
+     * codice pre-v2: /release?artist=...&type=album&status=official&
+     * inc=release-groups) — UNA chiamata ogni 100 release, non una
+     * chiamata per candidato: per un artista con 15-30 album questo
+     * vuol dire tipicamente 1-3 chiamate invece di 15-30.
+     *
+     * Si ferma appena TUTTI i candidati sono confermati (early exit) o
+     * quando ha scandito tutte le release ufficiali dell'artista
+     * (offset >= total): a quel punto chi resta non trovato NON ha
+     * nessuna release ufficiale, quindi va escluso con certezza — è
+     * così che "Tilburg 1993"/"Radio Transmissions 1995-2000" vengono
+     * esclusi in modo definitivo, non per un timeout.
+     *
+     * Solo se il catalogo è così enorme da far scattare il tetto di
+     * sicurezza ($guardMax pagine) PRIMA di finire la scansione, o se la
+     * rete fallisce a metà, i candidati ancora incerti a quel punto
+     * vengono inclusi per prudenza (fail-open sull'ambiguità residua,
+     * mai sui bootleg già confermati assenti).
+     *
+     * @param string[] $candidateRgIds
+     * @return string[] i release-group id confermati ufficiali
+     */
+    private function confirmOfficialReleaseGroups(string $mbArtistId, array $candidateRgIds): array
+    {
+        $remaining = array_flip($candidateRgIds); // rgId => indice originale
+        $confirmed = [];
+
+        $limit    = 100;
+        $offset   = 0;
+        $total    = 0;
+        $guard    = 0;
+        $guardMax = 30; // fino a 3000 release scandite prima del fail-open residuo
+        $sawFailure = false;
+
+        do {
+            $url = 'https://musicbrainz.org/ws/2/release'
+                . '?artist=' . rawurlencode($mbArtistId)
+                . '&type=album&status=official'
+                . '&inc=release-groups'
+                . '&fmt=json&limit=' . $limit . '&offset=' . $offset;
+
+            $resp = $this->httpGetJsonWithStatus($url);
+            usleep(self::MB_THROTTLE_US);
+
+            if (!$resp['ok']) {
+                $sawFailure = true;
+                break;
+            }
+
+            $data     = $resp['data'];
+            $releases = $data['releases'] ?? [];
+            $total    = (int) ($data['release-count'] ?? count($releases));
+
+            foreach ($releases as $rel) {
+                $rgId = $rel['release-group']['id'] ?? '';
+                if ($rgId !== '' && isset($remaining[$rgId])) {
+                    $confirmed[] = $rgId;
+                    unset($remaining[$rgId]);
+                }
+            }
+
+            $offset += $limit;
+            $guard++;
+        } while (!empty($remaining) && $offset < $total && $guard < $guardMax);
+
+        // Scansione completa (tutte le release ufficiali dell'artista
+        // viste, nessun errore di rete nel mezzo): chi resta in
+        // $remaining è escluso con certezza, non ha nessuna release
+        // ufficiale. Altrimenti (tetto di sicurezza o rete fallita a
+        // metà) l'esito è incerto, non un bootleg confermato: includiamo
+        // per prudenza.
+        $exhausted = !$sawFailure && ($offset >= $total);
+        if (!$exhausted) {
+            $confirmed = array_merge($confirmed, array_keys($remaining));
+        }
+
+        return $confirmed;
     }
 
     private function guessExtension(string $bytes): string
@@ -774,6 +948,7 @@ class ArtistMetadataService
             'country'      => '',
             'active_from'  => null,
             'active_to'    => null,
+            'fetch_ok'     => true,
         ];
     }
 
@@ -799,6 +974,31 @@ class ArtistMetadataService
         }
         $json = json_decode($raw, true);
         return is_array($json) ? $json : [];
+    }
+
+    /**
+     * Come httpGetJson() ma segnala anche se la chiamata è andata
+     * DAVVERO a buon fine (bytes ricevuti + JSON valido), a differenza
+     * di httpGetJson() che restituisce [] sia per "nessun risultato" sia
+     * per "richiesta fallita" — ambiguità accettabile per le chiamate di
+     * fallback (Wikipedia/Wikidata/Deezer/Last.fm, dove un fallimento è
+     * un esito normale e già previsto della catena), ma NON per i due
+     * punti che decidono se la cache va marcata come confermata:
+     * la ricerca artista su MusicBrainz e la discografia.
+     *
+     * @return array{ok:bool,data:array}
+     */
+    private function httpGetJsonWithStatus(string $url): array
+    {
+        $raw = $this->httpGetBinary($url, 'application/json');
+        if ($raw === '') {
+            return ['ok' => false, 'data' => []];
+        }
+        $json = json_decode($raw, true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'data' => []];
+        }
+        return ['ok' => true, 'data' => $json];
     }
 
     /**
