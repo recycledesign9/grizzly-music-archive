@@ -576,8 +576,17 @@ class ArtistMetadataService
             if ($img === '') {
                 continue;
             }
-            // Placeholder Deezer: md5 vuoto nel percorso immagine
+            // Placeholder Deezer, caso 1: percorso con hash vuoto (/artist//...)
             if (strpos($img, '/artist//') !== false) {
+                continue;
+            }
+            // Placeholder Deezer, caso 2: hash = md5('') = d41d8cd98f00b204e9800998ecf8427e.
+            // Deezer lo usa come "nessuna foto" per artisti omonimi minori che a
+            // volte precedono nei risultati l'artista vero (es. un "David Bowie"
+            // con 441 fan senza foto, prima del vero David Bowie con 2,4M fan).
+            // Senza questo controllo il codice accetta il placeholder come se
+            // fosse una foto reale e lo scarica in locale.
+            if (strpos($img, '/d41d8cd98f00b204e9800998ecf8427e/') !== false) {
                 continue;
             }
 
