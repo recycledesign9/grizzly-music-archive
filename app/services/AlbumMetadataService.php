@@ -439,12 +439,22 @@ class AlbumMetadataService
         return $percent >= 55.0;
     }
 
-    // Prende SOLO il primo medium (disco/lato principale): in MusicBrainz
-    // i media sono sempre ordinati, il primo è l'album originale, i
-    // successivi sono bonus disc, disc 2, DVD, ecc. Un vinile singolo
-    // (anche a più lati, A/B/C/D) resta comunque UN solo medium, quindi
-    // questa regola non taglia via nessun lato dell'LP originale — taglia
-    // solo dischi/bonus AGGIUNTIVI di eventuali edizioni multi-disco.
+    // Legge le tracce da TUTTI i media della release, non solo dal primo.
+    //
+    // FIX: la versione precedente prendeva solo $data['media'][0],
+    // partendo dal presupposto che un disco con più lati (A/B/C/D)
+    // fosse sempre UN solo medium — vero per un vinile singolo, ma
+    // FALSO per un doppio (o multiplo) LP/CD originale: MusicBrainz
+    // rappresenta ogni disco fisico come un medium separato, quindi
+    // "Daydream Nation" (Sonic Youth, doppio LP) risultava con solo
+    // 6 tracce invece di 12 — il secondo disco veniva scartato.
+    //
+    // Le release deluxe/bonus/anniversary sono già escluse a monte
+    // (pickBestRelease/isValidMb scartano i titoli con questi termini),
+    // quindi sommare tutti i media della release scelta non reintroduce
+    // il problema che la regola originale voleva evitare: se una release
+    // arriva fin qui, i suoi media sono dischi legittimi dell'album, non
+    // bonus disc di un'edizione speciale.
     private function getTracksFromMusicBrainzRelease(string $mbid): array
     {
         $url  = 'https://musicbrainz.org/ws/2/release/' . $mbid . '?inc=recordings+media&fmt=json';
@@ -452,18 +462,19 @@ class AlbumMetadataService
 
         if (empty($data['media'])) return [];
 
-        $medium = $data['media'][0] ?? [];
-        if (empty($medium['tracks'])) return [];
-
         $tracks = [];
-        foreach ($medium['tracks'] as $t) {
-            if (empty($t['title'])) continue;
+        foreach ($data['media'] as $medium) {
+            if (empty($medium['tracks'])) continue;
 
-            $tracks[] = [
-                'position' => count($tracks) + 1,
-                'title'    => $t['title'],
-                'duration' => !empty($t['length']) ? (int)($t['length'] / 1000) : 0
-            ];
+            foreach ($medium['tracks'] as $t) {
+                if (empty($t['title'])) continue;
+
+                $tracks[] = [
+                    'position' => count($tracks) + 1,
+                    'title'    => $t['title'],
+                    'duration' => !empty($t['length']) ? (int)($t['length'] / 1000) : 0
+                ];
+            }
         }
 
         return $tracks;
