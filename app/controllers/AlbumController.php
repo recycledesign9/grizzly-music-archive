@@ -729,20 +729,17 @@ class AlbumController
       //      cross-lingua sull'altra: tutto lato server, un solo giro.
       $result = $this->fetchWikipediaBatchedTitles($artist, $album, $lang, $debug);
 
-      if (empty($result['description']) && $this->wikiTimeLeft() > 0.8) {
-        $otherLang = ($lang === 'it') ? 'en' : 'it';
-        $cross = $this->fetchWikipediaBatchedTitles($artist, $album, $otherLang, $debug);
-        if ($debug) {
-          $cross['debug'] = array_merge($result['debug'] ?? [], $cross['debug'] ?? []);
-        }
-        if (!empty($cross['description'])) {
-          $result = $cross;
-        } elseif ($debug) {
-          $result['debug'] = $cross['debug'];
-        }
-      }
-
-      // ---- LIVELLO 2: percorso MBID → Wikidata (già cross-lingua).
+      // ---- LIVELLO 2: percorso MBID → Wikidata → sitelink esatto.
+      //      Va tentato PRIMA del fallback cross-lingua di livello 1:
+      //      è deterministico (nessuna euristica sui titoli), quindi
+      //      va preferito a un semplice tentativo nell'ALTRA lingua.
+      //      Senza questa priorità, un titolo abbreviato in archivio
+      //      rispetto al titolo Wikipedia reale (es. "The Rise and Fall
+      //      of Ziggy Stardust" invece di "...and the Spiders from
+      //      Mars") falliva il livello 1 nella lingua richiesta ma
+      //      trovava per caso un redirect nell'altra lingua sul titolo
+      //      corto, restituendo sempre quella lingua anche quando la
+      //      pagina corretta esisteva ed era raggiungibile via MBID.
       //      Tocca MusicBrainz (lento e rate-limitato): solo se il
       //      livello 1 non ha risolto. I sitelink risolti vengono cachati
       //      per MBID, quindi questa salita avviene UNA volta per disco.
@@ -755,6 +752,19 @@ class AlbumController
           $result = $lvl2;
         } elseif ($debug) {
           $result['debug'] = $lvl2['debug'];
+        }
+      }
+
+      if (empty($result['description']) && $this->wikiTimeLeft() > 0.8) {
+        $otherLang = ($lang === 'it') ? 'en' : 'it';
+        $cross = $this->fetchWikipediaBatchedTitles($artist, $album, $otherLang, $debug);
+        if ($debug) {
+          $cross['debug'] = array_merge($result['debug'] ?? [], $cross['debug'] ?? []);
+        }
+        if (!empty($cross['description'])) {
+          $result = $cross;
+        } elseif ($debug) {
+          $result['debug'] = $cross['debug'];
         }
       }
 
@@ -1161,9 +1171,10 @@ class AlbumController
   // LIVELLO 1 — Titoli esatti in UNA richiesta batch
   //
   // Le pagine Wikipedia degli album seguono una convenzione di naming
-  // stabile: "Titolo (Artista album)" quando serve disambiguare,
-  // "Titolo (album)" o semplicemente "Titolo" altrimenti.
-  // Es.: "Songs of Praise (Shame album)", "Slip (album)".
+  // stabile ma DIVERSA per lingua quando serve disambiguare:
+  //   EN: "Titolo (Artista album)"  — es. "Songs of Praise (Shame album)"
+  //   IT: "Titolo (album Artista)"  — es. "Back in Black (album AC/DC)"
+  // altrimenti "Titolo (album)" o semplicemente "Titolo".
   // Tutti i candidati vengono richiesti in UNA SOLA chiamata API
   // (titles=A|B|C con redirect): una richiesta, ~300 ms, e la stragrande
   // maggioranza dei dischi è risolta. Ogni estratto viene validato
@@ -1184,6 +1195,16 @@ class AlbumController
     ]));
 
     $candidates = [];
+    // Convenzione Wikipedia IT: "Titolo (album Artista)" — ordine
+    // invertito rispetto a quella inglese "Titolo (Artista album)".
+    // Va provata PRIMA per lang=it, altrimenti la ricerca italiana
+    // fallisce sempre sui titoli che richiedono disambiguazione e il
+    // fallback cross-lingua finisce per restituire sempre la pagina EN.
+    if ($lang === 'it') {
+      foreach ($artistVariants as $a) {
+        $candidates[] = $album . ' (album ' . $a . ')';
+      }
+    }
     foreach ($artistVariants as $a) {
       $candidates[] = $album . ' (' . $a . ' album)';
     }
