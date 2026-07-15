@@ -57,6 +57,15 @@ class AlbumMetadataService
         }
         $isMbValid = $this->isValidMb($mb ?? [], $result['tracks']);
 
+        // Tracklist MB "valida" per numero di tracce ma senza NESSUNA
+        // durata: capita quando la release scelta non ha il campo
+        // "length" valorizzato sui singoli track (es. Urban Hymns / The
+        // Verve). isValidMb() guarda solo il conteggio tracce, quindi
+        // senza questo controllo Discogs non veniva mai interpellato se
+        // genere/etichetta/cover erano già presenti, lasciando le durate
+        // a 0 anche quando Discogs le avrebbe.
+        $mbDurationsMissing = $this->tracksHaveNoDuration($result['tracks']);
+
         // ================= DISCOGS (UNICA CHIAMATA) =================
 
         $discogs = null;
@@ -64,6 +73,7 @@ class AlbumMetadataService
         // chiama Discogs SOLO se serve qualcosa
         if (
             !$isMbValid
+            || $mbDurationsMissing
             || empty($result['tracks']) || count($result['tracks']) < 5
             || empty($result['genre'])
             || empty($result['label'])
@@ -104,14 +114,49 @@ class AlbumMetadataService
             if (empty($result['label']) && !empty($discogs['label'])) {
                 $result['label'] = $discogs['label'];
             }
+
+            // FIX DURATE MANCANTI: se il branch sopra NON ha sostituito
+            // la tracklist (es. Discogs ha meno tracce di MB) e le durate
+            // sono ancora tutte a 0, riempiamo SOLO le durate per
+            // posizione, senza toccare titoli/posizioni già assegnati da
+            // MusicBrainz — stessa filosofia del FIX precedente: Discogs
+            // può solo MIGLIORARE, mai sostituire dati già corretti.
+            if (
+                $mbDurationsMissing
+                && $this->tracksHaveNoDuration($result['tracks'])
+                && !empty($discogs['tracks'])
+            ) {
+                foreach ($result['tracks'] as $i => &$track) {
+                    if (!empty($discogs['tracks'][$i]['duration'])) {
+                        $track['duration'] = $discogs['tracks'][$i]['duration'];
+                    }
+                }
+                unset($track);
+            }
         }
 
-        // ================= LASTFM (SOLO COME ULTIMO FALLBACK) =================
-        if (empty($result['tracks'])) {
+        // ================= LASTFM (FALLBACK: TRACKLIST VUOTA O DURATE MANCANTI) =================
+        // Ramo originale invariato: tracklist assente → Last.fm la fornisce.
+        // Nuovo ramo (elseif): tracklist già presente da MB/Discogs ma con
+        // TUTTE le durate a 0 (es. Urban Hymns — né la release MusicBrainz
+        // né quella Discogs scelta hanno il campo durata compilato per
+        // singolo track). Last.fm viene interpellato SOLO per le durate,
+        // riempite per posizione senza toccare titoli/posizioni già
+        // assegnati — stessa filosofia del fix Discogs qui sopra.
+        if (empty($result['tracks']) || $this->tracksHaveNoDuration($result['tracks'])) {
             $lfm = $this->getLastFmAlbumInfo($artistRaw, $albumRaw);
 
-            if (!empty($lfm['tracks'])) {
-                $result['tracks'] = $this->cleanTracks($lfm['tracks']);
+            if (empty($result['tracks'])) {
+                if (!empty($lfm['tracks'])) {
+                    $result['tracks'] = $this->cleanTracks($lfm['tracks']);
+                }
+            } elseif (!empty($lfm['tracks'])) {
+                foreach ($result['tracks'] as $i => &$track) {
+                    if (!empty($lfm['tracks'][$i]['duration'])) {
+                        $track['duration'] = $lfm['tracks'][$i]['duration'];
+                    }
+                }
+                unset($track);
             }
         }
 
@@ -131,6 +176,21 @@ class AlbumMetadataService
     {
         if (empty($mb)) return false;
         if (count($tracks) < 3) return false;
+
+        return true;
+    }
+
+    // Vero SOLO se la tracklist esiste ma NESSUNA traccia ha una durata
+    // maggiore di 0. Serve a distinguere il caso "tracklist valida ma
+    // senza durate" da "tracklist valida e completa", cosa che
+    // isValidMb() non fa (guarda solo il numero di tracce).
+    private function tracksHaveNoDuration(array $tracks): bool
+    {
+        if (empty($tracks)) return false;
+
+        foreach ($tracks as $t) {
+            if (!empty($t['duration'])) return false;
+        }
 
         return true;
     }
@@ -469,10 +529,20 @@ class AlbumMetadataService
             foreach ($medium['tracks'] as $t) {
                 if (empty($t['title'])) continue;
 
+                // FIX DURATA: 'length' qui è la durata specifica DI QUESTA
+                // release — un campo che gli editor MusicBrainz valorizzano
+                // raramente. La durata quasi sempre presente è invece
+                // 'recording.length' (la registrazione, indipendente dalla
+                // release). Prima leggevamo solo 'length', quindi la durata
+                // risultava 0 per la stragrande maggioranza dei dischi
+                // (Urban Hymns, Morning Glory, ecc.), anche quando
+                // MusicBrainz aveva perfettamente la durata totale.
+                $length = $t['length'] ?? ($t['recording']['length'] ?? null);
+
                 $tracks[] = [
                     'position' => count($tracks) + 1,
                     'title'    => $t['title'],
-                    'duration' => !empty($t['length']) ? (int)($t['length'] / 1000) : 0
+                    'duration' => !empty($length) ? (int)($length / 1000) : 0
                 ];
             }
         }
