@@ -182,10 +182,16 @@ $advCount = count(array_filter([
       $rowFormats = !empty($a['formats'])
         ? $a['formats']
         : [['name' => $a['format_name']]];
-      $hasAudio = (int)($a['audio_file_count'] ?? 0) > 0;
+      $totalTracks = (int)($a['track_count'] ?? 0);
+      $tracksWithAudio = (int)($a['tracks_with_audio_count'] ?? 0);
+      // Verde a due note SOLO se tutte le tracce hanno audio,
+      // arancio a una nota se mancano del tutto o solo in parte.
+      $hasAudio = $totalTracks > 0 && $tracksWithAudio >= $totalTracks;
       $audioTitle = $hasAudio
-        ? (int)$a['audio_file_count'] . ' file audio caricati'
-        : 'Nessun file audio caricato';
+        ? 'Tutte le tracce hanno audio'
+        : ($tracksWithAudio > 0
+            ? $tracksWithAudio . ' di ' . $totalTracks . ' tracce con audio'
+            : 'Nessun file audio caricato');
       ?>
       <div class="grz-archive-row">
         <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>" class="grz-col-cover">

@@ -269,9 +269,24 @@ if ($albumTotalSec > 0) {
               <i class="bi bi-clock me-1"></i><?= $albumDurationStr ?>
             </span>
           <?php endif; ?>
-          <?php if (!empty($tracks)): ?>
-            <span class="ms-2 text-muted small">
-              <i class="bi bi-music-note-beamed me-1"></i><?= count($tracks) ?> <?= count($tracks) === 1 ? 'traccia' : 'tracce' ?>
+          <?php if (!empty($tracks)):
+            $totalTracks = count($tracks);
+            $tracksWithAudio = 0;
+            foreach ($tracks as $t) {
+              if (!empty($t['audio_filename'])) { $tracksWithAudio++; }
+            }
+            // Stessa logica e stesso tooltip dell'archivio: verde a
+            // due note SOLO se tutte le tracce hanno audio, arancio
+            // a una nota se mancano del tutto o solo in parte.
+            $albumHasAudio = $tracksWithAudio >= $totalTracks;
+            $audioTitle = $albumHasAudio
+              ? 'Tutte le tracce hanno audio'
+              : ($tracksWithAudio > 0
+                  ? $tracksWithAudio . ' di ' . $totalTracks . ' tracce con audio'
+                  : 'Nessun file audio caricato');
+          ?>
+            <span class="ms-2 text-muted small" title="<?= $audioTitle ?>">
+              <i class="bi <?= $albumHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?> me-1"></i><?= $totalTracks ?> <?= $totalTracks === 1 ? 'traccia' : 'tracce' ?>
             </span>
           <?php endif; ?>
         </p>

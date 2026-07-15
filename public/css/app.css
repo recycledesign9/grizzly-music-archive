@@ -4364,19 +4364,21 @@ a.badge-format:hover {
   font-size: 0.72rem;
 }
 
-/* Stato audio: stessa icona tracce, colorata invece di un pallino
-   a parte — verde piena se il disco ha file audio, ambra vuota
-   se non ne ha ancora. */
-.grz-archive-row .grz-col-tracks i.grz-track-audio {
+/* Stato audio del disco — icona nota musicale colorata invece di
+   un indicatore a parte: verde piena se tutte le tracce hanno
+   audio, ambra vuota se mancano del tutto o solo in parte. Classi
+   SENZA scoping: usate sia nella riga archivio (.grz-archive-row)
+   sia nell'header della scheda album, due strutture DOM diverse. */
+.grz-track-audio {
   color: #16a34a;
 }
-.grz-archive-row .grz-col-tracks i.grz-track-noaudio {
+.grz-track-noaudio {
   color: #d97706;
 }
-[data-bs-theme="dark"] .grz-archive-row .grz-col-tracks i.grz-track-audio {
+[data-bs-theme="dark"] .grz-track-audio {
   color: #4ade80;
 }
-[data-bs-theme="dark"] .grz-archive-row .grz-col-tracks i.grz-track-noaudio {
+[data-bs-theme="dark"] .grz-track-noaudio {
   color: #fbbf24;
 }
 

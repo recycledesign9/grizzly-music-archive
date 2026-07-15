@@ -75,10 +75,11 @@ class Album
            WHERE af2.album_id = a.id
          ) AS formats_raw,
          (
-           SELECT COUNT(*)
+           SELECT COUNT(DISTINCT af3.track_id)
            FROM audio_files af3
-           WHERE af3.album_id = a.id
-         ) AS audio_file_count
+           JOIN tracks t3 ON t3.id = af3.track_id
+           WHERE t3.album_id = a.id
+         ) AS tracks_with_audio_count
   FROM albums a
   LEFT JOIN artists ar ON a.artist_id = ar.id
   LEFT JOIN formats  f ON a.format_id = f.id
