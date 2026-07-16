@@ -693,10 +693,16 @@ if ($albumTotalSec > 0) {
 
         var form = document.getElementById('uploadAudioForm');
         if (form) {
+          // Invio via fetch all'endpoint JSON bulk-audio (stesso pattern
+          // dell'upload massivo): il POST tradizionale con redirect
+          // ricostruiva l'intera pagina e distruggeva lo sticky player.
+          // A successo si fa la ricarica "morbida" via navigazione SPA:
+          // si aggiorna solo #page-content, la riproduzione continua.
           form.addEventListener('submit', function(e) {
+            e.preventDefault();
+
             var trackSelect = document.getElementById('trackSelect');
             if (trackSelect && !trackSelect.value) {
-              e.preventDefault();
               trackSelect.classList.add('is-invalid');
               var err = trackSelect.parentNode.querySelector('.track-required-error');
               if (!err) {
@@ -713,12 +719,68 @@ if ($albumTotalSec > 0) {
               var err2 = trackSelect.parentNode.querySelector('.track-required-error');
               if (err2) err2.remove();
             }
+
+            var fileInput = document.getElementById('audioFileInput');
+            if (!fileInput || !fileInput.files.length) {
+              showUploadError('Seleziona un file MP3 o FLAC da caricare.');
+              return;
+            }
+
+            clearUploadError();
+
             var btn = document.getElementById('uploadBtn');
             if (btn) {
               btn.disabled = true;
               btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Caricamento…';
             }
+
+            var fd = new FormData(form);
+
+            fetch(window.__uploadBulkUrl, {
+              method: 'POST',
+              headers: { 'X-Requested-With': 'XMLHttpRequest' },
+              body: fd
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (data && data.success) {
+                // Ricarica morbida: player intatto, contenuto aggiornato.
+                if (typeof window._spaNavigate === 'function') {
+                  window._spaNavigate(location.href, false);
+                } else {
+                  location.reload();
+                }
+              } else {
+                restoreUploadBtn();
+                showUploadError((data && data.message) ? data.message : 'Errore durante il caricamento.');
+              }
+            })
+            .catch(function() {
+              restoreUploadBtn();
+              showUploadError('Errore di rete durante il caricamento. Riprova.');
+            });
           });
+
+          function restoreUploadBtn() {
+            var btn = document.getElementById('uploadBtn');
+            if (btn) {
+              btn.disabled = false;
+              btn.innerHTML = '<i class="bi bi-upload me-1"></i>Carica';
+            }
+          }
+
+          function showUploadError(msg) {
+            clearUploadError();
+            var div = document.createElement('div');
+            div.className = 'alert alert-danger py-2 small mt-2 mb-0 single-upload-error';
+            div.textContent = msg;
+            form.appendChild(div);
+          }
+
+          function clearUploadError() {
+            var old = form.querySelector('.single-upload-error');
+            if (old) old.remove();
+          }
 
           var trackSelect = document.getElementById('trackSelect');
           if (trackSelect) {
