@@ -564,6 +564,17 @@ class ArtistMetadataService
         // in cima, quasi certamente l'artista non è quello giusto.
         $candidates = array_slice($data['data'], 0, 5);
 
+        // Tra TUTTI i match esatti di nome con una foto valida, scegli
+        // quello con più fan — NON il primo nell'ordine dell'API.
+        // L'ordine dell'API non è affidabile: per nomi comuni esistono
+        // più artisti con nome identico e foto reale (es. tre "Oasis":
+        // il gruppo con 4,6M fan, uno con 305, uno con 49) e l'omonimo
+        // minore può precedere quello vero, superando sia il check sul
+        // nome sia quelli sul placeholder. nb_fan è il discriminante
+        // che l'API fornisce già.
+        $bestImg  = '';
+        $bestFans = -1;
+
         foreach ($candidates as $a) {
             if (empty($a['name'])) {
                 continue;
@@ -590,10 +601,14 @@ class ArtistMetadataService
                 continue;
             }
 
-            return $img;
+            $fans = (int) ($a['nb_fan'] ?? 0);
+            if ($fans > $bestFans) {
+                $bestFans = $fans;
+                $bestImg  = $img;
+            }
         }
 
-        return '';
+        return $bestImg;
     }
 
     /**
