@@ -5,16 +5,12 @@ SPA-lite navigation + Sticky Audio Player
 
 const BASE_URL = document.querySelector('meta[name="base-url"]')?.content ?? '';
 // -------------------------------------------------------
-// Dark mode toggle — applica tema salvato all'avvio
-// I listener sui bottoni sono in header.php inline script
-// -------------------------------------------------------
-(function initDarkMode() {
-  const stored = localStorage.getItem('theme');
-  if (stored) {
-    document.documentElement.setAttribute('data-bs-theme', stored);
-  }
-})();
-
+// Dark mode: init + toggle interamente in header.php (inline script).
+// Non duplicare qui: quello script gira PRIMA di questo file (è inline,
+// subito dopo la nav) e gestisce sia data-bs-theme che le icone insieme,
+// nello stesso punto — è proprio la duplicazione tra i due file (questo
+// impostava l'attributo, header.php solo le icone al click) la causa del
+// disallineamento icona/tema che si vedeva dopo un refresh.
 // -------------------------------------------------------
 // Modal elimina
 // -------------------------------------------------------

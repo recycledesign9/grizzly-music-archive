@@ -37,7 +37,7 @@ if (!function_exists('asset_v')) {
 
 <body>
 
-  <nav class="navbar navbar-expand-lg navbar-dark bg-dark sticky-top shadow-sm">
+  <nav class="navbar navbar-expand-lg navbar-dark bg-dark sticky-top shadow-sm grz-nav-fix">
     <div class="container-fluid">
       <a class="navbar-brand d-flex align-items-center" href="<?= $baseUrl ?>">
         <img src="<?= $baseUrl ?>/public/img/logo-grizzly.png"
@@ -127,22 +127,48 @@ if (!function_exists('asset_v')) {
         });
       }
 
-      // Sincronizza i due toggle dark mode (desktop + mobile)
-      function applyTheme(theme) {
-        document.documentElement.setAttribute('data-bs-theme', theme);
-        localStorage.setItem('theme', theme);
-        var icon = theme === 'dark' ? 'bi-sun-fill' : 'bi-moon-stars-fill';
+      // Risolve 'auto' (o l'assenza di un tema) nel valore effettivo,
+      // seguendo la preferenza di sistema. 'dark'/'light' passano invariati.
+      function resolveTheme(theme) {
+        if (theme === 'dark' || theme === 'light') return theme;
+        return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ?
+          'dark' : 'light';
+      }
+
+      // Aggiorna solo le icone dei due toggle in base al tema risolto,
+      // senza toccare attributo/localStorage (usata anche in fase di sync iniziale).
+      function syncIcons(theme) {
+        var icon = resolveTheme(theme) === 'dark' ? 'bi-sun-fill' : 'bi-moon-stars-fill';
         ['darkToggle', 'darkToggleMobile'].forEach(function(id) {
           var btn = document.getElementById(id);
           if (btn) btn.querySelector('i').className = 'bi ' + icon;
         });
       }
 
+      // Imposta il tema, lo persiste e aggiorna le icone (usata dal click)
+      function applyTheme(theme) {
+        document.documentElement.setAttribute('data-bs-theme', theme);
+        localStorage.setItem('theme', theme);
+        syncIcons(theme);
+      }
+
+      // Sincronizzazione all'avvio: applica il tema salvato in localStorage
+      // (se presente) e allinea SEMPRE le icone al tema effettivamente attivo.
+      // Prima di questa fix, l'icona veniva aggiornata solo al click: dopo un
+      // refresh o una navigazione a pagina piena, l'attributo data-bs-theme
+      // veniva ripristinato correttamente (da app.js) ma l'icona restava
+      // quella di default nell'HTML, disallineata dal tema reale.
+      var storedTheme = localStorage.getItem('theme');
+      if (storedTheme) {
+        document.documentElement.setAttribute('data-bs-theme', storedTheme);
+      }
+      syncIcons(storedTheme || document.documentElement.getAttribute('data-bs-theme'));
+
       ['darkToggle', 'darkToggleMobile'].forEach(function(id) {
         var btn = document.getElementById(id);
         if (btn) {
           btn.addEventListener('click', function() {
-            var current = document.documentElement.getAttribute('data-bs-theme');
+            var current = resolveTheme(document.documentElement.getAttribute('data-bs-theme'));
             applyTheme(current === 'dark' ? 'light' : 'dark');
           });
         }

@@ -4490,3 +4490,11 @@ a.badge-format:hover {
     font-size: 16px;
   }
 }
+/* Fix repaint Safari su sticky-top: forza il compositing GPU per
+   evitare il bug di Safari che lascia una fascia con lo sfondo
+   "vecchio" (bianco) sul bordo della navbar dopo il primo paint. */
+.grz-nav-fix {
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+  will-change: transform;
+}
