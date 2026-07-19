@@ -92,9 +92,23 @@ class AlbumMetadataService
             // trovate — bastava un match Discogs sbagliato/parziale (singolo,
             // sampler, edizione incompleta) per buttare via una tracklist
             // MusicBrainz già corretta e completa.
+            //
+            // FIX 2 (2026-07): la sola regola "più tracce vince" era un
+            // boomerang — se Discogs pescava una Deluxe/Collector's
+            // Edition (33 righe), sostituiva la tracklist MB CORRETTA
+            // dell'edizione standard (12 tracce). Ora una tracklist MB
+            // valida non viene MAI sostituita: Discogs può rimpiazzarla
+            // solo se quella MB è assente o invalida. Le durate mancanti
+            // restano gestite dal blocco dedicato più sotto.
             if (
                 !empty($discogs['tracks'])
-                && count($discogs['tracks']) >= count($result['tracks'])
+                && (
+                    empty($result['tracks'])
+                    || (
+                        !$isMbValid
+                        && count($discogs['tracks']) >= count($result['tracks'])
+                    )
+                )
             ) {
                 $result['tracks'] = $this->cleanTracks($discogs['tracks']);
             }
@@ -586,10 +600,18 @@ class AlbumMetadataService
         $rel = $this->httpGetJson($first['resource_url'], $headers);
 
         $tracks = [];
-        foreach ($rel['tracklist'] ?? [] as $i => $t) {
+        foreach ($rel['tracklist'] ?? [] as $t) {
+            // Discogs nelle edizioni multi-disco include righe di
+            // intestazione (type_ "heading"/"index", es. "CD 1", "CD 2"):
+            // non sono tracce e non vanno importate. Le posizioni si
+            // rinumerano DOPO il filtro, altrimenti restano i buchi.
+            $rowType = strtolower($t['type_'] ?? 'track');
+            if ($rowType !== 'track') {
+                continue;
+            }
             if (!empty($t['title'])) {
                 $tracks[] = [
-                    'position' => $i + 1,
+                    'position' => count($tracks) + 1,
                     'title'    => $t['title'],
                     'duration' => $this->discogsDurationToSeconds($t['duration'] ?? '')
                 ];
