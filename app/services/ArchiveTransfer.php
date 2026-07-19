@@ -10,6 +10,10 @@
  *   - manifest.json -> metadati (versione, data, conteggi)
  *   - uploads/covers/*   -> cover album
  *   - uploads/artists/*  -> immagini artista
+ *   - uploads/disco/*    -> miniature discografia ufficiale (cache
+ *                           riscaricabile, ma includerla rende la
+ *                           migrazione a piena fedeltà e indipendente
+ *                           dalla disponibilità di Cover Art Archive)
  *
  * IMPORT: legge lo ZIP, valida, fa un backup di sicurezza del DB,
  *   poi SOSTITUISCE i dati (azzera e reinserisce) in transazione,
@@ -54,8 +58,8 @@ class ArchiveTransfer
         'settings',
     ];
 
-    /** Sottocartelle immagini da includere (NO discography, NO audio) */
-    private const IMAGE_DIRS = ['covers', 'artists'];
+    /** Sottocartelle immagini da includere (NO audio) */
+    private const IMAGE_DIRS = ['covers', 'artists', 'disco'];
 
     /** Chiavi settings da NON esportare (specifiche del server) */
     private const SETTINGS_SKIP = ['audio_path'];
@@ -358,7 +362,7 @@ class ArchiveTransfer
             if ($name === false) {
                 continue;
             }
-            // solo le entry dentro uploads/covers/ e uploads/artists/
+            // solo le entry dentro le cartelle ammesse (IMAGE_DIRS)
             if (strpos($name, 'uploads/') !== 0) {
                 continue;
             }

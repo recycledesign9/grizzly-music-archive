@@ -256,7 +256,7 @@ require BASE_PATH . '/views/layout/header.php';
 
     <p class="text-muted small mb-4">
       Esporta tutto l'archivio (dischi, artisti, tracce, playlist, biografie e
-      <strong>copertine + immagini artista</strong>) in un unico file <code>.zip</code>,
+      <strong>copertine + immagini artista + miniature discografia</strong>) in un unico file <code>.zip</code>,
       da importare su un'altra installazione di Grizzly — utile quando sposti l'app su un nuovo server.
       <span class="d-block mt-2 text-warning">
         <i class="bi bi-info-circle me-1"></i>
