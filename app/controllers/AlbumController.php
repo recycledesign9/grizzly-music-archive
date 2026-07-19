@@ -1208,10 +1208,15 @@ class AlbumController
     foreach ($artistVariants as $a) {
       $candidates[] = $album . ' (' . $a . ' album)';
     }
-    $candidates[] = $album . ' (album)';
+    // Le varianti CON l'artista vanno provate PRIMA del generico
+    // "(album)": quando esistono più opere omonime (es. "Garbage"
+    // dei Garbage, EP degli Autechre, "GarbAge" di Nitro), il titolo
+    // generico può appartenere — o redirigere — all'opera di un ALTRO
+    // artista, mentre "Titolo (Artista)" è univoco per costruzione.
     foreach ($artistVariants as $a) {
       $candidates[] = $album . ' (' . $a . ')';
     }
+    $candidates[] = $album . ' (album)';
     $candidates[] = $album;
     // Il separatore | non può comparire nei titoli MediaWiki: per sicurezza
     // scarta candidati che lo contengano (titolo album anomalo).
@@ -1277,7 +1282,19 @@ class AlbumController
       $extract   = $extractByTitle[$pageTitle] ?? '';
       if ($extract === '') continue;
 
-      if (!$this->isValidAlbumExtract($extract, $artist)) {
+      // Le disambigue NON sempre contengono "può riferirsi" nell'estratto
+      // (spesso l'API restituisce la sola lista nuda "Titolo – descrizione",
+      // che supera tutti i controlli sul testo): il TITOLO FINALE però le
+      // tradisce sempre. Scoperto col caso "Garbage": il candidato
+      // "Garbage (album)" redirigeva a "Garbage (disambigua)" e la lista
+      // finiva dritta nel box note.
+      if (stripos($pageTitle, '(disambigua') !== false
+          || stripos($pageTitle, '(disambiguation') !== false) {
+        if ($debug) $debugLog[] = ['step' => 'batched-validate', 'title' => $pageTitle, 'valid' => false, 'reason' => 'disambigua'];
+        continue;
+      }
+
+      if (!$this->isValidAlbumExtract($extract, $artist, $album)) {
         if ($debug) $debugLog[] = ['step' => 'batched-validate', 'title' => $pageTitle, 'valid' => false];
         continue;
       }
@@ -1303,7 +1320,7 @@ class AlbumController
   // Valida un estratto come "pagina di un album di questo artista":
   // niente disambigue, niente bio/singoli (blacklist condivisa), deve
   // contenere un termine da disco e citare l'artista.
-  private function isValidAlbumExtract(string $extract, string $artist): bool
+  private function isValidAlbumExtract(string $extract, string $artist, string $album = ''): bool
   {
     $extractLower = strtolower($extract);
 
@@ -1328,6 +1345,24 @@ class AlbumController
 
     if (stripos($extract, $artist) === false) {
       return false;
+    }
+
+    // ANTI-OMONIMIA EPONIMA: se il titolo dell'album COINCIDE col nome
+    // dell'artista (album eponimo, es. "Garbage" dei Garbage), il
+    // controllo qui sopra è vuoto — QUALSIASI pagina intitolata così
+    // cita il nome almeno una volta, perché è il titolo dell'opera:
+    // l'EP "Garbage" degli Autechre o il "GarbAge" di Nitro passavano.
+    // Una vera pagina-album eponimo cita il nome ALMENO DUE volte
+    // (titolo + attribuzione: "Garbage è il primo album ... dei
+    // Garbage"); le opere omonime di ALTRI artisti una sola. Il raro
+    // falso negativo (pagina che usa "omonimo" senza ripetere il nome)
+    // viene recuperato dal livello 2 (MBID → Wikidata, deterministico)
+    // o dal cross-lingua: meglio nessuna descrizione che quella di un
+    // altro artista.
+    if ($album !== '' && strcasecmp(trim($album), trim($artist)) === 0) {
+      if (substr_count($extractLower, strtolower($artist)) < 2) {
+        return false;
+      }
     }
 
     return true;
@@ -1444,6 +1479,14 @@ class AlbumController
           continue;
         }
 
+        // Guardia sul TITOLO: le pagine "(disambigua)" possono normalizzare
+        // allo stesso titolo dell'album e il loro estratto (lista nuda)
+        // non sempre contiene "può riferirsi" — vedi caso "Garbage".
+        if (stripos($pageTitle, '(disambigua') !== false
+            || stripos($pageTitle, '(disambiguation') !== false) {
+          continue;
+        }
+
         // 2. Recupera l'estratto introduttivo della pagina
         $extractUrl = $base
           . '?action=query&prop=extracts&exintro=1&explaintext=1&redirects=1'
@@ -1506,6 +1549,15 @@ class AlbumController
         // "is the debut album by X"): se l'artista non compare affatto
         // nell'estratto, scartiamo e proviamo il prossimo candidato.
         if (stripos($extract, $artist) === false) {
+          continue;
+        }
+
+        // ANTI-OMONIMIA EPONIMA (stessa regola di isValidAlbumExtract):
+        // titolo album == nome artista rende vuoto il controllo sopra,
+        // perché ogni opera omonima cita il nome nel proprio incipit.
+        // La vera pagina-album eponimo lo cita almeno due volte.
+        if (strcasecmp(trim($album), trim($artist)) === 0
+            && substr_count($extractLower, strtolower($artist)) < 2) {
           continue;
         }
 
