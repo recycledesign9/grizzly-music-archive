@@ -32,37 +32,66 @@ $recentPlaylists = $stmtPl->fetchAll(PDO::FETCH_ASSOC);
 require BASE_PATH . '/views/layout/header.php';
 ?>
 
-<!-- HERO -->
-<div class="grz-dash-hero">
-  <div class="grz-dash-hero__eyebrow">
-    <span class="grz-dash-hero__dot"></span>
-    <span>Archivio attivo</span>
-  </div>
-  <h1 class="grz-dash-hero__title">La tua collezione</h1>
-  <p class="grz-dash-hero__count"><?= (int)($stats['total'] ?? 0) ?> dischi</p>
-</div>
-
-<!-- KPI -->
-<div class="grz-kpi-strip">
-  <?php
-  $kpis = [
-    ['label' => 'Vinili',       'value' => $stats['vinili'],        'icon' => 'vinyl-fill',             'accent' => 'vinyl',   'sub' => 'LP · EP · 7"'],
-    ['label' => 'CD',           'value' => $stats['cd'],            'icon' => 'disc',                   'accent' => 'cd',      'sub' => 'Compact Disc'],
-    ['label' => 'Musicassette', 'value' => $stats['cassette'],      'icon' => 'cassette-fill',          'accent' => 'tape',    'sub' => 'Cassette'],
-    ['label' => 'Digital',      'value' => $stats['digital'] ?? 0,  'icon' => 'cloud-arrow-down-fill',  'accent' => 'digital', 'sub' => 'File digitali'],
-    ['label' => 'Artisti',      'value' => $stats['artisti'],       'icon' => 'people-fill',            'accent' => 'artist',  'sub' => 'nel database'],
-    ['label' => 'Generi',       'value' => $stats['generi'],        'icon' => 'tags-fill',              'accent' => 'genre',   'sub' => 'categorie'],
-  ];
-  foreach ($kpis as $k): ?>
-    <div class="grz-kpi-card grz-kpi-card--<?= $k['accent'] ?>">
-      <div class="grz-kpi-card__icon"><i class="bi bi-<?= $k['icon'] ?>"></i></div>
-      <div class="grz-kpi-card__body">
-        <div class="grz-kpi-card__value"><?= $k['value'] ?? 0 ?></div>
-        <div class="grz-kpi-card__label"><?= $k['label'] ?></div>
-        <div class="grz-kpi-card__sub"><?= $k['sub'] ?></div>
+<!-- STAT BAND: hero + composizione formati in un'unica fascia compatta.
+     Sostituisce hero e griglia KPI: i 4 formati diventano una barra
+     proporzionale con segmenti/chip cliccabili che filtrano l'archivio
+     (route=albums/list&format_id=N); artisti e generi passano a testo
+     secondario accanto al titolo. -->
+<?php
+$fmtSegments = [
+  ['label' => 'Vinili',       'count' => (int)($stats['vinili']   ?? 0), 'accent' => 'vinyl',   'format_id' => 1],
+  ['label' => 'CD',           'count' => (int)($stats['cd']       ?? 0), 'accent' => 'cd',      'format_id' => 2],
+  ['label' => 'Musicassette', 'count' => (int)($stats['cassette'] ?? 0), 'accent' => 'tape',    'format_id' => 3],
+  ['label' => 'Digital',      'count' => (int)($stats['digital']  ?? 0), 'accent' => 'digital', 'format_id' => 4],
+];
+$fmtTotal = 0;
+foreach ($fmtSegments as $s) {
+  $fmtTotal += $s['count'];
+}
+?>
+<div class="grz-statband">
+  <div class="grz-statband__top">
+    <div>
+      <div class="grz-dash-hero__eyebrow">
+        <span class="grz-dash-hero__dot"></span>
+        <span>Archivio attivo</span>
       </div>
+      <h1 class="grz-statband__title">La tua collezione</h1>
     </div>
-  <?php endforeach; ?>
+    <div class="grz-statband__meta">
+      <span class="grz-statband__counts">
+        <strong><?= (int)($stats['total'] ?? 0) ?></strong> dischi
+        <span class="grz-statband__sep">·</span>
+        <strong><?= (int)($stats['artisti'] ?? 0) ?></strong> artisti
+        <span class="grz-statband__sep">·</span>
+        <strong><?= (int)($stats['generi'] ?? 0) ?></strong> generi
+      </span>
+      <a href="<?= BASE_URL ?>/index.php?route=albums/create" class="btn btn-warning btn-sm fw-semibold">
+        <i class="bi bi-plus-lg me-1"></i>Aggiungi
+      </a>
+    </div>
+  </div>
+
+  <?php if ($fmtTotal > 0): ?>
+    <div class="grz-formatbar">
+      <?php foreach ($fmtSegments as $s): if ($s['count'] <= 0) continue; ?>
+        <a class="grz-formatbar__seg grz-formatbar__seg--<?= $s['accent'] ?>"
+           style="flex: <?= $s['count'] ?> 1 0%"
+           href="<?= BASE_URL ?>/index.php?route=albums/list&format_id=<?= $s['format_id'] ?>"
+           title="<?= $s['label'] ?>: <?= $s['count'] ?>"
+           aria-label="<?= $s['label'] ?>: <?= $s['count'] ?> — filtra archivio"></a>
+      <?php endforeach; ?>
+    </div>
+    <div class="grz-formatbar__legend">
+      <?php foreach ($fmtSegments as $s): ?>
+        <a class="grz-formatbar__chip"
+           href="<?= BASE_URL ?>/index.php?route=albums/list&format_id=<?= $s['format_id'] ?>">
+          <span class="grz-formatbar__dot grz-formatbar__dot--<?= $s['accent'] ?>"></span>
+          <strong><?= $s['count'] ?></strong>&nbsp;<?= $s['label'] ?>
+        </a>
+      <?php endforeach; ?>
+    </div>
+  <?php endif; ?>
 </div>
 
 <!-- MAIN GRID -->

@@ -4658,3 +4658,127 @@ a.badge-format:hover {
     line-height: 1.25;
   }
 }
+
+/* ============================================================
+   DASHBOARD — STAT BAND
+   Sostituisce hero + griglia KPI: titolo e conteggi su una riga,
+   barra proporzionale dei formati con segmenti e chip cliccabili
+   (filtrano l'archivio per format_id). Colori identici agli
+   accenti KPI storici per coerenza con i badge formato.
+   ============================================================ */
+.grz-statband {
+  margin-bottom: 28px;
+}
+.grz-statband__top {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.grz-statband__title {
+  font-size: clamp(1.5rem, 3vw, 2.1rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 2px 0 0;
+  color: var(--grz-text-1);
+}
+.grz-statband__meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.grz-statband__counts {
+  font-size: 0.86rem;
+  color: var(--grz-text-2);
+  white-space: nowrap;
+}
+.grz-statband__counts strong {
+  color: var(--grz-text-1);
+  font-weight: 700;
+}
+.grz-statband__sep {
+  margin: 0 4px;
+  opacity: 0.5;
+}
+
+/* Barra proporzionale */
+.grz-formatbar {
+  display: flex;
+  height: 14px;
+  border-radius: 7px;
+  overflow: hidden;
+  gap: 2px;
+  margin-bottom: 10px;
+}
+.grz-formatbar__seg {
+  display: block;
+  min-width: 6px;
+  transition: filter 0.12s ease, transform 0.12s ease;
+}
+.grz-formatbar__seg:hover {
+  filter: brightness(1.15);
+}
+.grz-formatbar__seg--vinyl   { background: #f59e0b; }
+.grz-formatbar__seg--cd      { background: #38bdf8; }
+.grz-formatbar__seg--tape    { background: #4ade80; }
+.grz-formatbar__seg--digital { background: #818cf8; }
+
+/* Legenda chip */
+.grz-formatbar__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+}
+.grz-formatbar__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--grz-text-2);
+  text-decoration: none;
+  padding: 2px 0;
+  transition: color 0.12s ease;
+}
+.grz-formatbar__chip:hover {
+  color: var(--grz-text-1);
+}
+.grz-formatbar__chip strong {
+  color: var(--grz-text-1);
+  font-weight: 700;
+}
+.grz-formatbar__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.grz-formatbar__dot--vinyl   { background: #f59e0b; }
+.grz-formatbar__dot--cd      { background: #38bdf8; }
+.grz-formatbar__dot--tape    { background: #4ade80; }
+.grz-formatbar__dot--digital { background: #818cf8; }
+
+/* Mobile: titolo e meta impilati, chip su più righe */
+@media (max-width: 575.98px) {
+  .grz-statband {
+    margin-bottom: 22px;
+  }
+  .grz-statband__top {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .grz-statband__meta {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .grz-formatbar {
+    height: 12px;
+  }
+  .grz-formatbar__legend {
+    gap: 4px 14px;
+  }
+}
