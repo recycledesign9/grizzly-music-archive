@@ -378,13 +378,17 @@ class AlbumMetadataService
                 continue;
             }
 
-            // Tipo release: scarta Single, EP, Broadcast, Compilation, Live,
-            // Soundtrack, Remix, ecc. — non sono mai l'album cercato.
+            // Tipo release: scarta Single, Broadcast e release-group con
+            // secondary types (Compilation, Live, Soundtrack, Remix...).
+            // Gli EP sono AMMESSI: per un collezionista sono dischi a tutti
+            // gli effetti (es. "Jar of Flies" è un EP) — il vecchio scarto
+            // duro li rendeva introvabili e faceva vincere ristampe spurie
+            // con metadati scarni (anno sbagliato, niente cover).
             $rg             = $rel['release-group'] ?? [];
             $primaryType    = strtolower($rg['primary-type'] ?? '');
             $secondaryTypes = array_map('strtolower', $rg['secondary-types'] ?? []);
 
-            if ($primaryType !== '' && $primaryType !== 'album') {
+            if ($primaryType !== '' && $primaryType !== 'album' && $primaryType !== 'ep') {
                 continue;
             }
             if (!empty($secondaryTypes)) {
@@ -397,6 +401,13 @@ class AlbumMetadataService
 
             // Base: punteggio MusicBrainz nativo (0-100)
             $score = (float)($rel['score'] ?? 50);
+
+            // Leggera preferenza Album > EP: a parità di titolo (EP eponimo
+            // di un album) vince l'album; non basta a far vincere un album
+            // sbagliato su un EP col titolo esatto cercato.
+            if ($primaryType === 'album') {
+                $score += 8;
+            }
 
             // Penalizza parole speciali nel titolo
             foreach ($avoidTitle as $word) {
@@ -623,10 +634,11 @@ class AlbumMetadataService
         ];
 
         // Formati che indicano quasi sempre un disco diverso dall'album
-        // completo (singolo, EP, sampler promozionale...): scarto hard,
-        // non solo penalità — prima non c'era nessun controllo sul
-        // formato e questi risultati potevano tranquillamente "vincere".
-        $avoidFormat = ['single', 'ep', 'sampler', 'promo', 'flexi-disc', 'maxi-single'];
+        // completo (singolo, sampler promozionale...): scarto hard.
+        // Gli EP NON sono più scartati (stesso fix del filtro MusicBrainz:
+        // "Jar of Flies" è un EP) — solo lievemente penalizzati più sotto,
+        // così un EP eponimo non scavalca l'album omonimo a parità di titolo.
+        $avoidFormat = ['single', 'sampler', 'promo', 'flexi-disc', 'maxi-single'];
 
         $best      = null;
         $bestScore = -9999;
@@ -643,6 +655,13 @@ class AlbumMetadataService
             if ($isBadFormat) continue;
 
             similar_text($album, $title, $score);
+
+            // Lieve penalità EP: a parità di titolo vince l'album,
+            // ma se l'EP è l'unico match (o il titolo cercato È un EP)
+            // resta selezionabile.
+            if (in_array('ep', $formats, true)) {
+                $score -= 8;
+            }
 
             // Penalizza versioni non ufficiali
             foreach ($avoid as $word) {
