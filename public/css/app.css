@@ -4498,3 +4498,163 @@ a.badge-format:hover {
   transform: translateZ(0);
   will-change: transform;
 }
+
+/* ============================================================
+   FIX STRUTTURALE — overflow orizzontale da contenuto lungo
+   Causa: flexbox/grid non si restringono sotto il min-content
+   del contenuto senza min-width:0 esplicito. Riguarda sia la
+   dashboard (nome playlist) sia il form (tracklist).
+   ============================================================ */
+
+/* --- Dashboard: sidebar/playlist --- */
+.grz-dash-grid {
+  grid-template-columns: minmax(0, 1fr) 300px;
+  min-width: 0;
+}
+.grz-dash-main,
+.grz-dash-sidebar,
+.grz-dash-panel,
+.dash-playlist-list,
+.dash-playlist-row,
+.dash-playlist-row > .flex-grow-1 {
+  min-width: 0;
+}
+.dash-playlist-row > .flex-grow-1 {
+  overflow: hidden;
+}
+.dash-pl-name {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 991.98px) {
+  .grz-dash-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .grz-dash-sidebar,
+  .grz-dash-panel {
+    width: 100%;
+    max-width: 100%;
+  }
+}
+@media (max-width: 575.98px) {
+  .dash-pl-name {
+    white-space: normal !important;
+    display: -webkit-box !important;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
+  }
+}
+
+/* --- Form album: stesso meccanismo su tracklist e input --- */
+#albumForm .card,
+#albumForm .card-header,
+#albumForm .card-body,
+#albumForm .row > *,
+#albumForm .input-group,
+#albumForm .track-row,
+#albumForm .artist-autocomplete-wrap {
+  min-width: 0;
+}
+#albumForm .form-control,
+#albumForm .form-select {
+  min-width: 0;
+  max-width: 100%;
+}
+#albumForm .track-row {
+  display: flex;
+  flex-wrap: nowrap;
+  width: 100%;
+  max-width: 100%;
+}
+#albumForm .track-row input[name="track_title[]"] {
+  flex: 1 1 0;
+  width: 1%;
+  min-width: 0;
+}
+#albumForm .track-row input[name="track_duration[]"] {
+  flex: 0 0 70px;
+  width: 70px;
+  min-width: 0;
+  max-width: 70px !important;
+}
+#albumForm .track-row .track-num,
+#albumForm .track-row .remove-track {
+  flex-shrink: 0;
+}
+@media (max-width: 380px) {
+  #albumForm .track-row input[name="track_duration[]"] {
+    flex-basis: 58px;
+    width: 58px;
+    max-width: 58px !important;
+  }
+}
+@media (max-width: 575.98px) {
+  .album-form-tracklist-header {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  .album-form-tracklist-header > .fw-semibold {
+    flex: 0 0 100%;
+  }
+  .album-form-tracklist-actions {
+    width: 100%;
+    min-width: 0;
+  }
+  #fetchTracklist {
+    flex: 1 1 0;
+    min-width: 0;
+    white-space: normal;
+    line-height: 1.2;
+  }
+  #addTrack {
+    flex: 0 0 42px;
+    width: 42px;
+  }
+}
+
+/* ============================================================
+   GUARDIA OVERFLOW ORIZZONTALE — page-level
+   Bug WebKit: la larghezza intrinseca delle <select> (opzione più
+   lunga, es. "— Seleziona o aggiungi nuova etichetta —") viene
+   sommata all'area scrollabile del documento anche quando il box
+   visibile resta dentro la colonna. Nessuno scan dei rect lo vede.
+   overflow-x: clip taglia il leak senza creare uno scroll
+   container: position:sticky interno resta funzionante (a
+   differenza di overflow hidden). Navbar sticky è fuori da main.
+   ============================================================ */
+#page-content {
+  overflow-x: clip;
+}
+
+/* ============================================================
+   PLAYLIST LIST — troncamento nome
+   .pl-row-meta è un flex item senza min-width:0: non può
+   restringersi sotto il testo, quindi l'ellipsis di .pl-row-name
+   non scatta mai e il nome scorre sotto i bottoni azioni.
+   Stesso meccanismo del widget playlist in dashboard.
+   ============================================================ */
+.pl-row-meta {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+/* Su telefono: massimo due righe con clamp, come in dashboard */
+@media (max-width: 575.98px) {
+  .pl-row-name {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
+  }
+}
