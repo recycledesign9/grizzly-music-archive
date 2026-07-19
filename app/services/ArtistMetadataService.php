@@ -729,6 +729,64 @@ class ArtistMetadataService
         return 'artists/' . $name;
     }
 
+    /**
+     * Scarica e salva in locale la cover front-250 di un release-group
+     * (miniature della discografia ufficiale). Cache immutabile con
+     * chiave = MBID: una volta scritto, il file non viene mai
+     * ri-scaricato — le copertine dei dischi usciti non cambiano.
+     * Un release-group nuovo (album nuovo) ha un MBID nuovo, quindi
+     * genera semplicemente un file nuovo.
+     *
+     * Non salva MAI risposte non-immagine (pagina "Temporarily Offline"
+     * di Internet Archive, body di errori 404...): un fallimento
+     * transitorio non deve avvelenare la cache — al prossimo accesso
+     * si ritenta da zero. Ritorna true se al termine il file esiste.
+     */
+    public function downloadDiscographyCover(string $rgMbid): bool
+    {
+        $rgMbid = strtolower(trim($rgMbid));
+        if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $rgMbid)) {
+            return false;
+        }
+
+        $dir  = UPLOAD_PATH . '/disco';
+        $dest = $dir . '/' . $rgMbid . '.jpg';
+
+        if (is_file($dest)) {
+            return true;
+        }
+        if (!is_dir($dir) && !mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return false;
+        }
+
+        $bytes = $this->httpGetBinary(
+            'https://coverartarchive.org/release-group/' . $rgMbid . '/front-250',
+            'image/*'
+        );
+
+        // Validazione STRETTA sui magic bytes: guessExtension() ha 'jpg'
+        // come fallback e qui NON basta — una pagina HTML di errore la
+        // passerebbe. Su disco finiscono solo vere immagini.
+        if (strlen($bytes) < 512 || !$this->isImageBytes($bytes)) {
+            return false;
+        }
+
+        // Estensione sempre .jpg per avere una chiave file prevedibile
+        // (file_exists su un solo nome): i browser riconoscono il
+        // contenuto dai bytes, non dall'estensione.
+        return @file_put_contents($dest, $bytes) !== false;
+    }
+
+    /** Vero solo se i bytes iniziano con la firma di un formato immagine noto. */
+    private function isImageBytes(string $bytes): bool
+    {
+        $head = substr($bytes, 0, 12);
+        return strncmp($head, "\xFF\xD8\xFF", 3) === 0
+            || strncmp($head, "\x89PNG", 4) === 0
+            || strncmp($head, "GIF8", 4) === 0
+            || (substr($head, 0, 4) === 'RIFF' && substr($head, 8, 4) === 'WEBP');
+    }
+
     // ============================================================
     // DISCOGRAFIA UFFICIALE (MusicBrainz release-groups)
     // ============================================================

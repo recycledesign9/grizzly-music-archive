@@ -184,14 +184,37 @@ class Artist {
             'country', 'active_from', 'active_to',
         ];
 
+        // Leggiamo i valori attuali per non sovrascrivere un dato buono già
+        // presente con un vuoto: un fetch fallito o senza risultati non deve
+        // MAI cancellare quello che c'era prima (stesso principio già in uso
+        // in AlbumMetadataService per le tracklist: si può solo migliorare o
+        // pareggiare, mai peggiorare). Riguarda soprattutto gli artisti del
+        // seed demo, che arrivano con una bio scritta a mano ma senza
+        // bio_fetched_at: il primo fetch live, se fallisce, non deve
+        // spazzarla via.
+        $current = $this->getById($id) ?: [];
+
         $set    = [];
         $params = [':id' => $id];
 
         foreach ($allowed as $col) {
-            if (array_key_exists($col, $data)) {
-                $set[]            = "`$col` = :$col";
-                $params[":$col"]  = ($data[$col] === '' ? null : $data[$col]);
+            if (!array_key_exists($col, $data)) {
+                continue;
             }
+
+            $newValue = ($data[$col] === '' ? null : $data[$col]);
+            $hasCurrentValue = array_key_exists($col, $current)
+                && $current[$col] !== null
+                && $current[$col] !== '';
+
+            // Nuovo valore vuoto ma ne esiste già uno buono: non tocchiamo
+            // la colonna, teniamo quello che c'era.
+            if ($newValue === null && $hasCurrentValue) {
+                continue;
+            }
+
+            $set[]           = "`$col` = :$col";
+            $params[":$col"] = $newValue;
         }
 
         // Marca SEMPRE tentativo + esito + versione, anche se nessun campo
@@ -226,7 +249,8 @@ class Artist {
         ?string $status,
         ?int $storedVersion,
         int $currentVersion,
-        int $errorCooldownMinutes = 180
+        int $errorCooldownMinutes = 180,
+        int $okTtlDays = 0
     ): bool {
         // Mai tentato prima.
         if ($fetchedAt === null) {
@@ -247,6 +271,16 @@ class Artist {
             return $elapsedMinutes >= $errorCooldownMinutes;
         }
         // Stato 'ok': anche con dati vuoti è un "non trovato" confermato.
+        // Con $okTtlDays > 0, però, la conferma SCADE: dopo N giorni si
+        // rivalida da sola (usato dalla discografia — un artista attivo
+        // può pubblicare nuovi dischi, la cache non deve congelarla per
+        // sempre). Con 0 il comportamento resta quello storico: mai più.
+        if ($okTtlDays > 0) {
+            $elapsedDays = (time() - strtotime($fetchedAt)) / 86400;
+            if ($elapsedDays >= $okTtlDays) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -260,11 +294,16 @@ class Artist {
     }
 
     public function needsDiscographyRefetch(array $artist, int $currentVersion): bool {
+        // TTL 30 giorni sull'esito 'ok': la discografia di un artista
+        // attivo si rivalida da sola alla prima visita dopo la scadenza.
+        // La bio (sopra) resta senza TTL: non invecchia allo stesso modo.
         return $this->needsRefetch(
             $artist['disco_fetched_at']    ?? null,
             $artist['disco_status']        ?? null,
             $artist['disco_fetch_version'] ?? 0,
-            $currentVersion
+            $currentVersion,
+            180,
+            30
         );
     }
 
@@ -284,6 +323,16 @@ class Artist {
         return $stmt->fetchAll();
     }
 
+    // Vero se l'artista ha almeno una riga di discografia in cache.
+    // Usato dalla guardia anti-svuotamento in saveDiscography().
+    public function hasDiscography(int $artistId): bool {
+        $stmt = $this->db->prepare("
+            SELECT 1 FROM artist_discography WHERE artist_id = :id LIMIT 1
+        ");
+        $stmt->execute([':id' => $artistId]);
+        return (bool) $stmt->fetchColumn();
+    }
+
     // Salva (sostituisce) la discografia ufficiale dell'artista e marca
     // tentativo/stato/versione. Idempotente: ripulisce prima di inserire.
     //
@@ -299,22 +348,34 @@ class Artist {
         $this->db->beginTransaction();
         try {
             if ($status === 'ok') {
-                $del = $this->db->prepare("DELETE FROM artist_discography WHERE artist_id = :id");
-                $del->execute([':id' => $artistId]);
+                // GUARDIA ANTI-SVUOTAMENTO: con la rivalidazione periodica
+                // (TTL 30 giorni) un refetch "riuscito" ma degenere — zero
+                // risultati per un'anomalia lato MusicBrainz o un filtro
+                // troppo aggressivo — non deve cancellare una discografia
+                // buona già in cache. Stesso principio di updateMeta():
+                // migliorare o pareggiare, mai peggiorare. Timestamp,
+                // stato e versione si aggiornano comunque (sotto), così
+                // il tentativo resta tracciato e non si martella l'API.
+                $keepExisting = empty($items) && $this->hasDiscography($artistId);
 
-                if (!empty($items)) {
-                    $ins = $this->db->prepare("
-                        INSERT INTO artist_discography
-                            (artist_id, mb_release_group_id, title, year)
-                        VALUES (:aid, :rg, :title, :year)
-                    ");
-                    foreach ($items as $it) {
-                        $ins->execute([
-                            ':aid'   => $artistId,
-                            ':rg'    => ($it['mb_release_group_id'] ?? '') ?: null,
-                            ':title' => $it['title'] ?? '',
-                            ':year'  => $it['year'] ?? null,
-                        ]);
+                if (!$keepExisting) {
+                    $del = $this->db->prepare("DELETE FROM artist_discography WHERE artist_id = :id");
+                    $del->execute([':id' => $artistId]);
+
+                    if (!empty($items)) {
+                        $ins = $this->db->prepare("
+                            INSERT INTO artist_discography
+                                (artist_id, mb_release_group_id, title, year)
+                            VALUES (:aid, :rg, :title, :year)
+                        ");
+                        foreach ($items as $it) {
+                            $ins->execute([
+                                ':aid'   => $artistId,
+                                ':rg'    => ($it['mb_release_group_id'] ?? '') ?: null,
+                                ':title' => $it['title'] ?? '',
+                                ':year'  => $it['year'] ?? null,
+                            ]);
+                        }
                     }
                 }
             }

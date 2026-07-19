@@ -361,12 +361,17 @@ $discoFetched = !empty($artist['disco_fetched_at']);
         var title = esc(it.title);
         var num = (i + 1);
 
-        // Cover dalla Cover Art Archive, costruita dal release-group MBID.
-        // Nessuna chiamata API: la carica il browser. Fallback su 404.
+        // Cover: preferisci l'URL fornito dal server (cache locale su
+        // disco, o proxy lazy che scarica al primo accesso). Fallback
+        // storico su CAA diretto solo se il campo manca. L'onerror
+        // resta la rete di sicurezza: placeholder in ogni caso.
         var coverHtml;
-        if (it.mb_release_group_id) {
-          var coverUrl = 'https://coverartarchive.org/release-group/'
+        var coverUrl = it.cover || '';
+        if (!coverUrl && it.mb_release_group_id) {
+          coverUrl = 'https://coverartarchive.org/release-group/'
             + encodeURIComponent(it.mb_release_group_id) + '/front-250';
+        }
+        if (coverUrl) {
           coverHtml =
             '<span class="off-thumb">' +
               '<img src="' + coverUrl + '" alt="" loading="lazy" ' +

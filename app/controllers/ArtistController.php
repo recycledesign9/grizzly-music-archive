@@ -22,6 +22,9 @@ class ArtistController
       case 'fetch-discography':
         $this->fetchDiscography($id);
         break;
+      case 'disco-cover':
+        $this->discoCover();
+        break;
       default:
         $this->index();
         break;
@@ -213,7 +216,7 @@ class ArtistController
       if (!$this->artistModel->needsDiscographyRefetch($artist, ArtistMetadataService::DISCOGRAPHY_LOGIC_VERSION)) {
         echo json_encode([
           'ok'    => true,
-          'items' => $this->artistModel->getDiscography($id),
+          'items' => $this->mapDiscographyCovers($this->artistModel->getDiscography($id)),
         ]);
         return;
       }
@@ -240,11 +243,76 @@ class ArtistController
 
       echo json_encode([
         'ok'    => true,
-        'items' => $this->artistModel->getDiscography($id),
+        'items' => $this->mapDiscographyCovers($this->artistModel->getDiscography($id)),
       ]);
     } catch (Throwable $e) {
       echo json_encode(['error' => DEBUG ? $e->getMessage() : 'Errore nel recupero discografia']);
     }
     exit;
+  }
+
+  // ----------------------------------------------------------
+  // ENDPOINT: cover della discografia (proxy lazy con cache su disco).
+  // GET /index.php?route=artists/disco-cover&rg={release-group MBID}
+  // File già su disco → redirect al file statico. Assente → lo scarica
+  // da Cover Art Archive, lo salva, poi redirect. CAA giù o cover
+  // inesistente → 404 secco: l'onerror dell'<img> nella view mostra il
+  // placeholder e NIENTE viene salvato (un errore transitorio non deve
+  // avvelenare la cache — si ritenterà alla prossima visita).
+  // L'MBID viaggia come query param perché il router castà a int il
+  // terzo segmento della route.
+  // ----------------------------------------------------------
+  private function discoCover(): void
+  {
+    // Rilascio immediato del lock di sessione — convenzione di progetto
+    // per ogni endpoint con I/O esterno lento (vedi nota in fetchMeta).
+    if (session_status() === PHP_SESSION_ACTIVE) {
+      session_write_close();
+    }
+
+    $rg = strtolower(trim($_GET['rg'] ?? ''));
+    if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $rg)) {
+      http_response_code(404);
+      exit;
+    }
+
+    $file = UPLOAD_PATH . '/disco/' . $rg . '.jpg';
+
+    if (!is_file($file)) {
+      require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
+      $service = new ArtistMetadataService();
+      $service->downloadDiscographyCover($rg);
+    }
+
+    if (is_file($file)) {
+      header('Location: ' . BASE_URL . '/public/uploads/disco/' . $rg . '.jpg', true, 302);
+      exit;
+    }
+
+    http_response_code(404);
+    exit;
+  }
+
+  /**
+   * Aggiunge a ogni voce di discografia l'URL cover migliore:
+   * file locale già scaricato → URL statico (zero passaggi PHP),
+   * altrimenti l'endpoint proxy che la scaricherà al primo accesso.
+   */
+  private function mapDiscographyCovers(array $items): array
+  {
+    foreach ($items as &$it) {
+      $rg = strtolower((string) ($it['mb_release_group_id'] ?? ''));
+      if ($rg === '') {
+        $it['cover'] = '';
+        continue;
+      }
+      if (is_file(UPLOAD_PATH . '/disco/' . $rg . '.jpg')) {
+        $it['cover'] = BASE_URL . '/public/uploads/disco/' . $rg . '.jpg';
+      } else {
+        $it['cover'] = BASE_URL . '/index.php?route=artists/disco-cover&rg=' . $rg;
+      }
+    }
+    unset($it);
+    return $items;
   }
 }
