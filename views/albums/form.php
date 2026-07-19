@@ -101,7 +101,8 @@ $artistNameValue = isset($old['artist_name'])
             <div class="card-header fw-semibold">
               <i class="bi bi-info-circle me-2"></i>Informazioni principali
             </div>
-            <div class="card-body row g-3">
+            <div class="card-body">
+            <div class="row g-3">
 
               <div class="col-12">
                 <label class="form-label fw-semibold">
@@ -292,14 +293,15 @@ $artistNameValue = isset($old['artist_name'])
               </div>
 
             </div>
+            </div>
           </div>
 
           <div class="card shadow-sm">
-            <div class="card-header d-flex justify-content-between align-items-center">
+            <div class="card-header album-form-tracklist-header d-flex justify-content-between align-items-center">
               <span class="fw-semibold">
                 <i class="bi bi-music-note-list me-2"></i>Tracklist
               </span>
-              <div class="d-flex gap-2">
+              <div class="album-form-tracklist-actions d-flex gap-2">
                 <button type="button" class="btn btn-sm btn-outline-info" id="fetchTracklist">
                   <i class="bi bi-cloud-download me-1"></i>Recupera Informazioni
                 </button>
