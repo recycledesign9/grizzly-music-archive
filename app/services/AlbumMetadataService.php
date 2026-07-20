@@ -33,9 +33,32 @@ class AlbumMetadataService
                 $result['genre'] = ucfirst($mb['genres'][0]['name']);
             }
 
-            // Etichetta da MusicBrainz
-            if (!empty($mb['label-info'][0]['label']['name'])) {
-                $result['label'] = $mb['label-info'][0]['label']['name'];
+            // Etichetta della release specifica selezionata: viene mantenuta
+            // come fallback nel caso in cui MusicBrainz non esponga una label
+            // per la prima pubblicazione ufficiale del release-group.
+            $selectedReleaseLabel = $this->firstReleaseLabelName($mb);
+            if ($selectedReleaseLabel !== '') {
+                $result['label'] = $selectedReleaseLabel;
+                $result['label_source'] = 'selected-release';
+                $result['label_release_date'] = $mb['date'] ?? '';
+            }
+
+            // Per la scheda album usiamo, quando disponibile, l'etichetta
+            // associata alla PRIMA pubblicazione ufficiale del release-group.
+            // L'MBID della release selezionata resta invece invariato e continua
+            // a essere usato per tracklist e cover della specifica edizione.
+            if (!empty($mb['release-group']['id'])) {
+                $firstReleaseDate = $mb['release-group']['first-release-date'] ?? '';
+                $originalRelease = $this->getOriginalOfficialReleaseLabel(
+                    $mb['release-group']['id'],
+                    $firstReleaseDate
+                );
+
+                if (!empty($originalRelease['label'])) {
+                    $result['label'] = $originalRelease['label'];
+                    $result['label_source'] = 'original-release';
+                    $result['label_release_date'] = $originalRelease['date'] ?? '';
+                }
             }
 
             if (!empty($mb['id'])) {
@@ -217,9 +240,11 @@ class AlbumMetadataService
             'mbid'        => '',
             'cover'       => '',
             'cover_local' => '',
-            'genre'       => '',
-            'label'       => '',
-            'tracks'      => [],
+            'genre'              => '',
+            'label'              => '',
+            'label_source'       => '',
+            'label_release_date' => '',
+            'tracks'             => [],
         ];
     }
 
@@ -333,6 +358,134 @@ class AlbumMetadataService
         }
 
         return [];
+    }
+
+    // ----------------------------------------------------------
+    // Recupera l'etichetta della prima pubblicazione ufficiale
+    // appartenente al release-group.
+    //
+    // Se MusicBrainz fornisce first-release-date, vengono considerate
+    // soltanto le release compatibili con quella data (stesso giorno,
+    // mese o anno a seconda della precisione disponibile). In questo
+    // modo una ristampa successiva non può diventare per errore la label
+    // "originale". Se nessuna release della prima pubblicazione espone
+    // una label, il chiamante mantiene quella della release selezionata.
+    // ----------------------------------------------------------
+    private function getOriginalOfficialReleaseLabel(
+        string $releaseGroupMbid,
+        string $firstReleaseDate = ''
+    ): array {
+        if ($releaseGroupMbid === '') {
+            return [];
+        }
+
+        $url = 'https://musicbrainz.org/ws/2/release?release-group='
+            . rawurlencode($releaseGroupMbid)
+            . '&status=official&fmt=json&limit=100&inc=labels';
+
+        $data = $this->httpGetJson($url);
+        if (empty($data['releases'])) {
+            return [];
+        }
+
+        $candidates = [];
+
+        foreach ($data['releases'] as $release) {
+            $date  = trim($release['date'] ?? '');
+            $label = $this->firstReleaseLabelName($release);
+
+            if ($date === '' || $label === '') {
+                continue;
+            }
+
+            // Quando MusicBrainz dichiara la prima data del release-group,
+            // non accettiamo release posteriori. Il confronto usa la stessa
+            // precisione disponibile: YYYY, YYYY-MM oppure YYYY-MM-DD.
+            if ($firstReleaseDate !== ''
+                && !$this->releaseDateMatches($date, $firstReleaseDate)) {
+                continue;
+            }
+
+            $candidates[] = [
+                'label' => $label,
+                'date'  => $date,
+                'mbid'  => $release['id'] ?? '',
+            ];
+        }
+
+        if (empty($candidates)) {
+            return [];
+        }
+
+        usort($candidates, function (array $a, array $b): int {
+            $dateCompare = strcmp(
+                $this->releaseDateSortKey($a['date']),
+                $this->releaseDateSortKey($b['date'])
+            );
+
+            if ($dateCompare !== 0) {
+                return $dateCompare;
+            }
+
+            // Ordinamento stabile e deterministico quando più release
+            // condividono la stessa data di pubblicazione.
+            $labelCompare = strcasecmp($a['label'], $b['label']);
+            if ($labelCompare !== 0) {
+                return $labelCompare;
+            }
+
+            return strcmp($a['mbid'], $b['mbid']);
+        });
+
+        return $candidates[0];
+    }
+
+    // Prima label non vuota associata alla release. L'array label-info
+    // può contenere più voci; non assumiamo che l'indice 0 esista sempre.
+    private function firstReleaseLabelName(array $release): string
+    {
+        foreach (($release['label-info'] ?? []) as $labelInfo) {
+            $name = trim($labelInfo['label']['name'] ?? '');
+            if ($name !== '') {
+                return $name;
+            }
+        }
+
+        return '';
+    }
+
+    // Confronta due date MusicBrainz rispettando la precisione della
+    // first-release-date. Esempi:
+    //   2000       combacia con qualunque data del 2000
+    //   2000-07    combacia con qualunque giorno di luglio 2000
+    //   2000-07-10 richiede la stessa data completa
+    private function releaseDateMatches(string $releaseDate, string $firstReleaseDate): bool
+    {
+        $firstReleaseDate = trim($firstReleaseDate);
+        $releaseDate      = trim($releaseDate);
+
+        if (!preg_match('/^\d{4}(?:-\d{2})?(?:-\d{2})?$/', $firstReleaseDate)) {
+            return false;
+        }
+        if (!preg_match('/^\d{4}(?:-\d{2})?(?:-\d{2})?$/', $releaseDate)) {
+            return false;
+        }
+
+        return substr($releaseDate, 0, strlen($firstReleaseDate)) === $firstReleaseDate;
+    }
+
+    // Chiave ordinabile per date MusicBrainz a precisione variabile.
+    // Le parti mancanti vengono collocate dopo le date precise dello
+    // stesso anno/mese, evitando che un generico "2000" preceda
+    // artificialmente "2000-07-10".
+    private function releaseDateSortKey(string $date): string
+    {
+        $parts = explode('-', $date);
+        $year  = isset($parts[0]) ? (int)$parts[0] : 9999;
+        $month = isset($parts[1]) ? (int)$parts[1] : 13;
+        $day   = isset($parts[2]) ? (int)$parts[2] : 32;
+
+        return sprintf('%04d-%02d-%02d', $year, $month, $day);
     }
 
     private function pickBestRelease(array $releases, string $album, int $year = 0, string $artist = ''): array
