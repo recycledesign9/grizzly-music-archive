@@ -4,6 +4,13 @@ class AlbumMetadataService
 {
     private const MAX_TRACKS = 40;
 
+    // MusicBrainz consente circa una richiesta al secondo per client.
+    // Manteniamo anche il paese principale dell'artista per scegliere
+    // l'edizione territoriale più coerente (GB per Radiohead/Coldplay,
+    // US per Interpol) ed escludere le edizioni giapponesi.
+    private float $lastMusicBrainzRequestAt = 0.0;
+    private string $preferredArtistCountry = '';
+
     public function search(string $artist, string $album, int $year = 0): array
     {
         $artistRaw = $artist;
@@ -33,10 +40,17 @@ class AlbumMetadataService
                 $result['genre'] = ucfirst($mb['genres'][0]['name']);
             }
 
-            // Etichetta da MusicBrainz
+            // Etichetta della stessa release scelta per MBID, cover e
+            // tracklist. La release viene selezionata privilegiando il
+            // paese dell'artista ed escludendo in modo rigido il Giappone.
             if (!empty($mb['label-info'][0]['label']['name'])) {
                 $result['label'] = $mb['label-info'][0]['label']['name'];
             }
+
+            // Campi diagnostici: il frontend li ignora, ma permettono di
+            // verificare subito quale mercato è stato selezionato.
+            $result['release_country'] = $mb['country'] ?? '';
+            $result['artist_country']  = $this->preferredArtistCountry;
 
             if (!empty($mb['id'])) {
                 $tracks = $this->getTracksFromMusicBrainzRelease($mb['id']);
@@ -237,27 +251,47 @@ class AlbumMetadataService
     private function httpGetJson(string $url, array $headers = []): array
     {
         $ua = defined('APP_USER_AGENT') ? APP_USER_AGENT : 'MusicArchive/1.0';
+        $isMusicBrainz = stripos($url, 'https://musicbrainz.org/') === 0;
 
-        $context = stream_context_create([
-            'http' => [
-                'header' => implode("\r\n", array_merge([
-                    'User-Agent: ' . $ua,
-                    'Accept: application/json'
-                ], $headers)),
-                'timeout' => 10,
-                'ignore_errors' => true
-            ]
-        ]);
+        $attempts = $isMusicBrainz ? 2 : 1;
 
-        $json = @file_get_contents($url, false, $context);
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            if ($isMusicBrainz) {
+                $this->throttleMusicBrainz();
+            }
 
-        if ($json === false || $json === null) {
-            return [];
-        }
+            $context = stream_context_create([
+                'http' => [
+                    'header' => implode("\r\n", array_merge([
+                        'User-Agent: ' . $ua,
+                        'Accept: application/json'
+                    ], $headers)),
+                    'timeout' => 10,
+                    'ignore_errors' => true
+                ]
+            ]);
 
-        if (isset($http_response_header)) {
+            $json = @file_get_contents($url, false, $context);
+            $responseHeaders = $http_response_header ?? [];
+            $statusCode = $this->extractHttpStatus($responseHeaders);
+
+            // MusicBrainz usa 429/503 quando il client supera il rate limit
+            // o il servizio è temporaneamente occupato. Un solo retry,
+            // sempre rispettando l'intervallo minimo tra le richieste.
+            if ($isMusicBrainz && in_array($statusCode, [429, 503], true) && $attempt < $attempts) {
+                continue;
+            }
+
+            if ($json === false || $json === null) {
+                return [];
+            }
+
+            if ($statusCode !== null && $statusCode >= 400) {
+                return [];
+            }
+
             $isJson = false;
-            foreach ($http_response_header as $h) {
+            foreach ($responseHeaders as $h) {
                 if (stripos($h, 'application/json') !== false) {
                     $isJson = true;
                     break;
@@ -266,15 +300,30 @@ class AlbumMetadataService
             if (!$isJson) {
                 return [];
             }
+
+            $decoded = json_decode($json, true);
+
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                return [];
+            }
+
+            return is_array($decoded) ? $decoded : [];
         }
 
-        $decoded = json_decode($json, true);
+        return [];
+    }
 
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            return [];
+    private function throttleMusicBrainz(): void
+    {
+        $now = microtime(true);
+        $elapsed = $now - $this->lastMusicBrainzRequestAt;
+        $minimumInterval = 1.10;
+
+        if ($this->lastMusicBrainzRequestAt > 0.0 && $elapsed < $minimumInterval) {
+            usleep((int)(($minimumInterval - $elapsed) * 1000000));
         }
 
-        return is_array($decoded) ? $decoded : [];
+        $this->lastMusicBrainzRequestAt = microtime(true);
     }
 
     // ================= MUSICBRAINZ =================
@@ -294,7 +343,8 @@ class AlbumMetadataService
         $data = $this->httpGetJson($url);
 
         if (!empty($data['releases'])) {
-            $best = $this->pickBestRelease($data['releases'], $album, $year, $artist);
+            $this->resolvePreferredArtistCountry($data['releases']);
+            $best = $this->pickBestRelease($data['releases'], $album, $year, $artist, $this->preferredArtistCountry);
             if (!empty($best)) return $best;
         }
 
@@ -313,7 +363,8 @@ class AlbumMetadataService
         $data = $this->httpGetJson($url);
 
         if (!empty($data['releases'])) {
-            $best = $this->pickBestRelease($data['releases'], $album, $year, $artist);
+            $this->resolvePreferredArtistCountry($data['releases']);
+            $best = $this->pickBestRelease($data['releases'], $album, $year, $artist, $this->preferredArtistCountry);
             if (!empty($best)) return $best;
         }
 
@@ -328,14 +379,21 @@ class AlbumMetadataService
         $data = $this->httpGetJson($url);
 
         if (!empty($data['releases'])) {
-            $best = $this->pickBestRelease($data['releases'], $album, $year, $artist);
+            $this->resolvePreferredArtistCountry($data['releases']);
+            $best = $this->pickBestRelease($data['releases'], $album, $year, $artist, $this->preferredArtistCountry);
             if (!empty($best)) return $best;
         }
 
         return [];
     }
 
-    private function pickBestRelease(array $releases, string $album, int $year = 0, string $artist = ''): array
+    private function pickBestRelease(
+        array $releases,
+        string $album,
+        int $year = 0,
+        string $artist = '',
+        string $preferredCountry = ''
+    ): array
     {
         $album = strtolower($album);
 
@@ -377,6 +435,14 @@ class AlbumMetadataService
 
         foreach ($releases as $rel) {
             if (empty($rel['title'])) continue;
+
+            // ESCLUSIONE RIGIDA DELLE EDIZIONI GIAPPONESI. MusicBrainz
+            // può attribuire loro uno score elevato perché sono molto ben
+            // documentate, ma per Grizzly non devono mai essere usate per
+            // cover, MBID o tracklist automatica.
+            if ($this->isJapaneseMusicBrainzRelease($rel)) {
+                continue;
+            }
 
             // ============ SCARTI HARD — non omonimi, non tipi sbagliati ============
             //
@@ -451,8 +517,22 @@ class AlbumMetadataService
                 $score += 10;
             }
 
-            // Premia release con paese di origine
-            if (!empty($rel['country'])) {
+            // Mercato territoriale: il paese principale dell'artista
+            // è il criterio dominante tra release altrimenti equivalenti.
+            // GB per Radiohead/Coldplay, US per Interpol. Le edizioni
+            // Europe/Worldwide restano fallback validi.
+            $releaseCountry = strtoupper(trim($rel['country'] ?? ''));
+            $preferredCountry = strtoupper(trim($preferredCountry));
+
+            if ($preferredCountry !== '' && $releaseCountry !== '') {
+                if ($releaseCountry === $preferredCountry) {
+                    $score += 80;
+                } elseif (in_array($releaseCountry, ['XE', 'XW'], true)) {
+                    $score += 12;
+                } else {
+                    $score -= 12;
+                }
+            } elseif ($releaseCountry !== '') {
                 $score += 5;
             }
 
@@ -485,6 +565,56 @@ class AlbumMetadataService
         }
 
         return $best ?? [];
+    }
+
+    // Ricava una sola volta il paese principale dell'artista usando
+    // l'MBID presente nell'artist-credit dei risultati di ricerca.
+    private function resolvePreferredArtistCountry(array $releases): void
+    {
+        if ($this->preferredArtistCountry !== '') {
+            return;
+        }
+
+        $artistMbid = '';
+        foreach ($releases as $rel) {
+            foreach (($rel['artist-credit'] ?? []) as $credit) {
+                $candidate = trim($credit['artist']['id'] ?? '');
+                if ($candidate !== '') {
+                    $artistMbid = $candidate;
+                    break 2;
+                }
+            }
+        }
+
+        if ($artistMbid === '') {
+            return;
+        }
+
+        $url = 'https://musicbrainz.org/ws/2/artist/'
+            . rawurlencode($artistMbid)
+            . '?fmt=json';
+
+        $data = $this->httpGetJson($url);
+
+        $country = strtoupper(trim($data['country'] ?? ''));
+        if ($country === '' && !empty($data['area']['iso-3166-1-codes'][0])) {
+            $country = strtoupper(trim($data['area']['iso-3166-1-codes'][0]));
+        }
+
+        if (preg_match('/^[A-Z]{2}$/', $country)) {
+            $this->preferredArtistCountry = $country;
+        }
+    }
+
+    private function isJapaneseMusicBrainzRelease(array $release): bool
+    {
+        $country  = strtoupper(trim($release['country'] ?? ''));
+        $language = strtolower(trim($release['text-representation']['language'] ?? ''));
+        $script   = strtolower(trim($release['text-representation']['script'] ?? ''));
+
+        return $country === 'JP'
+            || $language === 'jpn'
+            || $script === 'jpan';
     }
 
     // ----------------------------------------------------------
@@ -669,6 +799,13 @@ class AlbumMetadataService
             $title = strtolower($row['title'] ?? '');
             if ($title === '') continue;
 
+            // Stessa regola applicata a MusicBrainz: nessuna edizione
+            // giapponese deve entrare come fallback da Discogs.
+            $discogsCountry = strtolower(trim($row['country'] ?? ''));
+            if (in_array($discogsCountry, ['japan', 'jp'], true)) {
+                continue;
+            }
+
             $formats = array_map('strtolower', $row['format'] ?? []);
             $isBadFormat = false;
             foreach ($avoidFormat as $f) {
@@ -709,6 +846,12 @@ class AlbumMetadataService
             // Bonus presenza anno
             if (!empty($row['year'])) $score += 5;
 
+            // Discogs usa nomi estesi per il paese. Applichiamo una
+            // preferenza leggera coerente con il paese MusicBrainz.
+            if ($this->discogsCountryMatchesPreferred($row['country'] ?? '')) {
+                $score += 35;
+            }
+
             if ($score > $bestScore) {
                 $bestScore = $score;
                 $best      = $row;
@@ -716,6 +859,27 @@ class AlbumMetadataService
         }
 
         return $best;
+    }
+
+    private function discogsCountryMatchesPreferred(string $country): bool
+    {
+        if ($this->preferredArtistCountry === '') {
+            return false;
+        }
+
+        $map = [
+            'GB' => ['uk', 'united kingdom', 'great britain', 'england'],
+            'US' => ['us', 'usa', 'united states'],
+            'CA' => ['canada'],
+            'AU' => ['australia'],
+            'DE' => ['germany'],
+            'FR' => ['france'],
+            'IT' => ['italy'],
+            'ES' => ['spain'],
+        ];
+
+        $country = strtolower(trim($country));
+        return in_array($country, $map[$this->preferredArtistCountry] ?? [], true);
     }
 
     private function discogsDurationToSeconds(string $d): int
