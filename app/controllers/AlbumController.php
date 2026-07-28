@@ -1329,6 +1329,20 @@ class AlbumController
       return false;
     }
 
+    // RILEVATORE STRUTTURALE DI DISAMBIGUAZIONE.
+    // Le disambigue italiane moderne NON contengono "può riferirsi": sono
+    // un semplice elenco in cui ogni riga inizia col titolo cercato seguito
+    // da un trattino e una tipologia diversa, es.:
+    //   "Repetition – brano musicale di David Bowie..."
+    //   "Repetition – singolo dei DD Smash del 1981"
+    //   "Repetition – album ..."
+    // Una vera pagina-album ha UNA definizione in prosa, non un elenco di
+    // omonimi. Se troviamo più righe che iniziano con "<titolo> –/-/("
+    // riferite a opere DIVERSE, è una disambigua: scartiamo.
+    if ($this->looksLikeDisambiguation($extract, $album)) {
+      return false;
+    }
+
     $intro = substr($extractLower, 0, 250);
     foreach ($this->wikiRejectMarkers() as $marker) {
       if (strpos($intro, $marker) !== false) {
@@ -1366,6 +1380,39 @@ class AlbumController
     }
 
     return true;
+  }
+
+  // Rileva se un estratto è una PAGINA DI DISAMBIGUAZIONE travestita da
+  // definizione. Vero quando l'estratto contiene 2+ voci che iniziano con
+  // il titolo cercato seguito da un separatore di glossa (– - :) e da una
+  // tipologia diversa. È il pattern delle disambigue IT ("Repetition –
+  // brano di X / Repetition – singolo di Y / ...") che non usano la
+  // formula "può riferirsi" e passerebbero altrimenti i controlli.
+  private function looksLikeDisambiguation(string $extract, string $album): bool
+  {
+    $album = trim($album);
+    if ($album === '') return false;
+
+    // Conta quante volte "<album> <sep>" compare come inizio di una voce.
+    // I separatori includono trattino semplice, en-dash, em-dash, due punti.
+    // \b non funziona bene con caratteri unicode nel titolo, quindi ancoriamo
+    // sul titolo esatto seguito da spazio e separatore.
+    $quoted = preg_quote($album, '~');
+    $pattern = '~' . $quoted . '\s*[\x{2013}\x{2014}\-:]\s+~u';
+
+    $matches = preg_match_all($pattern, $extract, $m);
+    if ($matches >= 2) {
+      return true;
+    }
+
+    // Segnale aggiuntivo: la parola "disambigua"/"disambiguation" nel testo
+    // (a volte l'estratto della pagina la contiene esplicitamente).
+    if (stripos($extract, 'disambigua') !== false
+        || stripos($extract, 'disambiguation') !== false) {
+      return true;
+    }
+
+    return false;
   }
 
   // Frasi che identificano pagine DA SCARTARE (bio artista, singolo,
@@ -1508,6 +1555,15 @@ class AlbumController
         // Scarta disambiguazioni
         if (stripos($extract, 'may refer to') !== false
             || stripos($extract, 'può riferirsi') !== false) {
+          continue;
+        }
+
+        // Disambigua strutturale (elenco di omonimi senza "può riferirsi"):
+        // è il caso "Repetition" IT (brano Bowie / singolo DD Smash / album…)
+        // che bucava tutti i controlli sotto perché la lista contiene sia
+        // "album" sia, a volte, il nome dell'artista giusto.
+        if ($this->looksLikeDisambiguation($extract, $album)) {
+          if ($debug) $debugLog[] = ['step' => 'lvl3-validate', 'title' => $pageTitle, 'valid' => false, 'reason' => 'disambigua-strutturale'];
           continue;
         }
 
