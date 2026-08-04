@@ -170,6 +170,18 @@ $discoFetched = !empty($artist['disco_fetched_at']);
       $cardFormats = !empty($a['formats'])
         ? $a['formats']
         : [['name' => $a['format_name']]];
+
+      // Icona tracce/audio, stessa logica di archivio e dettaglio:
+      // due note verdi = tutte le tracce hanno audio; una nota ambra
+      // = mancano del tutto o in parte.
+      $cardTotalTracks = (int)($a['track_count'] ?? 0);
+      $cardTracksAudio = (int)($a['tracks_with_audio_count'] ?? 0);
+      $cardHasAudio    = $cardTotalTracks > 0 && $cardTracksAudio >= $cardTotalTracks;
+      $cardAudioTitle  = $cardHasAudio
+        ? 'Tutte le tracce hanno audio'
+        : ($cardTracksAudio > 0
+            ? $cardTracksAudio . ' di ' . $cardTotalTracks . ' tracce con audio'
+            : 'Nessun file audio caricato');
       ?>
       <a class="disco-card album-card"
         href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>">
@@ -194,9 +206,8 @@ $discoFetched = !empty($artist['disco_fetched_at']);
               <span class="disco-card__dot">·</span>
               <span><?= htmlspecialchars($a['genre_name']) ?></span>
             <?php endif; ?>
-            <?php if (!empty($a['track_count'])): ?>
-              <span class="disco-card__dot">·</span>
-              <span><?= (int)$a['track_count'] ?> tracce</span>
+            <?php if ($cardTotalTracks > 0): ?>
+              <span title="<?= htmlspecialchars($cardAudioTitle) ?>"><i class="bi <?= $cardHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?>"></i>&nbsp;<?= $cardTotalTracks ?> <?= $cardTotalTracks === 1 ? 'traccia' : 'tracce' ?></span>
             <?php endif; ?>
           </div>
         </div>

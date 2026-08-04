@@ -59,6 +59,12 @@ class Artist {
                      WHERE t.album_id = a.id
                    ) AS track_count,
                    (
+                     SELECT COUNT(DISTINCT af3.track_id)
+                     FROM audio_files af3
+                     JOIN tracks t3 ON t3.id = af3.track_id
+                     WHERE t3.album_id = a.id
+                   ) AS tracks_with_audio_count,
+                   (
                      SELECT GROUP_CONCAT(CONCAT(f2.id, ':::', f2.name) ORDER BY f2.id SEPARATOR '|||')
                      FROM album_formats af2
                      JOIN formats f2 ON af2.format_id = f2.id
