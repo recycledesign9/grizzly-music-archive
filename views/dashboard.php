@@ -115,6 +115,18 @@ foreach ($fmtSegments as $s) {
         $tileFormats = !empty($a['formats'])
           ? $a['formats']
           : [['name' => $a['format_name'] ?? '']];
+
+        // Badge tracce/audio sovrapposto alla cover (stessa logica di
+        // archivio/dettaglio): due note verdi = tutte le tracce hanno
+        // audio; una nota ambra = mancano del tutto o in parte.
+        $tileTotalTracks = (int)($a['track_count'] ?? 0);
+        $tileTracksAudio = (int)($a['tracks_with_audio_count'] ?? 0);
+        $tileHasAudio    = $tileTotalTracks > 0 && $tileTracksAudio >= $tileTotalTracks;
+        $tileAudioTitle  = $tileHasAudio
+          ? 'Tutte le tracce hanno audio'
+          : ($tileTracksAudio > 0
+              ? $tileTracksAudio . ' di ' . $tileTotalTracks . ' tracce con audio'
+              : 'Nessun file audio caricato');
       ?>
         <div class="grz-album-cell">
           <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>"
@@ -125,6 +137,11 @@ foreach ($fmtSegments as $s) {
                           : ($a['cover_url'] ? htmlspecialchars($a['cover_url']) : BASE_URL . '/public/img/placeholder.png') ?>"
                    alt="<?= htmlspecialchars($a['title']) ?>"
                    loading="lazy">
+              <?php if ($tileTotalTracks > 0): ?>
+                <span class="grz-tile-tracks" title="<?= htmlspecialchars($tileAudioTitle) ?>">
+                  <i class="bi <?= $tileHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?>"></i><?= $tileTotalTracks ?>
+                </span>
+              <?php endif; ?>
             </div>
             <div class="grz-album-tile__info">
               <span class="grz-album-tile__title"><?= htmlspecialchars($a['title']) ?></span>
@@ -298,6 +315,19 @@ foreach ($fmtSegments as $s) {
     var cells = Array.prototype.slice.call(grid.querySelectorAll('.grz-album-cell'));
     var total = cells.length;
 
+    /* Persistenza dell'espansione "Mostra altri" tra le pagine:
+       tornando in dashboard la griglia resta espansa come lasciata. */
+    var STORE_KEY = 'grzDashVisRows';
+    function readStored() {
+      try {
+        var v = parseInt(sessionStorage.getItem(STORE_KEY), 10);
+        return (v && v >= 2) ? v : 2;
+      } catch (e) { return 2; }
+    }
+    function writeStored(v) {
+      try { sessionStorage.setItem(STORE_KEY, String(v)); } catch (e) {}
+    }
+
     /* Legge le colonne CSS attuali dal computed style della griglia —
        nessuna misura manuale, usa direttamente ciò che ha già calcolato il browser */
     function getCols() {
@@ -308,7 +338,7 @@ foreach ($fmtSegments as $s) {
       return Math.max(1, parts.length);
     }
 
-    var visRows = 2;
+    var visRows = readStored();
 
     function render() {
       var n       = getCols();
@@ -326,6 +356,7 @@ foreach ($fmtSegments as $s) {
     if (btn) {
       btn.addEventListener('click', function () {
         visRows += 1;
+        writeStored(visRows);
         render();
       });
     }

@@ -4782,3 +4782,31 @@ a.badge-format:hover {
     gap: 4px 14px;
   }
 }
+
+/* ── Badge tracce/audio sovrapposto alla cover (dashboard tile) ──
+   In basso a sinistra, angolo opposto al badge formato.
+   Le icone .grz-track-audio / .grz-track-noaudio portano già il colore. */
+.grz-tile-tracks {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px 2px 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 999px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.grz-tile-tracks i {
+  font-size: 0.8rem;
+}
