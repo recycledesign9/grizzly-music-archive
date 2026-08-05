@@ -79,10 +79,55 @@ class ArtistMetadataService
      * N lookup singole con una scansione unica a blocchi da 100 release
      * (stessa query del vecchio codice pre-v2, usata pero' solo per
      * CONFERMARE i candidati già noti, non più come fonte primaria di
-     * titoli/anni): tipicamente 1-3 chiamate invece di N, con lo stesso
-     * identico risultato — vedi confirmOfficialReleaseGroups().
+     * titoli/anni): tipicamente 1-3 chiamate invece di N.
+     *
+     * v7: elimina del tutto la fase di conferma via /release (STEP 2).
+     * L'osservazione chiave: su MusicBrainz un album in studio UFFICIALE
+     * ha una first-release-date con almeno anno-mese (YYYY-MM), mentre i
+     * bootleg/demo classificati come "Album senza secondary-type" hanno
+     * solo l'anno (YYYY) o data vuota (verificato: Born in the U.S.A.
+     * "1984-05", Darkness "1978-05" → tenuti; Them Bones "1993", Tilburg
+     * 1993 "", bootleg omonimo "Alice in Chains" 1989 → esclusi).
+     * Filtrando i release-group per data con mese si ottiene la
+     * discografia ufficiale con la SOLA scansione STEP 1 (1-3 pagine):
+     * niente scansione delle release dell'artista (che su cataloghi
+     * enormi come Springsteen, ~6871 release, era lenta e superava il
+     * tetto di sicurezza), niente fail-open, niente flag di attendibilità
+     * fragile. Veloce e preciso per QUALSIASI artista. Il criterio
+     * distingue anche gli omonimi di anni diversi (bootleg 1989 vs album
+     * 1995) senza logica ad hoc.
+     *
+     * v8: unione discografie di artisti splittati su MusicBrainz tra
+     * solista e band omonima (Patti Smith + Patti Smith Group). Si
+     * seguono le relazioni "member of band" verso band il cui nome
+     * contiene quello dell'artista e se ne fondono i release-group.
+     *
+     * v9: criterio ufficiale a due livelli. Data completa (anno-mese) →
+     * album ufficiale certo, tenuto diretto. Data solo-anno → ambiguo,
+     * verificato con una chiamata mirata (release ufficiale sì/no): così
+     * gli album veri mal datati di artisti di nicchia (Santo Niente)
+     * restano, i bootleg solo-anno (Alice in Chains) restano esclusi, e
+     * i cataloghi enormi restano veloci perché gli ambigui sono pochi.
+     *
+     * v10: dedup dei candidati per titolo+anno (non più solo titolo), così
+     * due album omonimi di anni diversi (bootleg "Alice in Chains" 1989 e
+     * album 1995) non collidono facendo sparire quello vero prima della
+     * verifica.
+     *
+     * v11: filtro artist-credit. Scarta le collaborazioni che MusicBrainz
+     * classifica come Album senza secondary-type ma che non sono dischi
+     * dell'artista (es. "Soundwalk Collective with Patti Smith"): si tiene
+     * un release-group solo se ogni nome del suo artist-credit è
+     * l'artista o una sua band omonima. Un album di sole cover accreditato
+     * al solo artista (Twelve) resta.
+     *
+     * v12: il filtro artist-credit confronta gli ID artista, non i nomi.
+     * MusicBrainz può accreditare lo stesso MBID con un credit-name
+     * storico diverso (il primo album di Santo Niente è "Umberto Palazzo
+     * e il Santo niente" ma punta all'MBID di Santo Niente): col confronto
+     * per ID resta, mentre le collaborazioni con MBID esterni cadono.
      */
-    public const DISCOGRAPHY_LOGIC_VERSION = 5;
+    public const DISCOGRAPHY_LOGIC_VERSION = 12;
 
     /** Lunghezza massima bio salvata (caratteri) per non esagerare */
     private const BIO_MAX_CHARS = 2200;
@@ -824,35 +869,68 @@ class ArtistMetadataService
             return ['ok' => true, 'items' => []];
         }
 
-        // STEP 1 — candidati (titolo/anno) da /release-group: una riga per
-        // album indipendentemente da quante edizioni fisiche esistano
-        // (fix v2, niente troncamento su cataloghi con molte ristampe).
+        // Alcuni artisti sono splittati su MusicBrainz tra il solista e la
+        // band omonima (es. "Patti Smith" e "Patti Smith Group": Horses è
+        // sotto la prima, Radio Ethiopia/Easter/Wave sotto la seconda).
+        // Nell'archivio l'utente ha un solo artista, quindi la discografia
+        // deve unire entrambe. Si seguono le relazioni "member of band" MA
+        // solo verso band il cui nome contiene quello dell'artista, per
+        // NON tirare dentro band vere e proprie (es. un membro dei Beatles
+        // non deve ereditare la discografia dei Beatles).
+        $rel       = $this->linkedSameNameBands($mbArtistId);
+        $bands     = $rel['bands']; // [['id','name'],...]
+        $artistIds = array_merge([$mbArtistId], array_column($bands, 'id'));
+
+        // Set di nomi ammessi nell'artist-credit: l'artista principale e
+        // le sue band omonime. Serve a scartare le COLLABORAZIONI (es.
+        // "Soundwalk Collective with Patti Smith") che MusicBrainz
+        // classifica come Album senza secondary-type ma che non sono
+        // dischi dell'artista: si tiene un release-group solo se OGNI
+        // nome nel suo artist-credit è in questo set.
+        // Set di ID artista ammessi nell'artist-credit: l'artista
+        // principale e le sue band omonime. Serve a scartare le
+        // COLLABORAZIONI (es. "Soundwalk Collective with Patti Smith") che
+        // MusicBrainz classifica come Album senza secondary-type ma che
+        // non sono dischi dell'artista. Si confrontano gli ID, non i nomi:
+        // MusicBrainz può accreditare lo STESSO artista con un credit-name
+        // storico diverso (es. il primo album di Santo Niente è
+        // accreditato "Umberto Palazzo e il Santo niente" ma punta allo
+        // stesso MBID). Un release-group passa se OGNI voce del suo
+        // artist-credit ha un artist.id in questo set.
+        $allowedIds = array_merge([$mbArtistId], array_column($bands, 'id'));
+        $allowedIds = array_values(array_filter(array_unique($allowedIds)));
+
+        // STEP 1 — candidati (titolo/anno) da /release-group per OGNI
+        // entità (artista principale + eventuali band omonime): una riga
+        // per album, filtrando gli album ufficiali per data (vedi sotto).
         $candidates = []; // titolo normalizzato => ['rgId','title','year']
         $fetchOk    = true;
 
-        $limit  = 100;
-        $offset = 0;
-        $guard  = 0;
+        foreach ($artistIds as $aid) {
+            $limit  = 100;
+            $offset = 0;
+            $guard  = 0;
 
-        do {
-            $url = 'https://musicbrainz.org/ws/2/release-group'
-                . '?artist=' . rawurlencode($mbArtistId)
-                . '&type=album'
-                . '&fmt=json&limit=' . $limit . '&offset=' . $offset;
+            do {
+                $url = 'https://musicbrainz.org/ws/2/release-group'
+                    . '?artist=' . rawurlencode($aid)
+                    . '&type=album'
+                    . '&inc=artist-credits'
+                    . '&fmt=json&limit=' . $limit . '&offset=' . $offset;
 
-            $resp = $this->httpGetJsonWithStatus($url);
-            usleep(self::MB_THROTTLE_US);
+                $resp = $this->httpGetJsonWithStatus($url);
+                usleep(self::MB_THROTTLE_US);
 
-            if (!$resp['ok']) {
-                $fetchOk = false;
-                break;
-            }
+                if (!$resp['ok']) {
+                    $fetchOk = false;
+                    break;
+                }
 
-            $data   = $resp['data'];
-            $groups = $data['release-groups'] ?? [];
-            $total  = (int) ($data['release-group-count'] ?? count($groups));
+                $data   = $resp['data'];
+                $groups = $data['release-groups'] ?? [];
+                $total  = (int) ($data['release-group-count'] ?? count($groups));
 
-            foreach ($groups as $rg) {
+                foreach ($groups as $rg) {
                 $primary   = $rg['primary-type'] ?? '';
                 $secondary = $rg['secondary-types'] ?? [];
                 if (strcasecmp($primary, 'Album') !== 0 || !empty($secondary)) {
@@ -865,49 +943,115 @@ class ArtistMetadataService
                     continue;
                 }
 
-                $year = null;
-                $fr   = $rg['first-release-date'] ?? '';
-                if ($fr !== '' && preg_match('/^(\d{4})/', $fr, $m)) {
-                    $year = (int) $m[1];
+                // Scarta le COLLABORAZIONI: tiene il release-group solo se
+                // OGNI voce dell'artist-credit ha un artist.id ammesso
+                // (artista principale o sue band omonime). Il confronto per
+                // ID è robusto ai credit-name storici: "Umberto Palazzo e
+                // il Santo niente" punta all'MBID di Santo Niente → passa;
+                // "Soundwalk Collective with Patti Smith" ha un MBID
+                // esterno → cade.
+                if (!empty($allowedIds)) {
+                    $creditOk = true;
+                    foreach ($rg['artist-credit'] ?? [] as $ac) {
+                        $acId = $ac['artist']['id'] ?? '';
+                        if ($acId !== '' && !in_array($acId, $allowedIds, true)) {
+                            $creditOk = false;
+                            break;
+                        }
+                    }
+                    if (!$creditOk) {
+                        continue;
+                    }
                 }
 
-                // Dedup per titolo QUI, prima della verifica ufficiale. A
-                // parità di titolo, tiene il candidato con l'anno
-                // valorizzato (di solito quello con dati più completi,
-                // es. "Blindness" vs "blindness").
-                $key = preg_replace('/\s+/', ' ', mb_strtolower($title));
-                if (!isset($candidates[$key]) || ($candidates[$key]['year'] === null && $year !== null)) {
-                    $candidates[$key] = ['rgId' => $rgId, 'title' => $title, 'year' => $year];
+                // Criterio a due livelli per distinguere album ufficiali
+                // da bootleg/demo (entrambi "Album senza secondary-type"):
+                //  - data COMPLETA (almeno anno-mese, YYYY-MM): è un album
+                //    ufficiale con certezza, si tiene senza verifiche.
+                //  - data INCOMPLETA (solo anno YYYY o vuota): AMBIGUA. Per
+                //    artisti mainstream è tipica dei bootleg (Them Bones
+                //    "1993", Tilburg 1993 ""); per artisti di nicchia è
+                //    invece tipica di album VERI mal datati su MusicBrainz
+                //    (Santo Niente: "La vita è facile" 1995, "Il fiore
+                //    dell'agave" 2005 → album ufficiali con sola annata).
+                //    Il segnale-data da solo non basta: questi candidati
+                //    vengono marcati e verificati UNO A UNO (STEP 2 mirato,
+                //    solo sui pochi ambigui) controllando se hanno almeno
+                //    una release ufficiale — vedi hasOfficialRelease().
+                $fr   = $rg['first-release-date'] ?? '';
+                $hasMonth = (bool) preg_match('/^(\d{4})-\d{2}/', $fr, $mFull);
+                $hasYear  = (bool) preg_match('/^(\d{4})/', $fr, $mYear);
+                if (!$hasYear && !$hasMonth) {
+                    // Nessun anno affatto: non databile, scartato.
+                    // (Verrà comunque ripreso dalla verifica se ufficiale?
+                    //  No: senza anno non è un album in studio databile.)
+                    continue;
+                }
+                $year          = (int) ($hasMonth ? $mFull[1] : $mYear[1]);
+                $needsVerify   = !$hasMonth; // solo-anno → ambiguo
+
+                // Dedup per TITOLO + ANNO: due release-group omonimi di
+                // anni diversi sono album distinti, non duplicati (es. il
+                // bootleg "Alice in Chains" 1989 e l'album vero "Alice in
+                // Chains" 1995). Con la sola chiave-titolo il primo
+                // incontrato rubava la chiave e l'altro spariva; poi la
+                // verifica scartava il bootleg e restavano zero. Con
+                // titolo+anno entrambi sopravvivono qui e la verifica
+                // mirata tiene solo quello con release ufficiali (1995).
+                $key = preg_replace('/\s+/', ' ', mb_strtolower($title)) . '|' . $year;
+                if (!isset($candidates[$key])) {
+                    $candidates[$key] = [
+                        'rgId'   => $rgId,
+                        'title'  => $title,
+                        'year'   => $year,
+                        'verify' => $needsVerify,
+                    ];
                 }
             }
 
             $offset += $limit;
             $guard++;
         } while ($offset < $total && $guard < 6);
+        } // fine foreach ($artistIds)
 
-        // STEP 2 — quali candidati hanno ALMENO UNA release ufficiale
-        // dietro? Una scansione unica a blocchi da 100 (non una chiamata
-        // per candidato: con 15-30 album significava 15-30 chiamate
-        // sequenziali da oltre un secondo l'una, quindi anche un minuto
-        // pieno) — vedi confirmOfficialReleaseGroups().
+        // STEP 2 MIRATO: gli album con data completa sono già ufficiali e
+        // passano diretti. Solo gli AMBIGUI (data solo-anno) vengono
+        // verificati uno a uno — tipicamente pochissimi, spesso zero su
+        // artisti mainstream — controllando se hanno una release ufficiale.
+        // Così Santo Niente (album veri mal datati) resta completo e i
+        // bootleg di Alice in Chains (solo-anno, senza release ufficiali)
+        // restano esclusi, senza scansionare le migliaia di release degli
+        // artisti con cataloghi enormi.
         $out = [];
-        if ($fetchOk && !empty($candidates)) {
-            $confirmedIds = $this->confirmOfficialReleaseGroups(
-                $mbArtistId,
-                array_column($candidates, 'rgId')
-            );
-            foreach ($candidates as $cand) {
-                if (in_array($cand['rgId'], $confirmedIds, true)) {
-                    $out[] = [
-                        'title'               => $cand['title'],
-                        'year'                => $cand['year'],
-                        'mb_release_group_id' => $cand['rgId'],
-                    ];
+        foreach ($candidates as $cand) {
+            if (!empty($cand['verify'])) {
+                if (!$this->hasOfficialRelease($cand['rgId'])) {
+                    continue; // ambiguo e senza release ufficiale → bootleg
                 }
             }
+            $out[] = [
+                'title'               => $cand['title'],
+                'year'                => $cand['year'],
+                'mb_release_group_id' => $cand['rgId'],
+            ];
         }
 
-        // Ordina per anno (senza anno in fondo)
+        // Dedup finale per TITOLO sull'output confermato: se dopo la
+        // verifica restano due entry omonime (raro: album + riedizione
+        // stesso titolo), tiene una sola riga. Diverso dal dedup
+        // titolo+anno sopra, che serve a NON far collidere album distinti
+        // di anni diversi prima della verifica; qui si collassano
+        // eventuali doppioni residui dello stesso album.
+        $byTitle = [];
+        foreach ($out as $item) {
+            $tkey = preg_replace('/\s+/', ' ', mb_strtolower($item['title']));
+            if (!isset($byTitle[$tkey])) {
+                $byTitle[$tkey] = $item;
+            }
+        }
+        $out = array_values($byTitle);
+
+        // Ordina per anno, poi per titolo.
         usort($out, function ($a, $b) {
             $ya = $a['year'] ?? 99999;
             $yb = $b['year'] ?? 99999;
@@ -917,89 +1061,76 @@ class ArtistMetadataService
             return $ya - $yb;
         });
 
+        // ok riflette il successo della scansione release-group. Se una
+        // pagina è fallita ($fetchOk=false), il controller marca 'error'
+        // e la guardia anti-svuotamento NON sovrascrive una discografia
+        // buona con una lista parziale, ritentando dopo il cooldown.
         return ['ok' => $fetchOk, 'items' => $out];
     }
 
     /**
-     * Conferma quali dei $candidateRgIds hanno almeno una release con
-     * status=Official, scansionando le release ufficiali di tipo album
-     * dell'artista A BLOCCHI DA 100 (query identica a quella del vecchio
-     * codice pre-v2: /release?artist=...&type=album&status=official&
-     * inc=release-groups) — UNA chiamata ogni 100 release, non una
-     * chiamata per candidato: per un artista con 15-30 album questo
-     * vuol dire tipicamente 1-3 chiamate invece di 15-30.
+     * Relazioni omonime dell'artista in UNA chiamata: ritorna il nome
+     * dell'artista principale e le band collegate via "member of band" il
+     * cui nome CONTIENE quello dell'artista (es. "Patti Smith" → "Patti
+     * Smith Group"). Il vincolo sul nome evita di ereditare la
+     * discografia di band vere e proprie di cui l'artista è solo un
+     * membro (un ex Beatle non deve ricevere gli album dei Beatles). Su
+     * errore ritorna solo il nome vuoto e nessuna band.
      *
-     * Si ferma appena TUTTI i candidati sono confermati (early exit) o
-     * quando ha scandito tutte le release ufficiali dell'artista
-     * (offset >= total): a quel punto chi resta non trovato NON ha
-     * nessuna release ufficiale, quindi va escluso con certezza — è
-     * così che "Tilburg 1993"/"Radio Transmissions 1995-2000" vengono
-     * esclusi in modo definitivo, non per un timeout.
-     *
-     * Solo se il catalogo è così enorme da far scattare il tetto di
-     * sicurezza ($guardMax pagine) PRIMA di finire la scansione, o se la
-     * rete fallisce a metà, i candidati ancora incerti a quel punto
-     * vengono inclusi per prudenza (fail-open sull'ambiguità residua,
-     * mai sui bootleg già confermati assenti).
-     *
-     * @param string[] $candidateRgIds
-     * @return string[] i release-group id confermati ufficiali
+     * @return array{name:string,bands:array<array{id:string,name:string}>}
      */
-    private function confirmOfficialReleaseGroups(string $mbArtistId, array $candidateRgIds): array
+    private function linkedSameNameBands(string $mbArtistId): array
     {
-        $remaining = array_flip($candidateRgIds); // rgId => indice originale
-        $confirmed = [];
-
-        $limit    = 100;
-        $offset   = 0;
-        $total    = 0;
-        $guard    = 0;
-        $guardMax = 30; // fino a 3000 release scandite prima del fail-open residuo
-        $sawFailure = false;
-
-        do {
-            $url = 'https://musicbrainz.org/ws/2/release'
-                . '?artist=' . rawurlencode($mbArtistId)
-                . '&type=album&status=official'
-                . '&inc=release-groups'
-                . '&fmt=json&limit=' . $limit . '&offset=' . $offset;
-
-            $resp = $this->httpGetJsonWithStatus($url);
-            usleep(self::MB_THROTTLE_US);
-
-            if (!$resp['ok']) {
-                $sawFailure = true;
-                break;
-            }
-
-            $data     = $resp['data'];
-            $releases = $data['releases'] ?? [];
-            $total    = (int) ($data['release-count'] ?? count($releases));
-
-            foreach ($releases as $rel) {
-                $rgId = $rel['release-group']['id'] ?? '';
-                if ($rgId !== '' && isset($remaining[$rgId])) {
-                    $confirmed[] = $rgId;
-                    unset($remaining[$rgId]);
-                }
-            }
-
-            $offset += $limit;
-            $guard++;
-        } while (!empty($remaining) && $offset < $total && $guard < $guardMax);
-
-        // Scansione completa (tutte le release ufficiali dell'artista
-        // viste, nessun errore di rete nel mezzo): chi resta in
-        // $remaining è escluso con certezza, non ha nessuna release
-        // ufficiale. Altrimenti (tetto di sicurezza o rete fallita a
-        // metà) l'esito è incerto, non un bootleg confermato: includiamo
-        // per prudenza.
-        $exhausted = !$sawFailure && ($offset >= $total);
-        if (!$exhausted) {
-            $confirmed = array_merge($confirmed, array_keys($remaining));
+        $url = 'https://musicbrainz.org/ws/2/artist/' . rawurlencode($mbArtistId)
+            . '?inc=artist-rels&fmt=json';
+        $resp = $this->httpGetJsonWithStatus($url);
+        usleep(self::MB_THROTTLE_US);
+        if (!$resp['ok']) {
+            return ['name' => '', 'bands' => []];
         }
 
-        return $confirmed;
+        $selfName     = trim($resp['data']['name'] ?? '');
+        $selfNameNorm = mb_strtolower($selfName);
+        if ($selfNameNorm === '') {
+            return ['name' => '', 'bands' => []];
+        }
+
+        $bands = [];
+        foreach ($resp['data']['relations'] ?? [] as $rel) {
+            if (($rel['type'] ?? '') !== 'member of band') {
+                continue;
+            }
+            $band     = $rel['artist'] ?? [];
+            $bandId   = $band['id'] ?? '';
+            $bandName = trim($band['name'] ?? '');
+            if ($bandId === '' || $bandName === '') {
+                continue;
+            }
+            if (mb_strpos(mb_strtolower($bandName), $selfNameNorm) !== false) {
+                $bands[] = ['id' => $bandId, 'name' => $bandName];
+            }
+        }
+        return ['name' => $selfName, 'bands' => $bands];
+    }
+
+    /**
+     * Verifica mirata: il release-group ha almeno una release ufficiale?
+     * Una sola chiamata leggera (limit=1). Usata solo sui candidati
+     * ambigui (data solo-anno), per distinguere un album vero mal datato
+     * da un bootleg. Su errore di rete ritorna true (fail-open: meglio
+     * mostrare un album in più che perderne uno vero per un hiccup).
+     */
+    private function hasOfficialRelease(string $rgId): bool
+    {
+        $url = 'https://musicbrainz.org/ws/2/release'
+            . '?release-group=' . rawurlencode($rgId)
+            . '&status=official&fmt=json&limit=1';
+        $resp = $this->httpGetJsonWithStatus($url);
+        usleep(self::MB_THROTTLE_US);
+        if (!$resp['ok']) {
+            return true; // fail-open sull'incertezza di rete
+        }
+        return (int) ($resp['data']['release-count'] ?? 0) > 0;
     }
 
     private function guessExtension(string $bytes): string
@@ -1072,15 +1203,26 @@ class ArtistMetadataService
      */
     private function httpGetJsonWithStatus(string $url): array
     {
-        $raw = $this->httpGetBinary($url, 'application/json');
-        if ($raw === '') {
-            return ['ok' => false, 'data' => []];
+        // Un retry singolo sui vuoti transitori (hiccup di rete o
+        // throttle momentaneo di MusicBrainz che restituisce un corpo
+        // vuoto): senza, una singola pagina fallita a metà di una
+        // scansione lunga marcava l'intera discografia come inattendibile
+        // e ne impediva il salvataggio. Il retry attende un throttle pieno
+        // prima di riprovare, nel rispetto del rate-limit MB (~1 req/s).
+        for ($attempt = 0; $attempt < 2; $attempt++) {
+            if ($attempt > 0) {
+                usleep(self::MB_THROTTLE_US);
+            }
+            $raw = $this->httpGetBinary($url, 'application/json');
+            if ($raw === '') {
+                continue;
+            }
+            $json = json_decode($raw, true);
+            if (is_array($json)) {
+                return ['ok' => true, 'data' => $json];
+            }
         }
-        $json = json_decode($raw, true);
-        if (!is_array($json)) {
-            return ['ok' => false, 'data' => []];
-        }
-        return ['ok' => true, 'data' => $json];
+        return ['ok' => false, 'data' => []];
     }
 
     /**
