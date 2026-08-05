@@ -81,56 +81,41 @@ class ArtistMetadataService
      * CONFERMARE i candidati già noti, non più come fonte primaria di
      * titoli/anni): tipicamente 1-3 chiamate invece di N.
      *
-     * v7: elimina del tutto la fase di conferma via /release (STEP 2).
-     * L'osservazione chiave: su MusicBrainz un album in studio UFFICIALE
-     * ha una first-release-date con almeno anno-mese (YYYY-MM), mentre i
-     * bootleg/demo classificati come "Album senza secondary-type" hanno
-     * solo l'anno (YYYY) o data vuota (verificato: Born in the U.S.A.
-     * "1984-05", Darkness "1978-05" → tenuti; Them Bones "1993", Tilburg
-     * 1993 "", bootleg omonimo "Alice in Chains" 1989 → esclusi).
-     * Filtrando i release-group per data con mese si ottiene la
-     * discografia ufficiale con la SOLA scansione STEP 1 (1-3 pagine):
-     * niente scansione delle release dell'artista (che su cataloghi
-     * enormi come Springsteen, ~6871 release, era lenta e superava il
-     * tetto di sicurezza), niente fail-open, niente flag di attendibilità
-     * fragile. Veloce e preciso per QUALSIASI artista. Il criterio
-     * distingue anche gli omonimi di anni diversi (bootleg 1989 vs album
-     * 1995) senza logica ad hoc.
-     *
-     * v8: unione discografie di artisti splittati su MusicBrainz tra
-     * solista e band omonima (Patti Smith + Patti Smith Group). Si
-     * seguono le relazioni "member of band" verso band il cui nome
-     * contiene quello dell'artista e se ne fondono i release-group.
-     *
-     * v9: criterio ufficiale a due livelli. Data completa (anno-mese) →
-     * album ufficiale certo, tenuto diretto. Data solo-anno → ambiguo,
-     * verificato con una chiamata mirata (release ufficiale sì/no): così
-     * gli album veri mal datati di artisti di nicchia (Santo Niente)
-     * restano, i bootleg solo-anno (Alice in Chains) restano esclusi, e
-     * i cataloghi enormi restano veloci perché gli ambigui sono pochi.
-     *
-     * v10: dedup dei candidati per titolo+anno (non più solo titolo), così
-     * due album omonimi di anni diversi (bootleg "Alice in Chains" 1989 e
-     * album 1995) non collidono facendo sparire quello vero prima della
-     * verifica.
-     *
-     * v11: filtro artist-credit. Scarta le collaborazioni che MusicBrainz
-     * classifica come Album senza secondary-type ma che non sono dischi
-     * dell'artista (es. "Soundwalk Collective with Patti Smith"): si tiene
-     * un release-group solo se ogni nome del suo artist-credit è
-     * l'artista o una sua band omonima. Un album di sole cover accreditato
-     * al solo artista (Twelve) resta.
-     *
-     * v12: il filtro artist-credit confronta gli ID artista, non i nomi.
-     * MusicBrainz può accreditare lo stesso MBID con un credit-name
-     * storico diverso (il primo album di Santo Niente è "Umberto Palazzo
-     * e il Santo niente" ma punta all'MBID di Santo Niente): col confronto
-     * per ID resta, mentre le collaborazioni con MBID esterni cadono.
+     * v12: riscrittura del criterio "album ufficiale in studio", che con
+     * l'endpoint /release?status=official (v5-v6) faceva sparire interi
+     * cataloghi. Ora: (a) scansione dei soli release-group Album senza
+     * secondary-type; (b) filtro artist-credit per ID artista, che scarta
+     * le collaborazioni (Soundwalk Collective) ma tiene i credit-name
+     * storici dello stesso MBID (Umberto Palazzo e il Santo niente); (c)
+     * data a due livelli — data con mese = ufficiale certo, solo-anno =
+     * verifica mirata con una chiamata (hasOfficialRelease) per
+     * distinguere album veri mal datati dai bootleg; (d) merge delle band
+     * omonime collegate via "member of band" (Patti Smith + Patti Smith
+     * Group); (e) dedup titolo+anno per non collassare omonimi di anni
+     * diversi. Veloce e preciso anche sui cataloghi enormi (Springsteen).
      */
-    public const DISCOGRAPHY_LOGIC_VERSION = 12;
+    public const DISCOGRAPHY_LOGIC_VERSION = 14;
 
     /** Lunghezza massima bio salvata (caratteri) per non esagerare */
     private const BIO_MAX_CHARS = 2200;
+
+    /**
+     * Negative-cache cover discografia: giorni prima di ritentare un
+     * miss CONFERMATO (CAA risponde 404 E Deezer non ha match esatto).
+     * Senza questo marker un album senza cover da nessuna parte
+     * costerebbe due chiamate esterne a ogni pageview, per sempre;
+     * 7 giorni è il compromesso: le fonti non cambiano così in fretta,
+     * ma una cover aggiunta dopo arriva comunque entro una settimana.
+     */
+    private const DISCO_COVER_MISS_TTL_DAYS = 7;
+
+    /**
+     * Minuti prima di ritentare dopo un esito TRANSITORIO (timeout,
+     * 429, 5xx, body non-immagine): non è "la cover non esiste",
+     * quindi niente TTL lungo — ma nemmeno martellare a ogni pageview
+     * mentre la fonte è giù.
+     */
+    private const DISCO_COVER_TRANSIENT_RETRY_MINUTES = 45;
 
     /**
      * @param string $name              Nome artista da cercare
@@ -782,12 +767,35 @@ class ArtistMetadataService
      * Un release-group nuovo (album nuovo) ha un MBID nuovo, quindi
      * genera semplicemente un file nuovo.
      *
+     * FONTI, in ordine:
+     *   1) Cover Art Archive (release-group front-250);
+     *   2) Deezer search album — SOLO con match di uguaglianza esatta
+     *      normalizzata su artista E titolo (stessa disciplina
+     *      anti-omonimi di deezerArtistImage, lezione "Packaging").
+     *      Copre i casi (rari ma reali, es. Santo Niente) in cui CAA
+     *      non ha proprio nessuna immagine per l'album: 404 sul
+     *      release-group significa che NESSUNA release del gruppo ha
+     *      artwork caricato.
+     *
+     * NEGATIVE-CACHE dei miss: un fallimento viene registrato in un
+     * marker JSON fuori dalla directory pubblica (vedi
+     * discoCoverMissPath) con un retry_after — TTL lungo (7 giorni) se
+     * il "non trovato" è CONFERMATO da tutte le fonti interrogate
+     * (CAA 404 + Deezer senza match), breve (~45 minuti) se almeno una
+     * fonte ha avuto un errore transitorio (timeout, 429, 5xx, body
+     * non-immagine). Scaduto il retry_after si riprova da soli;
+     * cancellare il marker (o ?force=1 sul proxy) forza subito.
+     *
      * Non salva MAI risposte non-immagine (pagina "Temporarily Offline"
      * di Internet Archive, body di errori 404...): un fallimento
-     * transitorio non deve avvelenare la cache — al prossimo accesso
-     * si ritenta da zero. Ritorna true se al termine il file esiste.
+     * transitorio non deve avvelenare la cache. Ritorna true se al
+     * termine il file esiste.
+     *
+     * $artistName/$albumTitle sono opzionali per retrocompatibilità:
+     * senza di essi il fallback Deezer viene saltato (outcome
+     * 'skipped') e la catena si riduce alla sola CAA, come prima.
      */
-    public function downloadDiscographyCover(string $rgMbid): bool
+    public function downloadDiscographyCover(string $rgMbid, string $artistName = '', string $albumTitle = ''): bool
     {
         $rgMbid = strtolower(trim($rgMbid));
         if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $rgMbid)) {
@@ -800,11 +808,28 @@ class ArtistMetadataService
         if (is_file($dest)) {
             return true;
         }
+
+        // Negative-cache: miss recente già registrato → nessuna chiamata.
+        // Eccezione: se il marker fu scritto SENZA poter interrogare
+        // Deezer (chiamata senza artista/titolo, deezer='skipped') e ORA
+        // i dati ci sono, si procede comunque — quel marker non copre la
+        // fonte in più che adesso possiamo consultare.
+        $miss = $this->readDiscoCoverMiss($rgMbid);
+        if ($miss !== null) {
+            $retryAfter    = strtotime((string) ($miss['retry_after'] ?? '')) ?: 0;
+            $deezerSkipped = (($miss['deezer'] ?? '') === 'skipped');
+            $canAddDeezer  = $deezerSkipped && $artistName !== '' && $albumTitle !== '';
+            if (time() < $retryAfter && !$canAddDeezer) {
+                return false;
+            }
+        }
+
         if (!is_dir($dir) && !mkdir($dir, 0755, true) && !is_dir($dir)) {
             return false;
         }
 
-        $bytes = $this->httpGetBinary(
+        // ---- 1) COVER ART ARCHIVE --------------------------------
+        $caa = $this->httpGetBinaryWithStatus(
             'https://coverartarchive.org/release-group/' . $rgMbid . '/front-250',
             'image/*'
         );
@@ -812,14 +837,208 @@ class ArtistMetadataService
         // Validazione STRETTA sui magic bytes: guessExtension() ha 'jpg'
         // come fallback e qui NON basta — una pagina HTML di errore la
         // passerebbe. Su disco finiscono solo vere immagini.
-        if (strlen($bytes) < 512 || !$this->isImageBytes($bytes)) {
-            return false;
-        }
-
         // Estensione sempre .jpg per avere una chiave file prevedibile
         // (file_exists su un solo nome): i browser riconoscono il
         // contenuto dai bytes, non dall'estensione.
-        return @file_put_contents($dest, $bytes) !== false;
+        if ($caa['status'] === 200
+            && strlen($caa['bytes']) >= 512
+            && $this->isImageBytes($caa['bytes'])) {
+            if (@file_put_contents($dest, $caa['bytes']) !== false) {
+                $this->clearDiscoCoverMiss($rgMbid);
+                return true;
+            }
+            return false; // filesystem KO: inutile insistere con Deezer
+        }
+
+        // 404 (o 400 su MBID che CAA non riconosce): miss DEFINITIVO per
+        // questa fonte — l'endpoint release-group fa redirect alla cover
+        // di una release del gruppo, quindi 404 = nessuna edizione ha
+        // artwork. Tutto il resto — status 0 (rete/DNS/TLS), 429, 5xx,
+        // oppure 200 con body non-immagine (pagina "Temporarily Offline"
+        // di Internet Archive) — è transitorio.
+        $caaOutcome = in_array($caa['status'], [400, 404], true) ? 'not_found' : 'transient';
+
+        // ---- 2) FALLBACK DEEZER ----------------------------------
+        $deezerOutcome = 'skipped';
+        if ($artistName !== '' && $albumTitle !== '') {
+            $dz            = $this->deezerAlbumCover($artistName, $albumTitle);
+            $deezerOutcome = $dz['outcome'];
+
+            if ($deezerOutcome === 'found') {
+                $bytes = $this->httpGetBinary($dz['url'], 'image/*');
+                if (strlen($bytes) >= 512 && $this->isImageBytes($bytes)) {
+                    if (@file_put_contents($dest, $bytes) !== false) {
+                        $this->clearDiscoCoverMiss($rgMbid);
+                        return true;
+                    }
+                    return false;
+                }
+                // URL trovato ma download andato male: transitorio, non
+                // "la cover non esiste".
+                $deezerOutcome = 'transient';
+            }
+        }
+
+        // ---- 3) NESSUNA COVER: registra il miss ------------------
+        $transient = ($caaOutcome === 'transient') || ($deezerOutcome === 'transient');
+        $this->writeDiscoCoverMiss($rgMbid, $caaOutcome, $deezerOutcome, $transient);
+
+        return false;
+    }
+
+    /**
+     * Cerca la cover di un album su Deezer. Due query in cascata:
+     * prima la sintassi avanzata (artist:"..." album:"..."), poi — solo
+     * se la prima non produce match — la query semplice concatenata,
+     * più permissiva coi titoli pieni di punteggiatura (apostrofi
+     * dentro le virgolette possono confondere il parser avanzato,
+     * es. "'sei na ru mo'no wa na 'i"). In ENTRAMBI i casi vale il
+     * match di uguaglianza esatta normalizzata su artista E titolo:
+     * la ricerca Deezer è fuzzy e senza questa disciplina un album di
+     * nicchia pescherebbe l'omonimo sbagliato (stessa lezione
+     * "Packaging" di deezerArtistImage). normalizeTitleForMatch toglie
+     * anche le annotazioni tra parentesi, quindi "Album (Remastered)"
+     * su Deezer matcha "Album" della discografia MusicBrainz.
+     *
+     * @return array{outcome:string,url:string}
+     *         outcome: 'found' | 'not_found' | 'transient'
+     */
+    private function deezerAlbumCover(string $artistName, string $albumTitle): array
+    {
+        $wantedArtist = $this->normalizeArtistName($artistName);
+        $wantedTitle  = $this->normalizeTitleForMatch($albumTitle);
+        if ($wantedArtist === '' || $wantedTitle === '') {
+            return ['outcome' => 'not_found', 'url' => ''];
+        }
+
+        $queries = [
+            'artist:"' . $artistName . '" album:"' . $albumTitle . '"',
+            $artistName . ' ' . $albumTitle,
+        ];
+
+        $sawTransient = false;
+
+        foreach ($queries as $q) {
+            $resp = $this->httpGetJsonWithStatus(
+                'https://api.deezer.com/search/album?q=' . rawurlencode($q)
+            );
+
+            if (!$resp['ok']) {
+                $sawTransient = true;
+                continue;
+            }
+            $data = $resp['data'];
+
+            // Deezer segnala quota/errori dentro un body JSON valido
+            // ({"error":{...}}): è un fallimento della CHIAMATA, non
+            // un "album inesistente" — non va inciso come not_found.
+            if (!empty($data['error'])) {
+                $sawTransient = true;
+                continue;
+            }
+
+            foreach (array_slice($data['data'] ?? [], 0, 10) as $al) {
+                $aName = (string) ($al['artist']['name'] ?? '');
+                $title = (string) ($al['title'] ?? '');
+                if ($aName === '' || $title === '') {
+                    continue;
+                }
+                if ($this->normalizeArtistName($aName) !== $wantedArtist) {
+                    continue;
+                }
+                if ($this->normalizeTitleForMatch($title) !== $wantedTitle) {
+                    continue;
+                }
+
+                $img = $al['cover_xl'] ?? ($al['cover_big'] ?? '');
+                if ($img !== '') {
+                    return ['outcome' => 'found', 'url' => $img];
+                }
+            }
+        }
+
+        return ['outcome' => $sawTransient ? 'transient' : 'not_found', 'url' => ''];
+    }
+
+    // ------------------------------------------------------------
+    // NEGATIVE-CACHE dei miss cover discografia (marker JSON su file)
+    // ------------------------------------------------------------
+
+    /**
+     * Path del marker di miss per un release-group. FUORI dalla
+     * directory pubblica di proposito: è stato interno dell'app, non
+     * contenuto da servire. La cartella va tenuta scrivibile dal
+     * webserver e ignorata da git (cache/ in .gitignore).
+     */
+    private function discoCoverMissPath(string $rgMbid): string
+    {
+        return BASE_PATH . '/cache/discography-cover-misses/' . $rgMbid . '.json';
+    }
+
+    private function readDiscoCoverMiss(string $rgMbid): ?array
+    {
+        $file = $this->discoCoverMissPath($rgMbid);
+        if (!is_file($file)) {
+            return null;
+        }
+        $json = json_decode((string) @file_get_contents($file), true);
+        return is_array($json) ? $json : null;
+    }
+
+    /**
+     * Best-effort: se la cartella non è creabile/scrivibile il marker
+     * semplicemente non viene scritto e si torna al comportamento
+     * storico (retry a ogni accesso) — mai un errore fatale per una
+     * cache di cortesia.
+     */
+    private function writeDiscoCoverMiss(string $rgMbid, string $caa, string $deezer, bool $transient): void
+    {
+        $file = $this->discoCoverMissPath($rgMbid);
+        $dir  = dirname($file);
+        if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
+            return;
+        }
+
+        $ttl = $transient
+            ? self::DISCO_COVER_TRANSIENT_RETRY_MINUTES * 60
+            : self::DISCO_COVER_MISS_TTL_DAYS * 86400;
+
+        @file_put_contents($file, json_encode([
+            'checked_at'  => date('c'),
+            'retry_after' => date('c', time() + $ttl),
+            'caa'         => $caa,
+            'deezer'      => $deezer,
+        ], JSON_PRETTY_PRINT));
+    }
+
+    /**
+     * Cancella il marker di miss. Pubblico: usato come "forza nuovo
+     * tentativo" dal parametro amministrativo ?force=1 dell'endpoint
+     * proxy (ArtistController::discoCover).
+     */
+    public function clearDiscoCoverMiss(string $rgMbid): void
+    {
+        $rgMbid = strtolower(trim($rgMbid));
+        $file   = $this->discoCoverMissPath($rgMbid);
+        if (is_file($file)) {
+            @unlink($file);
+        }
+    }
+
+    /**
+     * Vero se per questo release-group esiste un miss registrato ancora
+     * dentro la finestra di retry: usato dal controller per servire
+     * subito il placeholder senza nemmeno il round-trip verso il proxy.
+     */
+    public function isDiscoCoverMissActive(string $rgMbid): bool
+    {
+        $rgMbid = strtolower(trim($rgMbid));
+        $miss   = $this->readDiscoCoverMiss($rgMbid);
+        if ($miss === null) {
+            return false;
+        }
+        $retryAfter = strtotime((string) ($miss['retry_after'] ?? '')) ?: 0;
+        return time() < $retryAfter;
     }
 
     /** Vero solo se i bytes iniziano con la firma di un formato immagine noto. */
@@ -1016,17 +1235,36 @@ class ArtistMetadataService
 
         // STEP 2 MIRATO: gli album con data completa sono già ufficiali e
         // passano diretti. Solo gli AMBIGUI (data solo-anno) vengono
-        // verificati uno a uno — tipicamente pochissimi, spesso zero su
-        // artisti mainstream — controllando se hanno una release ufficiale.
-        // Così Santo Niente (album veri mal datati) resta completo e i
-        // bootleg di Alice in Chains (solo-anno, senza release ufficiali)
-        // restano esclusi, senza scansionare le migliaia di release degli
-        // artisti con cataloghi enormi.
+        // verificati con UNA scansione batch delle release ufficiali
+        // dell'artista (non una chiamata per album: i Beatles hanno ~49
+        // ambigui = ~55s di chiamate singole = timeout in produzione). La
+        // scansione ha un tetto di pagine: entro il tetto conferma/scarta
+        // con precisione; oltre (cataloghi mostruosi come Beatles con 1400+
+        // release ufficiali) gli ambigui non ancora risolti vengono TENUTI
+        // per prudenza (fail-open) — meglio qualche edizione in più che una
+        // pagina "non disponibile" per timeout. Così Santo Niente resta
+        // completo, i bootleg di Alice in Chains restano esclusi, e nessun
+        // artista fa timeout.
+        $ambiguousIds = [];
+        foreach ($candidates as $cand) {
+            if (!empty($cand['verify'])) {
+                $ambiguousIds[$cand['rgId']] = true;
+            }
+        }
+        $officialAmbiguous = $ambiguousIds
+            ? $this->confirmOfficialAmbiguous($artistIds, array_keys($ambiguousIds))
+            : ['confirmed' => [], 'capped' => false];
+        $confirmedSet = array_flip($officialAmbiguous['confirmed']);
+        $capped       = $officialAmbiguous['capped'];
+
         $out = [];
         foreach ($candidates as $cand) {
             if (!empty($cand['verify'])) {
-                if (!$this->hasOfficialRelease($cand['rgId'])) {
-                    continue; // ambiguo e senza release ufficiale → bootleg
+                // Ambiguo: tienilo se confermato ufficiale, OPPURE se la
+                // scansione è stata troncata dal tetto (esito incerto →
+                // fail-open, non si scarta con falsa certezza).
+                if (!isset($confirmedSet[$cand['rgId']]) && !$capped) {
+                    continue; // ambiguo, scansione completa, non ufficiale → bootleg
                 }
             }
             $out[] = [
@@ -1106,7 +1344,17 @@ class ArtistMetadataService
             if ($bandId === '' || $bandName === '') {
                 continue;
             }
-            if (mb_strpos(mb_strtolower($bandName), $selfNameNorm) !== false) {
+            // Entità omonima collegata: si accetta se UNO dei due nomi
+            // contiene l'altro, in QUALSIASI direzione. Necessario perché
+            // l'MBID salvato in DB può essere il solista o la band (la
+            // pagina usa l'MBID in DB, non cerca per nome): il merge deve
+            // funzionare sia da "Patti Smith" → "Patti Smith Group" sia dal
+            // Group verso il solista. I membri individuali (Lenny Kaye,
+            // ecc.) non hanno inclusione reciproca col nome dell'entità,
+            // quindi restano esclusi.
+            $bandNameNorm = mb_strtolower($bandName);
+            if (mb_strpos($bandNameNorm, $selfNameNorm) !== false
+                || mb_strpos($selfNameNorm, $bandNameNorm) !== false) {
                 $bands[] = ['id' => $bandId, 'name' => $bandName];
             }
         }
@@ -1114,25 +1362,74 @@ class ArtistMetadataService
     }
 
     /**
-     * Verifica mirata: il release-group ha almeno una release ufficiale?
-     * Una sola chiamata leggera (limit=1). Usata solo sui candidati
-     * ambigui (data solo-anno), per distinguere un album vero mal datato
-     * da un bootleg. Su errore di rete ritorna true (fail-open: meglio
-     * mostrare un album in più che perderne uno vero per un hiccup).
+     * Conferma in BATCH quali dei release-group ambigui (data solo-anno)
+     * hanno almeno una release ufficiale, con UNA scansione paginata delle
+     * release ufficiali di tutte le entità artista (non una chiamata per
+     * album: i Beatles hanno ~49 ambigui, che a chiamata singola
+     * significherebbero ~55s e un timeout in produzione).
+     *
+     * Tetto di pagine (PAGE_CAP): entro il tetto la conferma è completa;
+     * se il catalogo è così grande da superarlo (Beatles: 1400+ release
+     * ufficiali su 15 pagine), si ferma e segnala capped=true, così il
+     * chiamante TIENE gli ambigui non ancora risolti invece di scartarli
+     * con falsa certezza. Early exit appena tutti gli ambigui sono
+     * confermati. Su errore di rete: capped=true (fail-open).
+     *
+     * @param string[] $artistIds   entità da scansionare (artista + band)
+     * @param string[] $ambiguousIds release-group da confermare
+     * @return array{confirmed:string[],capped:bool}
      */
-    private function hasOfficialRelease(string $rgId): bool
+    private function confirmOfficialAmbiguous(array $artistIds, array $ambiguousIds): array
     {
-        $url = 'https://musicbrainz.org/ws/2/release'
-            . '?release-group=' . rawurlencode($rgId)
-            . '&status=official&fmt=json&limit=1';
-        $resp = $this->httpGetJsonWithStatus($url);
-        usleep(self::MB_THROTTLE_US);
-        if (!$resp['ok']) {
-            return true; // fail-open sull'incertezza di rete
-        }
-        return (int) ($resp['data']['release-count'] ?? 0) > 0;
-    }
+        $remaining = array_flip($ambiguousIds);
+        $confirmed = [];
+        $capped    = false;
+        $pageCap   = 8; // ~8 pagine * 100 release ≈ 9s max di scansione
 
+        foreach ($artistIds as $aid) {
+            if (empty($remaining)) {
+                break; // tutti confermati
+            }
+            $offset = 0;
+            $total  = 0;
+            $guard  = 0;
+            do {
+                $url = 'https://musicbrainz.org/ws/2/release'
+                    . '?artist=' . rawurlencode($aid)
+                    . '&type=album&status=official'
+                    . '&inc=release-groups'
+                    . '&fmt=json&limit=100&offset=' . $offset;
+                $resp = $this->httpGetJsonWithStatus($url);
+                usleep(self::MB_THROTTLE_US);
+                if (!$resp['ok']) {
+                    $capped = true; // rete incerta → fail-open sui rimanenti
+                    break;
+                }
+                $data     = $resp['data'];
+                $releases = $data['releases'] ?? [];
+                $total    = (int) ($data['release-count'] ?? count($releases));
+                foreach ($releases as $rel) {
+                    $rgId = $rel['release-group']['id'] ?? '';
+                    if ($rgId !== '' && isset($remaining[$rgId])) {
+                        $confirmed[] = $rgId;
+                        unset($remaining[$rgId]);
+                    }
+                }
+                $offset += 100;
+                $guard++;
+                if ($guard >= $pageCap && $offset < $total) {
+                    $capped = true; // catalogo troppo grande: stop
+                    break;
+                }
+            } while (!empty($remaining) && $offset < $total);
+
+            if ($capped) {
+                break;
+            }
+        }
+
+        return ['confirmed' => $confirmed, 'capped' => $capped];
+    }
     private function guessExtension(string $bytes): string
     {
         $head = substr($bytes, 0, 12);
@@ -1203,26 +1500,15 @@ class ArtistMetadataService
      */
     private function httpGetJsonWithStatus(string $url): array
     {
-        // Un retry singolo sui vuoti transitori (hiccup di rete o
-        // throttle momentaneo di MusicBrainz che restituisce un corpo
-        // vuoto): senza, una singola pagina fallita a metà di una
-        // scansione lunga marcava l'intera discografia come inattendibile
-        // e ne impediva il salvataggio. Il retry attende un throttle pieno
-        // prima di riprovare, nel rispetto del rate-limit MB (~1 req/s).
-        for ($attempt = 0; $attempt < 2; $attempt++) {
-            if ($attempt > 0) {
-                usleep(self::MB_THROTTLE_US);
-            }
-            $raw = $this->httpGetBinary($url, 'application/json');
-            if ($raw === '') {
-                continue;
-            }
-            $json = json_decode($raw, true);
-            if (is_array($json)) {
-                return ['ok' => true, 'data' => $json];
-            }
+        $raw = $this->httpGetBinary($url, 'application/json');
+        if ($raw === '') {
+            return ['ok' => false, 'data' => []];
         }
-        return ['ok' => false, 'data' => []];
+        $json = json_decode($raw, true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'data' => []];
+        }
+        return ['ok' => true, 'data' => $json];
     }
 
     /**
@@ -1250,5 +1536,55 @@ class ArtistMetadataService
 
         $raw = @file_get_contents($url, false, $ctx);
         return ($raw === false) ? '' : $raw;
+    }
+
+    /**
+     * Come httpGetBinary() ma restituisce anche lo status HTTP FINALE
+     * (dopo eventuali redirect): serve dove bisogna distinguere un 404
+     * definitivo ("la risorsa non esiste") da un errore transitorio
+     * (rete giù, 429, 5xx) — distinzione impossibile col solo body.
+     * status = 0 quando la richiesta non è nemmeno arrivata a una
+     * risposta HTTP (DNS, TLS, timeout di connessione).
+     *
+     * @return array{status:int,bytes:string}
+     */
+    private function httpGetBinaryWithStatus(string $url, string $accept = '*/*'): array
+    {
+        $ua = defined('APP_USER_AGENT') ? APP_USER_AGENT : 'GrizzlyMusicArchive/1.0';
+
+        $ctx = stream_context_create([
+            'http' => [
+                'method'          => 'GET',
+                'header'          => "User-Agent: {$ua}\r\nAccept: {$accept}\r\n",
+                'timeout'         => 15,
+                'follow_location' => 1,
+                'max_redirects'   => 5,
+                'ignore_errors'   => true,
+            ],
+            'ssl' => [
+                'verify_peer'      => false,
+                'verify_peer_name' => false,
+            ],
+        ]);
+
+        $raw = @file_get_contents($url, false, $ctx);
+
+        // $http_response_header accumula gli header di TUTTE le risposte
+        // attraversate nella catena di redirect (301/302/307 compresi):
+        // lo status che conta è quello dell'ULTIMA riga "HTTP/...",
+        // non della prima.
+        $status = 0;
+        if (isset($http_response_header) && is_array($http_response_header)) {
+            foreach ($http_response_header as $h) {
+                if (preg_match('~^HTTP/\S+\s+(\d{3})~', $h, $m)) {
+                    $status = (int) $m[1];
+                }
+            }
+        }
+
+        return [
+            'status' => $status,
+            'bytes'  => ($raw === false) ? '' : $raw,
+        ];
     }
 }
