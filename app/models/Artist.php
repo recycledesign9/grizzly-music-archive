@@ -339,6 +339,26 @@ class Artist {
         return (bool) $stmt->fetchColumn();
     }
 
+    // Riga di discografia (titolo + nome artista) a partire dal
+    // release-group MBID: usata dal proxy cover (disco-cover) per dare
+    // al fallback Deezer i dati di ricerca senza farli viaggiare in
+    // query string. Null se l'MBID non è in cache.
+    public function getDiscographyEntryByRg(string $rgMbid): ?array {
+        $rgMbid = trim($rgMbid);
+        if ($rgMbid === '') return null;
+
+        $stmt = $this->db->prepare("
+            SELECT d.title, ar.name AS artist_name
+            FROM artist_discography d
+            JOIN artists ar ON d.artist_id = ar.id
+            WHERE d.mb_release_group_id = :rg
+            LIMIT 1
+        ");
+        $stmt->execute([':rg' => $rgMbid]);
+        $row = $stmt->fetch();
+        return $row ?: null;
+    }
+
     // Salva (sostituisce) la discografia ufficiale dell'artista e marca
     // tentativo/stato/versione. Idempotente: ripulisce prima di inserire.
     //

@@ -255,10 +255,14 @@ class ArtistController
   // ENDPOINT: cover della discografia (proxy lazy con cache su disco).
   // GET /index.php?route=artists/disco-cover&rg={release-group MBID}
   // File già su disco → redirect al file statico. Assente → lo scarica
-  // da Cover Art Archive, lo salva, poi redirect. CAA giù o cover
-  // inesistente → 404 secco: l'onerror dell'<img> nella view mostra il
-  // placeholder e NIENTE viene salvato (un errore transitorio non deve
-  // avvelenare la cache — si ritenterà alla prossima visita).
+  // (Cover Art Archive, poi fallback Deezer — vedi
+  // ArtistMetadataService::downloadDiscographyCover), lo salva, poi
+  // redirect. Nessuna cover → 404 secco: l'onerror dell'<img> nella
+  // view mostra il placeholder e NIENTE di non-immagine viene salvato.
+  // I miss vengono registrati in negative-cache dal service (7 giorni
+  // se confermati, ~45 min se transitori): entro quella finestra il
+  // service risponde subito senza chiamate esterne. ?force=1 cancella
+  // il marker e forza un nuovo tentativo immediato.
   // L'MBID viaggia come query param perché il router castà a int il
   // terzo segmento della route.
   // ----------------------------------------------------------
@@ -281,7 +285,23 @@ class ArtistController
     if (!is_file($file)) {
       require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
       $service = new ArtistMetadataService();
-      $service->downloadDiscographyCover($rg);
+
+      // Parametro amministrativo: ?force=1 cancella l'eventuale marker
+      // di miss e forza un nuovo tentativo immediato su tutte le fonti.
+      if (!empty($_GET['force'])) {
+        $service->clearDiscoCoverMiss($rg);
+      }
+
+      // Artista + titolo dal DB per il fallback Deezer: la riga di
+      // discografia esiste sempre quando questo endpoint arriva dalla
+      // view; se per qualche motivo manca, il service salta
+      // semplicemente Deezer e prova solo CAA, come prima.
+      $entry = $this->artistModel->getDiscographyEntryByRg($rg);
+      $service->downloadDiscographyCover(
+        $rg,
+        (string) ($entry['artist_name'] ?? ''),
+        (string) ($entry['title'] ?? '')
+      );
     }
 
     if (is_file($file)) {
@@ -296,10 +316,15 @@ class ArtistController
   /**
    * Aggiunge a ogni voce di discografia l'URL cover migliore:
    * file locale già scaricato → URL statico (zero passaggi PHP),
+   * miss recente in negative-cache → stringa vuota (placeholder
+   * immediato nella view, senza round-trip verso il proxy),
    * altrimenti l'endpoint proxy che la scaricherà al primo accesso.
    */
   private function mapDiscographyCovers(array $items): array
   {
+    require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
+    $service = new ArtistMetadataService();
+
     foreach ($items as &$it) {
       $rg = strtolower((string) ($it['mb_release_group_id'] ?? ''));
       if ($rg === '') {
@@ -308,6 +333,13 @@ class ArtistController
       }
       if (is_file(UPLOAD_PATH . '/disco/' . $rg . '.jpg')) {
         $it['cover'] = BASE_URL . '/public/uploads/disco/' . $rg . '.jpg';
+      } elseif ($service->isDiscoCoverMissActive($rg)) {
+        // Miss recente già confermato: la stringa vuota dice
+        // ESPLICITAMENTE alla view "nessuna cover disponibile" —
+        // placeholder subito, niente fallback CAA dal browser
+        // (rifarebbe a ogni pageview la stessa chiamata che il
+        // server ha già visto fallire).
+        $it['cover'] = '';
       } else {
         $it['cover'] = BASE_URL . '/index.php?route=artists/disco-cover&rg=' . $rg;
       }
