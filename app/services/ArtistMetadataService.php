@@ -43,7 +43,9 @@ class ArtistMetadataService
      * ri-martellare bio/immagini di tutti gli artisti per un fix che le
      * riguarda solo di striscio).
      */
-    public const BIO_LOGIC_VERSION = 1;
+    // v2: scarta le schede Wikipedia di album/singoli pescate per nome
+    // quando il nome artista coincide col titolo di un'opera (Modern Nature).
+    public const BIO_LOGIC_VERSION = 2;
 
     /**
      * v2: fix del 2026-07 — la discografia veniva letta da /release
@@ -450,8 +452,15 @@ class ArtistMetadataService
         // soggetto musicale, altrimenti viene scartato — meglio
         // nessuna bio che una sbagliata. Le pagine raggiunte via
         // sitelink Wikidata sono match certi e passano senza esame.
-        if (!$fromSitelink && !$this->looksLikeMusicBio($extract)) {
-            return $empty;
+        if (!$fromSitelink) {
+            // Deve parlare di musica...
+            if (!$this->looksLikeMusicBio($extract)) {
+                return $empty;
+            }
+            // ...ed essere un artista, non un album/singolo/canzone.
+            if ($this->looksLikeReleaseNotArtist($extract)) {
+                return $empty;
+            }
         }
 
         $image = $page['original']['source']
@@ -502,6 +511,33 @@ class ArtistMetadataService
 
         foreach ($keywords as $kw) {
             if (mb_strpos($window, $kw) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // L'estratto apre descrivendo un'opera invece di un artista?
+    // ("X è il dodicesimo album in studio...", "X is the debut single by...").
+    // Finestra stretta sulle prime frasi, dove Wikipedia dichiara il tipo.
+    private function looksLikeReleaseNotArtist(string $extract): bool
+    {
+        $window = mb_strtolower(mb_substr($extract, 0, 350));
+
+        $patterns = [
+            '/\bè\s+(?:un|uno|il|lo|la|l\'|il primo|il secondo|il terzo|il \w+esimo)?\s*'
+            . '(?:album|ep|extended play|singolo|brano|canzone|traccia|raccolta|'
+            . 'compilation|colonna sonora|mixtape|demo|disco)\b/u',
+            '/\bis\s+(?:a|an|the|the \w+|their|his|her)?\s*'
+            . '(?:studio\s+|debut\s+|second\s+|third\s+|fourth\s+|fifth\s+|live\s+|'
+            . 'compilation\s+|greatest\s+hits\s+)*'
+            . '(?:album|ep|extended play|single|song|track|mixtape|soundtrack|'
+            . 'record|demo|compilation)\b/u',
+        ];
+
+        foreach ($patterns as $re) {
+            if (preg_match($re, $window)) {
                 return true;
             }
         }
