@@ -1335,6 +1335,18 @@ class ArtistMetadataService
             return $ya - $yb;
         });
 
+        // Guardia anti-vuoto-transitorio: un artista con MBID valido che
+        // produce zero album è quasi sempre un fallimento mascherato
+        // (MusicBrainz risponde 200 con payload vuoto sotto throttling,
+        // IP condiviso), non un artista senza discografia. Restituendo
+        // ok=false il controller marca 'error' e needsDiscographyRefetch()
+        // ritenta dopo il cooldown, invece di congelare il vuoto come 'ok'
+        // per tutto il TTL. Per un artista davvero senza release il costo
+        // è solo un ritentativo alla visita successiva.
+        if (empty($out)) {
+            $fetchOk = false;
+        }
+
         // ok riflette il successo della scansione release-group. Se una
         // pagina è fallita ($fetchOk=false), il controller marca 'error'
         // e la guardia anti-svuotamento NON sovrascrive una discografia
