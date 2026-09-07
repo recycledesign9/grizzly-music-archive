@@ -426,6 +426,17 @@ Grizzly Music Archive is designed to work as a clean desktop archive and as a re
 
 ---
 
+## 💬 Community & Support
+
+Report bugs, suggest features and help shape the future of Grizzly Music Archive.
+
+- 🐛 [GitHub Issues](https://github.com/recycledesign9/grizzly-music-archive/issues) — report bugs and request features
+- ☕ [Support Grizzly on Ko-fi](https://ko-fi.com/recycledesign) — help fund ongoing development
+
+Contributions go toward building new features, improving existing ones, fixing bugs and making the project better with every release.
+
+---
+
 ## 📜 License
 
 MIT — see [LICENSE](LICENSE) for details.
