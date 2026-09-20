@@ -430,6 +430,33 @@ class AlbumMetadataService
             }
         }
 
+        // FIX (In Rainbows): esiste almeno un candidato a DISCO SINGOLO
+        // che supera gli scarti hard (artista, tipo release, non-giapponese)?
+        // Se sì, le release multi-disco vanno ESCLUSE, non solo penalizzate:
+        // la penalità -25/disco veniva sovrastata dal bonus territoriale +80,
+        // facendo vincere la discbox 2-CD (In Rainbows + Disk 2 = 18 tracce,
+        // etichetta _Xurbia_Xendless, cover del Disk 2). I doppi album veri
+        // (Daydream Nation) NON hanno un candidato a disco singolo, quindi per
+        // loro questa regola non scatta e continuano a funzionare.
+        $singleDiscExists = false;
+        foreach ($releases as $rel) {
+            if (empty($rel['title'])) continue;
+            if ($this->isJapaneseMusicBrainzRelease($rel)) continue;
+            if ($artist !== '' && !$this->artistCreditMatches($rel, $artist)) continue;
+
+            $statusLow = strtolower(trim($rel['status'] ?? ''));
+            if ($statusLow !== '' && $statusLow !== 'official') continue;
+
+            $rg  = $rel['release-group'] ?? [];
+            $pt  = strtolower($rg['primary-type'] ?? '');
+            $st  = array_map('strtolower', $rg['secondary-types'] ?? []);
+            if ($pt !== '' && $pt !== 'album' && $pt !== 'ep') continue;
+            if (!empty($st)) continue;
+
+            $mc = (int)($rel['media-count'] ?? count($rel['media'] ?? []) ?: 1);
+            if ($mc <= 1) { $singleDiscExists = true; break; }
+        }
+
         $best      = null;
         $bestScore = -9999;
 
@@ -472,6 +499,28 @@ class AlbumMetadataService
                 continue;
             }
             if (!empty($secondaryTypes)) {
+                continue;
+            }
+
+            // SCARTO NON-OFFICIAL: la ricerca In Rainbows include una
+            // release "Promotion" a 18 tracce (US 2008) che non deve mai
+            // vincere. Scartiamo promo/bootleg/withdrawn/pseudo-release in
+            // modo rigido. Le release SENZA campo status esplicito NON
+            // vengono toccate: alcune release legittime non lo espongono e
+            // scartarle reintrodurrebbe buchi.
+            $statusLow = strtolower(trim($rel['status'] ?? ''));
+            if ($statusLow !== '' && $statusLow !== 'official') {
+                continue;
+            }
+
+            // SCARTO MULTI-DISCO: se esiste un'edizione a disco singolo
+            // valida, questa multi-disco è quasi certamente una discbox /
+            // edizione speciale (bonus disc). La saltiamo del tutto invece
+            // di penalizzarla, perché la penalità -25/disco non basta a
+            // battere il bonus territoriale. Se NON esistono candidati a
+            // disco singolo (doppio album originale), la escludiamo NON.
+            $mediaCountHard = (int)($rel['media-count'] ?? count($rel['media'] ?? []) ?: 1);
+            if ($singleDiscExists && $mediaCountHard > 1) {
                 continue;
             }
 

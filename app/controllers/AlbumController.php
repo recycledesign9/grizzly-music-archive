@@ -77,6 +77,14 @@ class AlbumController
         $this->apiDescription();
         break;
 
+      case 'api-recommendations':
+        $this->apiRecommendations($id);
+        break;
+
+      case 'confirm-studio':
+        $this->confirmStudio();
+        break;
+
       default:
         $this->list();
         break;
@@ -1357,7 +1365,18 @@ class AlbumController
       return false;
     }
 
-    if (stripos($extract, $artist) === false) {
+    // Il nome artista deve comparire nell'estratto, MA con tolleranza
+    // sull'articolo "The" iniziale: le due Wikipedia lo trattano
+    // diversamente (EN tiene "The Smashing Pumpkins", IT scrive "degli
+    // Smashing Pumpkins" senza articolo). Un confronto esatto scarterebbe
+    // la pagina italiana VERA quando in archivio l'artista è salvato con
+    // "The" (forma ufficiale MusicBrainz). Proviamo il nome così com'è e,
+    // se non c'è, anche senza "The" iniziale.
+    $artistNoThe = preg_replace('/^the\s+/i', '', trim($artist));
+    $artistFound = stripos($extract, $artist) !== false
+        || ($artistNoThe !== '' && $artistNoThe !== $artist
+            && stripos($extract, $artistNoThe) !== false);
+    if (!$artistFound) {
       return false;
     }
 
@@ -1374,7 +1393,22 @@ class AlbumController
     // o dal cross-lingua: meglio nessuna descrizione che quella di un
     // altro artista.
     if ($album !== '' && strcasecmp(trim($album), trim($artist)) === 0) {
-      if (substr_count($extractLower, strtolower($artist)) < 2) {
+      // Album eponimo (titolo = nome band). Serve distinguere l'album VERO
+      // dall'opera omonima di un ALTRO artista. Due segnali sufficienti:
+      //  (a) il nome band compare ALMENO DUE volte (titolo + attribuzione:
+      //      "Garbage is the debut album by ... Garbage") — pattern inglese;
+      //  (b) OPPURE compare una volta + la parola "omonimo/omonima": è il
+      //      modo in cui l'ITALIANO evita di ripetere il nome ("Garbage è
+      //      il primo album del gruppo musicale statunitense OMONIMO").
+      //      Senza (b) tutte le pagine-album eponime italiane fallivano e
+      //      ripiegavano sull'inglese.
+      $needle = (stripos($extract, $artist) !== false)
+          ? strtolower($artist)
+          : strtolower($artistNoThe);
+      $nameCount = ($needle !== '') ? substr_count($extractLower, $needle) : 0;
+      $hasOmonimo = (stripos($extract, 'omonim') !== false); // omonimo/omonima/omonime
+
+      if ($nameCount < 2 && !($nameCount >= 1 && $hasOmonimo)) {
         return false;
       }
     }
@@ -1635,6 +1669,298 @@ class AlbumController
     $out = ['description' => null, 'lang' => $lang];
     if ($debug) $out['debug'] = $debugLog;
     return $out;
+  }
+
+
+  // ----------------------------------------------------------
+  // GET /albums/api-recommendations/{id}
+  //
+  // Last.fm artist.getSimilar -> artisti affini
+  // -> incrocio con gli album già presenti in Grizzly.
+  // ----------------------------------------------------------
+  private function apiRecommendations(?int $id): void
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    // Endpoint con I/O esterno: rilascia il lock di sessione.
+    if (session_status() === PHP_SESSION_ACTIVE) {
+      session_write_close();
+    }
+
+    try {
+      if (!$id) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Album non valido']);
+        exit;
+      }
+
+      $album = $this->albumModel->getById($id);
+
+      if (!$album) {
+        http_response_code(404);
+        echo json_encode(['error' => 'Album non trovato']);
+        exit;
+      }
+
+      // CACHE DI PRIMO LIVELLO: il payload completo dei consigli per questo
+      // album. Le sotto-cache (track.getSimilar, track.getInfo, ecc.) non
+      // bastano — l'orchestrazione fa comunque 5-7s a ogni richiesta, che
+      // superano il timeout JS e fanno "sparire/ricaricare" il box. Qui
+      // serviamo l'intero risultato già montato: 2a visita = millisecondi.
+      // Il debug bypassa la cache (deve sempre rieseguire per diagnosticare).
+      $debugMode = (isset($_GET['debug']) && $_GET['debug'] === '1'); file_put_contents('/tmp/rec_timing.log', 'pre-cache: '.microtime(true)."\n", FILE_APPEND);
+      $recCacheKey = 'recs:v1:' . (int)$id;
+
+      if (!$debugMode) {
+        $cachedRecs = $this->getRecCache($recCacheKey);
+        if (is_array($cachedRecs)) {
+          echo json_encode($cachedRecs, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+          exit;
+        }
+      }
+
+      require_once BASE_PATH . '/app/services/AlbumRecommendationService.php';
+
+      $service = new AlbumRecommendationService();
+
+      $similarArtists = $service->getSimilarArtists(
+        (string)($album['artist_name'] ?? '')
+      );
+
+      // Tag specifici del disco corrente.
+      $albumTags = $service->getAlbumTags(
+        (string)($album['artist_name'] ?? ''),
+        (string)($album['title'] ?? '')
+      );
+
+      // Il genere catalogato in Grizzly è un segnale locale affidabile:
+      // lo mettiamo davanti ai tag Last.fm senza duplicarlo.
+      if (!empty($album['genre_name'])) {
+        array_unshift($albumTags, (string)$album['genre_name']);
+      }
+      $albumTags = array_values(array_unique(array_filter(array_map('trim', $albumTags))));
+
+      // Segnale realmente album-specifico: due tracce del disco corrente.
+      $sourceTracks = $this->trackModel->getByAlbum((int)$album['id']);
+      $sourceTrackTitles = [];
+
+      foreach ($sourceTracks as $sourceTrack) {
+        $trackTitle = trim((string)($sourceTrack['title'] ?? ''));
+        if ($trackTitle !== '') {
+          $sourceTrackTitles[] = $trackTitle;
+        }
+      }
+
+      $trackArtistScores = $service->getTrackBasedArtistScores(
+        (string)($album['artist_name'] ?? ''),
+        $sourceTrackTitles,
+        3
+      );
+
+      $rankedSimilarArtists = $service->rankSimilarArtistsForAlbum(
+        $similarArtists,
+        $trackArtistScores
+      );
+
+      $items = $this->albumModel->getRecommendations(
+        $rankedSimilarArtists,
+        (int)$album['id'],
+        (int)$album['artist_id'],
+        !empty($album['genre_id']) ? (int)$album['genre_id'] : null,
+        !empty($album['year']) ? (int)$album['year'] : null,
+        4,
+        $albumTags
+      );
+
+      $payload = [];
+
+      foreach ($items as $item) {
+        if (!empty($item['cover_local'])) {
+          $cover = BASE_URL . '/public/uploads/' . ltrim((string)$item['cover_local'], '/');
+        } elseif (!empty($item['cover_url'])) {
+          $cover = (string)$item['cover_url'];
+        } else {
+          $cover = BASE_URL . '/public/img/placeholder.png';
+        }
+
+        $payload[] = [
+          'id'          => (int)$item['id'],
+          'title'       => (string)$item['title'],
+          'artist_id'   => (int)$item['artist_id'],
+          'artist_name' => (string)$item['artist_name'],
+          'year'        => !empty($item['year']) ? (int)$item['year'] : null,
+          'cover'       => $cover,
+          'url'         => BASE_URL . '/index.php?route=albums/detail/' . (int)$item['id'],
+          'basis'       => (string)($item['_basis'] ?? 'genre'),
+        ];
+      }
+
+      // ---- Sezione SCOPERTA: simili esterni (non in archivio). ----
+      // Riempie il blocco quando la collezione ha poche o zero
+      // sovrapposizioni interne (caso tipico dei generi di nicchia:
+      // es. un solo album "Garage Rock" in tutto l'archivio). Riusa i
+      // simili gia' scaricati sopra: nessuna seconda chiamata getsimilar.
+      $suggestions = [];
+
+      // Nomi gia' mostrati dalla sezione "in archivio": vanno esclusi
+      // dalla scoperta per non duplicare lo stesso artista.
+      $ownNames = [];
+      foreach ($payload as $p) {
+        $ownNames[] = (string)$p['artist_name'];
+      }
+
+
+      // Sorgente primaria: album reali dei brani simili alle tracce del disco.
+      $albumCandidates = $service->getTrackBasedAlbumCandidates(
+        (string)($album['artist_name'] ?? ''),
+        $sourceTrackTitles,
+        $rankedSimilarArtists,
+        30
+      );
+
+      $ownedAlbums = $this->albumModel->getOwnedAlbumPairs();
+      $external = $service->filterExternalAlbumCandidates($albumCandidates,$ownedAlbums,5,$ownNames);
+
+      // Fallback solo se i dati track-level non bastano.
+      if (count($external) < 5) {
+        $skipNames=$ownNames;
+        foreach ($external as $row) $skipNames[]=(string)($row['name']??'');
+        $fallbackExternal=$service->getExternalSuggestions(
+          $rankedSimilarArtists,$skipNames,(string)($album['artist_name']??''),(string)($album['title']??''),5
+        );
+        $fallbackExternal=$service->filterExternalAlbumCandidates(
+          $fallbackExternal,$ownedAlbums,5-count($external),$skipNames
+        );
+        foreach ($fallbackExternal as $row) $external[]=$row;
+      }
+
+      foreach ($external as $ex) {
+        $suggestions[] = [
+          'name'  => (string)$ex['name'],
+          'album' => (string)$ex['album'],
+          'cover' => (string)$ex['cover'], // puo' essere '' → placeholder lato JS
+        ];
+      }
+
+      // Diagnostica opzionale: non cambia la risposta normale.
+      // Aggiungi &debug=1 all'endpoint per vedere quali segnali hanno
+      // differenziato questo album dagli altri dello stesso artista.
+      $debugPayload = null;
+      if (isset($_GET['debug']) && $_GET['debug'] === '1') {
+        $debugPayload = [
+          'album_tags' => $albumTags,
+          'source_tracks' => $sourceTrackTitles,
+          'track_artist_scores' => array_slice($trackArtistScores, 0, 12, true),
+          'ranked_similar_artists' => array_slice($rankedSimilarArtists, 0, 12),
+          'album_candidates' => array_slice($albumCandidates, 0, 12),
+          'album_candidate_source' => 'track.getSimilar -> track.getInfo',
+          'external_album_policy' => 'studio only: MusicBrainz primary-type Album, no secondary-types',
+        ];
+      }
+
+      $responsePayload = array_filter([
+        'recommendations' => $payload,
+        'suggestions'     => $suggestions,
+        'debug'           => $debugPayload,
+      ], function ($value, $key) {
+        return $key !== 'debug' || $value !== null;
+      }, ARRAY_FILTER_USE_BOTH);
+
+      // Cacha il risultato montato per 30 giorni, ma SOLO se non è in debug
+      // e se c'è davvero qualcosa da mostrare: non congeliamo un vuoto
+      // (buco transitorio di Last.fm → al prossimo giro riprova). Il campo
+      // debug non viene mai cachato.
+      if (!$debugMode && (!empty($payload) || !empty($suggestions))) {
+        $toCache = $responsePayload;
+        unset($toCache['debug']);
+        $this->setRecCache($recCacheKey, $toCache, 60 * 60 * 24 * 30);
+      }
+
+      echo json_encode($responsePayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    } catch (Throwable $e) {
+      http_response_code(500);
+
+      echo json_encode([
+        'error' => (defined('DEBUG') && DEBUG)
+          ? $e->getMessage()
+          : 'Errore durante il recupero dei suggerimenti',
+      ]);
+    }
+
+    exit;
+  }
+
+  // Cache del payload consigli, cartella dedicata cache/recommendations/
+  // (separata da quella wiki così si può svuotare indipendentemente).
+  private function recCacheFile(string $key): string
+  {
+    $dir = BASE_PATH . '/cache/recommendations';
+    if (!is_dir($dir)) {
+      @mkdir($dir, 0775, true);
+    }
+    return $dir . '/' . sha1($key) . '.json';
+  }
+
+  private function getRecCache(string $key): ?array
+  {
+    $file = $this->recCacheFile($key);
+    if (!is_file($file)) {
+      return null;
+    }
+    $raw = @file_get_contents($file);
+    $data = $raw ? json_decode($raw, true) : null;
+    if (!is_array($data) || !isset($data['_expires'], $data['_payload'])) {
+      return null;
+    }
+    if (time() > (int)$data['_expires']) {
+      @unlink($file);
+      return null;
+    }
+    return is_array($data['_payload']) ? $data['_payload'] : null;
+  }
+
+  private function setRecCache(string $key, array $payload, int $ttlSeconds): void
+  {
+    $file = $this->recCacheFile($key);
+    @file_put_contents(
+      $file,
+      json_encode(['_expires' => time() + $ttlSeconds, '_payload' => $payload],
+                  JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+      LOCK_EX
+    );
+  }
+
+  // ----------------------------------------------------------
+  // ENDPOINT AJAX: confalida in background gli studio-album esterni.
+  // GET /index.php?route=albums/confirm-studio
+  //
+  // Elabora la coda MusicBrainz creata da keepConfirmedStudioAlbums:
+  // rispetta il rate-limit (~1 req/s), quindi NON va nel percorso della
+  // risposta principale. Il JS della scheda lo chiama DOPO aver mostrato
+  // i consigli, così il primo caricamento resta veloce e i falsi positivi
+  // vengono filtrati dalla visita successiva. Ignora l'output senza
+  // problemi: è puramente un warm-up della cache.
+  // ----------------------------------------------------------
+  private function confirmStudio(): void
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    // Endpoint con I/O esterno lento (MusicBrainz): rilascia il lock.
+    if (session_status() === PHP_SESSION_ACTIVE) {
+      session_write_close();
+    }
+
+    try {
+      require_once BASE_PATH . '/app/services/AlbumRecommendationService.php';
+      $service = new AlbumRecommendationService();
+
+      $processed = $service->confirmScheduledStudioAlbums(10);
+
+      echo json_encode(['ok' => true, 'processed' => $processed]);
+    } catch (Throwable $e) {
+      echo json_encode(['ok' => false, 'error' => (defined('DEBUG') && DEBUG) ? $e->getMessage() : 'err']);
+    }
+    exit;
   }
 
   private function apiCover(): void

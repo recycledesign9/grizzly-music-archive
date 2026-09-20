@@ -253,6 +253,9 @@ class ArtistMetadataService
             . '?query=' . urlencode('artist:"' . $name . '"')
             . '&fmt=json&limit=5';
 
+        // Il retry sui 503 transitori è centralizzato in
+        // httpGetJsonWithStatus(): un singolo throttling di MusicBrainz
+        // non fa più fallire la risoluzione (bug Supergrass/Pulp).
         $resp = $this->httpGetJsonWithStatus($url);
         usleep(self::MB_THROTTLE_US);
 
@@ -1117,6 +1120,39 @@ class ArtistMetadataService
      * @return array[] ['title' => string, 'year' => ?int,
      *                  'mb_release_group_id' => string] ordinato per anno.
      */
+    /**
+     * Marcatori nel titolo che indicano un release NON-studio (live,
+     * bootleg, rough mix, demo, raccolte, remix). Scarta i release-group
+     * che MusicBrainz classifica male (Album senza secondary-type) ma dal
+     * titolo inequivocabile. NON include marcatori-edizione
+     * (deluxe/remaster/anniversary/edition/ep): a livello di release-group
+     * il titolo è di norma pulito, includerli scarterebbe album veri.
+     */
+    private function isNonStudioDiscographyTitle(string $title): bool
+    {
+        $t = mb_strtolower(trim($title), 'UTF-8');
+        $t = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $t);
+        $t = ' ' . preg_replace('/\s+/u', ' ', trim($t)) . ' ';
+
+        $markers = [
+            'live', 'dal vivo', 'unplugged', 'in concert',
+            'rough mix', 'rough mixes', 'demo', 'demos', 'bootleg',
+            'rehearsal', 'rehearsals',
+            'greatest hits', 'best of', 'the best',
+            'anthology', 'antologia', 'raccolta', 'compilation',
+            'rarities', 'b sides', 'outtakes',
+            'remix', 'remixes', 'remixed', 'soundtrack', 'colonna sonora',
+            'tribute', 'karaoke', 'megamix', 'mixtape',
+        ];
+
+        foreach ($markers as $m) {
+            if (strpos($t, ' ' . $m . ' ') !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public function fetchDiscography(string $mbArtistId): array
     {
         $mbArtistId = trim($mbArtistId);
@@ -1195,6 +1231,19 @@ class ArtistMetadataService
                 $rgId  = $rg['id'] ?? '';
                 $title = trim($rg['title'] ?? '');
                 if ($rgId === '' || $title === '') {
+                    continue;
+                }
+
+                // FILTRO-TITOLO NON-STUDIO: MusicBrainz a volte classifica
+                // live/bootleg/rough-mix come "Album senza secondary-type"
+                // (il filtro primary/secondary sopra non li prende) e con
+                // data completa (quindi passerebbero come "studio certo").
+                // Questi marcatori nel titolo sono un segnale forte: si
+                // scarta qui, prima di ogni altra logica. Precisione prima
+                // di completezza — meglio perdere un album dal titolo
+                // sfortunato che mostrare un bootleg in una discografia che
+                // deve essere attendibile al 100%.
+                if ($this->isNonStudioDiscographyTitle($title)) {
                     continue;
                 }
 
@@ -1294,13 +1343,20 @@ class ArtistMetadataService
         $capped       = $officialAmbiguous['capped'];
 
         $out = [];
+        $ambiguousDropped = false;
         foreach ($candidates as $cand) {
             if (!empty($cand['verify'])) {
-                // Ambiguo: tienilo se confermato ufficiale, OPPURE se la
-                // scansione è stata troncata dal tetto (esito incerto →
-                // fail-open, non si scarta con falsa certezza).
-                if (!isset($confirmedSet[$cand['rgId']]) && !$capped) {
-                    continue; // ambiguo, scansione completa, non ufficiale → bootleg
+                // Ambiguo (data solo-anno): tenuto SOLO se CONFERMATO
+                // ufficiale. Niente più fail-open che teneva i non-confermati
+                // a scansione troncata (era la causa dei bootleg/live). Un
+                // non-confermato non si mostra mai.
+                if (!isset($confirmedSet[$cand['rgId']])) {
+                    // Non confermato per scansione troncata (capped): non è
+                    // un "no" certo → marchiamo parziale, il retry riprova.
+                    if ($capped) {
+                        $ambiguousDropped = true;
+                    }
+                    continue;
                 }
             }
             $out[] = [
@@ -1343,15 +1399,39 @@ class ArtistMetadataService
         // ritenta dopo il cooldown, invece di congelare il vuoto come 'ok'
         // per tutto il TTL. Per un artista davvero senza release il costo
         // è solo un ritentativo alla visita successiva.
+        // Tre esiti distinti:
+        //  - $out VUOTO                → fallimento vero: ok=false. Il
+        //    controller marca 'error', si ritenta dopo il cooldown.
+        //  - $out PIENO + scan riuscita → successo completo: ok=true,
+        //    partial=false. Discografia definitiva, TTL lungo.
+        //  - $out PIENO + una pagina fallita ($fetchOk già false per il
+        //    break su HTTP 0/5xx) → PARZIALE: ok=true, partial=true. Non
+        //    buttiamo via gli album già raccolti (per i cataloghi grossi
+        //    come i Pumpkins le prime pagine bastano per i dischi
+        //    principali); li salviamo e ricompletiamo al giro dopo con un
+        //    cooldown breve. È il fix al bug "una pagina cade → discografia
+        //    vuota → 'error'".
+        $partial = false;
+
         if (empty($out)) {
-            $fetchOk = false;
+            // Nessun album raccolto: fallimento (transitorio o artista
+            // davvero senza release). ok=false → retry.
+            $ok = false;
+        } elseif (!$fetchOk || $ambiguousDropped) {
+            // Parziale se: scansione release-group interrotta ($fetchOk=false),
+            // OPPURE ambigui scartati perché la verifica era troncata
+            // ($ambiguousDropped). Ciò che mostriamo è CORRETTO (solo studio
+            // confermati + data completa) ma può essere INCOMPLETO: il retry
+            // breve riproverà a confermare gli ambigui rimasti fuori, senza
+            // mai mostrare un non-confermato nel frattempo.
+            $ok      = true;
+            $partial = true;
+        } else {
+            // Scansione completa e con risultati.
+            $ok = true;
         }
 
-        // ok riflette il successo della scansione release-group. Se una
-        // pagina è fallita ($fetchOk=false), il controller marca 'error'
-        // e la guardia anti-svuotamento NON sovrascrive una discografia
-        // buona con una lista parziale, ritentando dopo il cooldown.
-        return ['ok' => $fetchOk, 'items' => $out];
+        return ['ok' => $ok, 'partial' => $partial, 'items' => $out];
     }
 
     /**
@@ -1548,7 +1628,61 @@ class ArtistMetadataService
      */
     private function httpGetJsonWithStatus(string $url): array
     {
-        $raw = $this->httpGetBinary($url, 'application/json');
+        // Guarda lo STATUS HTTP, non solo il body. Senza questo, un 503 di
+        // MusicBrainz (throttling: risponde con un JSON d'errore, body NON
+        // vuoto e decodificabile) verrebbe scambiato per un successo con
+        // lista vuota — rompendo il fail-open dei chiamanti (la discografia
+        // scartava gli ambigui e si svuotava, marcando 'error' un artista
+        // valido). Ora un 429/5xx/timeout è ok=false: il chiamante ritenta
+        // dopo il cooldown invece di congelare un vuoto.
+        //
+        // RETRY CENTRALIZZATO sui 503/429/timeout: MusicBrainz è spesso in
+        // throttling e risponde a intermittenza (due chiamate identiche a
+        // secondi di distanza: una 503, una 200). Senza retry, un singolo
+        // intoppo in mezzo al recupero discografia (che fa più chiamate:
+        // release-group paginati, verifica ambigui, linked bands) faceva
+        // uscire tutto con ok=false → disco_status=error → discografia
+        // vuota, costringendo a un refetch manuale. Fino a 3 tentativi con
+        // pausa crescente tra l'uno e l'altro; ci si ferma appena riesce.
+        // Vale per OGNI chiamata MusicBrainz che passa di qui (ricerca
+        // artista, discografia, conferma ufficiali, linked bands).
+        $res    = ['status' => 0, 'bytes' => ''];
+        $status = 0;
+        $raw    = '';
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            $res    = $this->httpGetBinaryWithStatus($url, 'application/json');
+            $status = (int) $res['status'];
+            $raw    = (string) $res['bytes'];
+
+            // Transitori (503/429/timeout/DNS): riprova, se restano tentativi.
+            $transient = ($status === 0 || $status === 429 || $status >= 500);
+
+            // 200 ma con oggetto errore MusicBrainz ({"error":"...busy..."}):
+            // anche questo è transitorio, va ritentato come un 503.
+            if (!$transient && $status === 200 && $raw !== '') {
+                $peek = json_decode($raw, true);
+                if (is_array($peek) && isset($peek['error'])) {
+                    $transient = true;
+                }
+            }
+
+            if (!$transient) {
+                break; // risposta definitiva (buona o errore non-transitorio)
+            }
+            if ($attempt < 3) {
+                // Pausa crescente (~1.1s, 2.2s) prima del prossimo tentativo,
+                // oltre al throttle già applicato dai chiamanti.
+                usleep((int) (self::MB_THROTTLE_US * $attempt));
+            }
+        }
+
+        // status 0 = richiesta mai arrivata a risposta (DNS/TLS/timeout).
+        // 429 = rate-limit. 5xx = errore server. Tutti transitori.
+        if ($status === 0 || $status === 429 || $status >= 500) {
+            return ['ok' => false, 'data' => []];
+        }
+
+        // Body vuoto o non-JSON: trattalo come fallimento (non "vuoto ok").
         if ($raw === '') {
             return ['ok' => false, 'data' => []];
         }
@@ -1556,6 +1690,13 @@ class ArtistMetadataService
         if (!is_array($json)) {
             return ['ok' => false, 'data' => []];
         }
+
+        // MusicBrainz può rispondere 200 ma con un oggetto errore
+        // ({"error":"..."}): anche questo è un fallimento, non dati vuoti.
+        if (isset($json['error'])) {
+            return ['ok' => false, 'data' => []];
+        }
+
         return ['ok' => true, 'data' => $json];
     }
 

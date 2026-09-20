@@ -250,6 +250,9 @@ const Player = (function () {
     if (typeof window.__syncPlaylistListUI === 'function') {
       window.__syncPlaylistListUI();
     }
+    // Notifica il cambio di stato play/pausa (usato dal pulsante hero
+    // "Riproduci album" per i suoi tre stati). Riusa l'evento esistente.
+    notifyChange();
   }
   // Carica tracce da album o playlist e avvia riproduzione
   function load(albumData, startIndex) {
@@ -508,6 +511,17 @@ const Player = (function () {
     currentSrc: () => audio.src,
     currentIndex: () => cursor,
     currentTrackId: () => (playlist[cursor] ? playlist[cursor].id : null),
+    // Stato play/pausa e traccia corrente: usati dal pulsante hero
+    // "Riproduci album" per calcolare i suoi tre stati.
+    isPlaying: () => !!(audio.src && !audio.paused),
+    hasTrackLoaded: () => !!audio.src,
+    currentTrack: () => (playlist[cursor] || null),
+    // Toggle play/pausa dall'esterno (pulsante hero). Non avvia nulla se
+    // non c'è una sorgente caricata: in quel caso il chiamante fa load().
+    togglePlay: () => {
+      if (!audio.src) return;
+      if (audio.paused) { safePlay(); } else { audio.pause(); }
+    },
     // Restituisce copia dell'array playlist corrente (per reorderQueue)
     getPlaylist: () => playlist.slice(),
     // Sostituisce la playlist in memoria mantenendo cursor sulla traccia corrente.
@@ -679,6 +693,20 @@ function initTracklistPlayers() {
       // Re-inizializza componenti Bootstrap e player
       initTracklistPlayers();
       reinitBootstrap();
+
+      // Estrazione colore dominante dell'hero scheda disco (se presente).
+      // Va richiamata a ogni navigazione SPA perche' il contenuto e' stato
+      // rigenerato: senza questa riga il colore si applicava solo dopo un
+      // refresh completo della pagina.
+      if (typeof window.__applyAlbumHero === 'function') {
+        window.__applyAlbumHero();
+      }
+
+      // Sincronizza i tre stati del pulsante hero "Riproduci album"
+      // (play / pausa / riprendi) col Player, dopo la rigenerazione SPA.
+      if (typeof window.__syncAlbumHeroPlayBtn === 'function') {
+        window.__syncAlbumHeroPlayBtn();
+      }
 
       // Re-aggancia bottoni YouTube dopo ogni navigazione SPA
       if (window.YTPlayer && typeof window.YTPlayer.rebind === 'function') {

@@ -55,10 +55,12 @@ $discoFetched = !empty($artist['disco_fetched_at']);
   <div class="artist-hero__content">
     <div class="artist-hero__topbar">
       <h1 class="artist-hero__name" id="artistName"><?= htmlspecialchars($artist['name']) ?></h1>
-      <a href="<?= BASE_URL ?>/index.php?route=albums/list"
-        class="btn btn-sm btn-outline-light artist-hero__back">
+      <button type="button"
+        class="btn btn-sm btn-outline-light artist-hero__back"
+        title="Indietro" aria-label="Torna alla pagina precedente"
+        onclick="grzBack('<?= BASE_URL ?>/index.php?route=albums/list')">
         <i class="bi bi-arrow-left"></i>
-      </a>
+      </button>
     </div>
 
     <!-- Meta inline: paese · anni attività · genere principale -->
@@ -180,8 +182,8 @@ $discoFetched = !empty($artist['disco_fetched_at']);
       $cardAudioTitle  = $cardHasAudio
         ? 'Tutte le tracce hanno audio'
         : ($cardTracksAudio > 0
-            ? $cardTracksAudio . ' di ' . $cardTotalTracks . ' tracce con audio'
-            : 'Nessun file audio caricato');
+          ? $cardTracksAudio . ' di ' . $cardTotalTracks . ' tracce con audio'
+          : 'Nessun file audio caricato');
       ?>
       <a class="disco-card album-card"
         href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>">
@@ -203,8 +205,7 @@ $discoFetched = !empty($artist['disco_fetched_at']);
           <div class="disco-card__meta">
             <span><?= htmlspecialchars($a['year'] ?? '—') ?></span>
             <?php if (!empty($a['genre_name'])): ?>
-              <span class="disco-card__dot">·</span>
-              <span><?= htmlspecialchars($a['genre_name']) ?></span>
+              <span><span class="disco-card__dot">·</span>&nbsp;<?= htmlspecialchars($a['genre_name']) ?></span>
             <?php endif; ?>
             <?php if ($cardTotalTracks > 0): ?>
               <span title="<?= htmlspecialchars($cardAudioTitle) ?>"><i class="bi <?= $cardHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?>"></i>&nbsp;<?= $cardTotalTracks ?> <?= $cardTotalTracks === 1 ? 'traccia' : 'tracce' ?></span>
@@ -221,10 +222,13 @@ $discoFetched = !empty($artist['disco_fetched_at']);
      DISCOGRAFIA UFFICIALE (studio album, da MusicBrainz)
      ============================================================ -->
 <div class="official-disco mt-5" id="officialDisco">
-  <h5 class="artist-section-title mb-3">
+  <h5 class="artist-section-title mb-1">
     <i class="bi bi-vinyl me-2"></i>Discografia ufficiale
-    <span class="official-disco__hint">album in studio</span>
   </h5>
+
+  <div class="official-disco__hint mb-3">
+    Album in studio
+  </div>
 
   <div id="officialDiscoBody">
     <div class="artist-bio-loading text-muted" id="discoLoading" style="font-style:italic">
@@ -238,6 +242,21 @@ $discoFetched = !empty($artist['disco_fetched_at']);
      SCRIPT — fetch bio AJAX + clamp/expand
      ============================================================ -->
 <script>
+  // Navigazione "indietro" consapevole del percorso.
+  // history.state viene valorizzato solo dopo una navigazione SPA (app.js
+  // esegue history.pushState({url})). Se e' presente, si torna alla pagina
+  // reale da cui si proviene (dashboard, archivio, ricerca…); altrimenti
+  // (ingresso diretto, reload o bookmark) si ripiega sulla rotta indicata.
+  window.grzBack = function(fallbackUrl) {
+    if (window.history.state && window.history.state.url) {
+      window.history.back();
+    } else if (typeof window._spaNavigate === 'function') {
+      window._spaNavigate(fallbackUrl);
+    } else {
+      window.location.href = fallbackUrl;
+    }
+  };
+
   (function() {
     var BASE = '<?= BASE_URL ?>';
     var ARTIST_ID = <?= (int)$artist['id'] ?>;
@@ -301,12 +320,12 @@ $discoFetched = !empty($artist['disco_fetched_at']);
           var srcHtml = '';
           if (data.bio_source) {
             var label = data.bio_source.charAt(0).toUpperCase() + data.bio_source.slice(1);
-            var inner = data.bio_url
-              ? '<a href="' + esc(data.bio_url) + '" target="_blank" rel="noopener">' + esc(label) + '</a>'
-              : esc(label);
-            var lang = (data.bio_lang && data.bio_lang !== 'it')
-              ? ' <span class="artist-bio-lang">' + esc(data.bio_lang.toUpperCase()) + '</span>'
-              : '';
+            var inner = data.bio_url ?
+              '<a href="' + esc(data.bio_url) + '" target="_blank" rel="noopener">' + esc(label) + '</a>' :
+              esc(label);
+            var lang = (data.bio_lang && data.bio_lang !== 'it') ?
+              ' <span class="artist-bio-lang">' + esc(data.bio_lang.toUpperCase()) + '</span>' :
+              '';
             srcHtml = '<div class="artist-bio-source">Fonte: ' + inner + lang + '</div>';
           }
           bioBox.innerHTML =
@@ -338,14 +357,24 @@ $discoFetched = !empty($artist['disco_fetched_at']);
     // ---- Fetch on demand (solo prima volta) ------------------
     function fetchMeta(done) {
       fetch(BASE + '/index.php?route=artists/fetch-meta/' + ARTIST_ID, {
-          headers: { 'X-Requested-With': 'XMLHttpRequest' }
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+          }
         })
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+          return r.json();
+        })
         .then(function(data) {
           if (data && data.ok) renderMeta(data);
-          else renderMeta({ bio: '' });
+          else renderMeta({
+            bio: ''
+          });
         })
-        .catch(function() { renderMeta({ bio: '' }); })
+        .catch(function() {
+          renderMeta({
+            bio: ''
+          });
+        })
         // Eseguito in ogni caso (successo o errore), come un finally:
         // sblocca la chiamata alla discografia SOLO quando fetch-meta
         // ha finito e l'eventuale MBID è stato salvato in DB.
@@ -372,22 +401,28 @@ $discoFetched = !empty($artist['disco_fetched_at']);
         var title = esc(it.title);
         var num = (i + 1);
 
-        // Cover: preferisci l'URL fornito dal server (cache locale su
-        // disco, o proxy lazy che scarica al primo accesso). Fallback
-        // storico su CAA diretto solo se il campo manca. L'onerror
-        // resta la rete di sicurezza: placeholder in ogni caso.
+        // Cover: il server manda SEMPRE il campo 'cover' — URL del
+        // file locale, URL del proxy lazy, oppure stringa vuota per
+        // "nessuna cover disponibile" (miss confermato in
+        // negative-cache): in quel caso placeholder diretto, SENZA
+        // fallback CAA dal browser (rifarebbe a ogni pageview la
+        // stessa chiamata che il server ha già visto fallire). Il
+        // fallback CAA resta SOLO se il campo manca del tutto
+        // (risposta di un backend vecchio). L'onerror resta la rete
+        // di sicurezza: placeholder in ogni caso.
         var coverHtml;
-        var coverUrl = it.cover || '';
-        if (!coverUrl && it.mb_release_group_id) {
-          coverUrl = 'https://coverartarchive.org/release-group/'
-            + encodeURIComponent(it.mb_release_group_id) + '/front-250';
+        var coverKnown = (typeof it.cover !== 'undefined' && it.cover !== null);
+        var coverUrl = coverKnown ? String(it.cover) : '';
+        if (!coverKnown && it.mb_release_group_id) {
+          coverUrl = 'https://coverartarchive.org/release-group/' +
+            encodeURIComponent(it.mb_release_group_id) + '/front-250';
         }
         if (coverUrl) {
           coverHtml =
             '<span class="off-thumb">' +
-              '<img src="' + coverUrl + '" alt="" loading="lazy" ' +
-              'onerror="this.parentNode.classList.add(\'is-empty\');this.remove();">' +
-              '<i class="bi bi-disc off-thumb__ph"></i>' +
+            '<img src="' + coverUrl + '" alt="" loading="lazy" ' +
+            'onerror="this.parentNode.classList.add(\'is-empty\');this.remove();">' +
+            '<i class="bi bi-disc off-thumb__ph"></i>' +
             '</span>';
         } else {
           coverHtml = '<span class="off-thumb is-empty"><i class="bi bi-disc off-thumb__ph"></i></span>';
@@ -395,10 +430,10 @@ $discoFetched = !empty($artist['disco_fetched_at']);
 
         rows +=
           '<tr>' +
-            '<td class="official-disco__num">' + num + '</td>' +
-            '<td class="official-disco__cover">' + coverHtml + '</td>' +
-            '<td class="official-disco__title">' + title + '</td>' +
-            '<td class="official-disco__year">' + yr + '</td>' +
+          '<td class="official-disco__num">' + num + '</td>' +
+          '<td class="official-disco__cover">' + coverHtml + '</td>' +
+          '<td class="official-disco__title">' + title + '</td>' +
+          '<td class="official-disco__year">' + yr + '</td>' +
           '</tr>';
       }
 
@@ -413,14 +448,20 @@ $discoFetched = !empty($artist['disco_fetched_at']);
 
     function fetchDisco() {
       fetch(BASE + '/index.php?route=artists/fetch-discography/' + ARTIST_ID, {
-          headers: { 'X-Requested-With': 'XMLHttpRequest' }
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+          }
         })
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+          return r.json();
+        })
         .then(function(data) {
           if (data && data.ok) renderDisco(data.items);
           else renderDisco([]);
         })
-        .catch(function() { renderDisco([]); });
+        .catch(function() {
+          renderDisco([]);
+        });
     }
 
     function init() {

@@ -44,6 +44,22 @@ foreach ($tracks as $t) {
   ];
 }
 
+// Stato audio dell'album, sulla presenza di audio_file_id (lo stesso
+// dato che abilita "Rimuovi audio" e la checkbox di selezione):
+//  - $allTracksHaveAudio: tutte le tracce hanno audio → nasconde
+//    "Carica tracce in blocco".
+//  - $anyTrackHasAudio: almeno una traccia ha audio → mostra
+//    "Seleziona tracce", che resta disponibile anche ad album non completo.
+$allTracksHaveAudio = !empty($tracks);
+$anyTrackHasAudio = false;
+foreach ($tracks as $t) {
+  if (empty($t['audio_file_id'])) {
+    $allTracksHaveAudio = false;
+  } else {
+    $anyTrackHasAudio = true;
+  }
+}
+
 // Mappa track_id => [playlist_id, ...] per badge "già presente" nel dropdown
 $trackPlaylistMap = [];
 if (!empty($tracks)) {
@@ -75,6 +91,24 @@ if ($albumTotalSec > 0) {
     ? $h . 'h ' . str_pad($m, 2, '0', STR_PAD_LEFT) . 'min'
     : $m . ' min ' . str_pad($s, 2, '0', STR_PAD_LEFT) . 's';
 }
+
+// Stato audio dell'album:
+// due note verdi solo se TUTTE le tracce hanno un file audio;
+// una nota arancione se manca anche un solo file oppure non c'è audio.
+$totalTracks = count($tracks);
+$tracksWithAudio = 0;
+foreach ($tracks as $t) {
+  if (!empty($t['audio_filename'])) {
+    $tracksWithAudio++;
+  }
+}
+
+$albumHasAudio = $totalTracks > 0 && $tracksWithAudio >= $totalTracks;
+$audioTitle = $albumHasAudio
+  ? 'Tutte le tracce hanno audio'
+  : ($tracksWithAudio > 0
+    ? $tracksWithAudio . ' di ' . $totalTracks . ' tracce con audio'
+    : 'Nessun file audio caricato');
 ?>
 <script>
   window.__album = <?= json_encode([
@@ -90,6 +124,22 @@ if ($albumTotalSec > 0) {
   window.__albumId = <?= (int)$album['id'] ?>;
   window.__csrfToken = '<?= htmlspecialchars($_SESSION['csrf_token']) ?>';
   window.__uploadBulkUrl = '<?= BASE_URL ?>/index.php?route=upload/bulk-audio/<?= (int)$album['id'] ?>';
+
+  // Navigazione "indietro" consapevole del percorso.
+  // history.state viene valorizzato solo dopo una navigazione SPA (app.js
+  // esegue history.pushState({url})). Se e' presente, si torna alla pagina
+  // reale da cui si proviene (dashboard, artista, archivio, ricerca…);
+  // altrimenti (ingresso diretto, reload o bookmark) si ripiega sulla rotta
+  // indicata come fallbackUrl.
+  window.grzBack = function (fallbackUrl) {
+    if (window.history.state && window.history.state.url) {
+      window.history.back();
+    } else if (typeof window._spaNavigate === 'function') {
+      window._spaNavigate(fallbackUrl);
+    } else {
+      window.location.href = fallbackUrl;
+    }
+  };
 </script>
 
 <div class="row g-4">
@@ -112,81 +162,139 @@ if ($albumTotalSec > 0) {
   <?php endif; ?>
 
   <!-- ============================================================
-       COLONNA SINISTRA — cover · metadati · azioni · descrizione
+       HERO — testata a piena larghezza. La fascia cromatica dietro
+       la testata viene colorata da album-hero.js leggendo il colore
+       dominante della cover GIÀ caricata (nessuna rete, nessuna API).
+       Se la cover manca o è cross-origin, resta l'accento neutro di
+       default definito nel CSS: l'hero non dipende da nulla di esterno.
        ============================================================ -->
-  <div class="col-12 col-md-4 col-lg-3 album-detail-sidebar">
+  <?php
+  // Formati posseduti: usati per i badge dell'hero più in basso.
+  // Fallback sulla colonna legacy se manca la relazione formati.
+  $heroFormats = !empty($album['formats'])
+    ? $album['formats']
+    : [['name' => $album['format_name']]];
 
-    <!-- Cover -->
-    <div class="album-detail-cover-wrap mb-3">
-      <img src="<?= htmlspecialchars($coverSrc) ?>"
-        class="album-detail-cover img-fluid rounded shadow w-100"
-        alt="Cover <?= htmlspecialchars($album['title']) ?>">
-    </div>
+  // Album solo digitale: nessun supporto fisico tra i formati posseduti.
+  // In questo caso lo stato di conservazione non si applica e non viene
+  // stampato tra i fatti dell'hero. Basta un solo formato fisico
+  // (es. Vinile + Digital) perché il chip torni utile e visibile.
+  $isDigitalOnly = !empty($heroFormats);
+  foreach ($heroFormats as $fmt) {
+    if (strcasecmp(trim((string)($fmt['name'] ?? '')), 'Digital') !== 0) {
+      $isDigitalOnly = false;
+      break;
+    }
+  }
+  ?>
+  <div class="col-12">
+    <!-- Back come riga di navigazione sopra l'hero: non copre l'artwork,
+         non sposta la geometria dell'hero, non si sovrappone. -->
+    <button type="button" class="album-hero-back"
+      aria-label="Torna alla pagina precedente"
+      onclick="grzBack('<?= BASE_URL ?>/index.php?route=albums/list')">
+      <i class="bi bi-arrow-left"></i><span>Indietro</span>
+    </button>
+    <div class="album-hero" id="albumHero" data-cover="<?= htmlspecialchars($coverSrc, ENT_QUOTES) ?>">
 
-    <!-- Badge formati / genere -->
-    <div class="d-flex flex-wrap gap-2 mb-3">
-      <?php
-      // Tutti i formati posseduti (tabella ponte), con fallback
-      // sulla colonna legacy per robustezza.
-      $albumFormats = !empty($album['formats'])
-        ? $album['formats']
-        : [['name' => $album['format_name']]];
-      ?>
-      <?php foreach ($albumFormats as $fmt): ?>
-        <span class="badge badge-format bg-<?= formatBadge($fmt['name']) ?>">
-          <?= htmlspecialchars($fmt['name']) ?>
-        </span>
-      <?php endforeach; ?>
-      <?php if ($album['genre_name']): ?>
-        <span class="badge badge-genre"><?= htmlspecialchars($album['genre_name']) ?></span>
-      <?php endif; ?>
-    </div>
+      <div class="album-hero-inner">
+        <div class="album-hero-cover-wrap">
+          <img src="<?= htmlspecialchars($coverSrc) ?>"
+            class="album-hero-cover"
+            alt="Cover <?= htmlspecialchars($album['title']) ?>">
+        </div>
+        <div class="album-hero-body">
 
-    <!-- Metadati -->
-    <div class="album-meta-block mb-3">
-      <dl class="album-meta-list">
-        <div class="album-meta-row">
-          <dt>Artista</dt>
-          <dd>
-            <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= $album['artist_id'] ?>"
-              class="album-meta-link">
+          <div class="album-hero-titlecol">
+            <h1 class="album-hero-title"><?= htmlspecialchars($album['title']) ?></h1>
+          </div>
+
+          <div class="album-hero-actions">
+            <?php if (!empty($playerTracks)): ?>
+              <button type="button" class="album-hero-play" id="albumHeroPlay"
+                title="Riproduci album" aria-label="Riproduci album"
+                onclick="window.__albumHeroPlayClick && window.__albumHeroPlayClick()">
+                <i class="bi bi-play-fill"></i><span class="album-hero-play-label">Riproduci album</span>
+              </button>
+            <?php endif; ?>
+            <div class="dropdown">
+              <button type="button" class="album-hero-ghost"
+                id="albumHeroMenu" data-bs-toggle="dropdown" aria-expanded="false"
+                title="Azioni" aria-label="Azioni album">
+                <i class="bi bi-three-dots-vertical"></i>
+              </button>
+              <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="albumHeroMenu">
+                <li>
+                  <a class="dropdown-item" href="<?= BASE_URL ?>/index.php?route=albums/edit/<?= $album['id'] ?>">
+                    <i class="bi bi-pencil me-2"></i>Modifica disco
+                  </a>
+                </li>
+                <li>
+                  <button class="dropdown-item text-danger" type="button"
+                    data-bs-toggle="modal" data-bs-target="#deleteModal">
+                    <i class="bi bi-trash me-2"></i>Elimina disco
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="album-hero-artist">
+            <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= $album['artist_id'] ?>">
               <?= htmlspecialchars($album['artist_name']) ?>
             </a>
-          </dd>
-        </div>
-        <?php if ($album['year']): ?>
-          <div class="album-meta-row">
-            <dt>Anno</dt>
-            <dd><?= $album['year'] ?></dd>
+            <?php if ($album['year']): ?>
+              <span class="album-hero-sep">·</span><span><?= $album['year'] ?></span>
+            <?php endif; ?>
           </div>
-        <?php endif; ?>
-        <?php if ($album['label_name']): ?>
-          <div class="album-meta-row">
-            <dt>Etichetta</dt>
-            <dd><?= htmlspecialchars($album['label_name']) ?></dd>
+
+          <div class="album-hero-facts">
+            <?php if ($albumDurationStr): ?>
+              <span><i class="bi bi-clock"></i><?= $albumDurationStr ?></span>
+            <?php endif; ?>
+            <?php if ($totalTracks > 0): ?>
+              <span id="tracksAudioFact" title="<?= htmlspecialchars($audioTitle, ENT_QUOTES) ?>">
+                <i id="tracksAudioIcon" class="bi <?= $albumHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?>"></i>
+                <?= $totalTracks ?> <?= $totalTracks === 1 ? 'traccia' : 'tracce' ?>
+              </span>
+            <?php endif; ?>
+            <?php if ($album['label_name']): ?>
+              <span><i class="bi bi-tag"></i><?= htmlspecialchars($album['label_name']) ?></span>
+            <?php endif; ?>
+            <?php if (!$isDigitalOnly): ?>
+              <span><i class="bi bi-gem"></i><?= htmlspecialchars(conditionLabel($album['condition'])) ?></span>
+            <?php endif; ?>
+            <?php if ((int)$album['copies'] > 1): ?>
+              <span><i class="bi bi-collection"></i><?= (int)$album['copies'] ?> copie</span>
+            <?php endif; ?>
+            <?php if ($album['mbid']): ?>
+              <span><i class="bi bi-fingerprint"></i>
+                <a href="https://musicbrainz.org/release/<?= htmlspecialchars($album['mbid']) ?>"
+                  target="_blank" rel="noopener"
+                  class="album-hero-mbid font-monospace"><?= substr(htmlspecialchars($album['mbid']), 0, 8) ?>…</a>
+              </span>
+            <?php endif; ?>
           </div>
-        <?php endif; ?>
-        <div class="album-meta-row">
-          <dt>Condizione</dt>
-          <dd><?= htmlspecialchars(conditionLabel($album['condition'])) ?></dd>
-        </div>
-        <div class="album-meta-row">
-          <dt>Copie</dt>
-          <dd><?= $album['copies'] ?></dd>
-        </div>
-        <?php if ($album['mbid']): ?>
-          <div class="album-meta-row">
-            <dt>MBID</dt>
-            <dd>
-              <a href="https://musicbrainz.org/release/<?= $album['mbid'] ?>"
-                target="_blank" class="font-monospace small album-meta-link">
-                <?= substr($album['mbid'], 0, 8) ?>…
-              </a>
-            </dd>
+
+          <div class="album-hero-badges">
+            <?php foreach ($heroFormats as $fmt): ?>
+              <span class="badge badge-format bg-<?= formatBadge($fmt['name']) ?>">
+                <?= htmlspecialchars($fmt['name']) ?>
+              </span>
+            <?php endforeach; ?>
+            <?php if ($album['genre_name']): ?>
+              <span class="badge badge-genre"><?= htmlspecialchars($album['genre_name']) ?></span>
+            <?php endif; ?>
           </div>
-        <?php endif; ?>
-      </dl>
+        </div>
+      </div>
     </div>
+  </div>
+
+  <!-- ============================================================
+       COLONNA SINISTRA — metadati · azioni · descrizione
+       ============================================================ -->
+  <div class="col-12 col-md-4 col-lg-3 album-detail-sidebar">
 
     <!-- Note personali -->
     <?php if ($album['notes']): ?>
@@ -195,23 +303,6 @@ if ($albumTotalSec > 0) {
         <span class="small"><?= nl2br(htmlspecialchars($album['notes'])) ?></span>
       </div>
     <?php endif; ?>
-
-    <!-- Pulsanti azione -->
-    <div class="album-actions-row mb-4">
-      <a href="<?= BASE_URL ?>/index.php?route=albums/edit/<?= $album['id'] ?>"
-        class="btn btn-sm btn-outline-secondary album-action-edit">
-        <i class="bi bi-pencil me-1"></i>Modifica
-      </a>
-
-      <button type="button"
-        class="btn btn-sm btn-outline-danger album-action-delete"
-        data-bs-toggle="modal"
-        data-bs-target="#deleteModal"
-        title="Elimina"
-        aria-label="Elimina album">
-        <i class="bi bi-trash"></i>
-      </button>
-    </div>
 
     <!-- Descrizione automatica / Note sull'album -->
     <div class="album-desc-block album-desc-block-sidebar mb-4" id="albumDescBlock"
@@ -250,46 +341,38 @@ if ($albumTotalSec > 0) {
 
     </div>
 
+
+    <!-- Album consigliati — caricati in modo asincrono.
+         Se non ci sono risultati il blocco viene nascosto. -->
+    <div class="album-recs-block mb-4"
+      id="albumRecommendations"
+      data-url="<?= BASE_URL ?>/index.php?route=albums/api-recommendations/<?= (int)$album['id'] ?>">
+
+      <div class="album-recs-header">
+        <i class="bi bi-stars"></i>
+        <span>Potrebbero piacerti</span>
+      </div>
+
+      <div class="album-recs-loading" id="albumRecsLoading">
+        <span class="spinner-border spinner-border-sm text-warning me-2" role="status"></span>
+        <span class="small text-muted">Cerco album affini…</span>
+      </div>
+
+      <div class="album-recs-list" id="albumRecsList" style="display:none"></div>
+    </div>
+
   </div><!-- /col cover -->
 
   <!-- Tracklist + player -->
   <div class="col-12 col-md-8 col-lg-9">
 
-    <!-- Intestazione con menu azioni -->
-    <div class="d-flex align-items-start justify-content-between mb-1">
-      <div>
-        <h3 class="mb-0"><?= htmlspecialchars($album['title']) ?></h3>
-        <p class="text-muted mb-0">
-          <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= $album['artist_id'] ?>">
-            <?= htmlspecialchars($album['artist_name']) ?>
-          </a>
-          <?= $album['year'] ? ' — ' . $album['year'] : '' ?>
-          <?php if ($albumDurationStr): ?>
-            <span class="ms-3 text-muted small">
-              <i class="bi bi-clock me-1"></i><?= $albumDurationStr ?>
-            </span>
-          <?php endif; ?>
-          <?php if (!empty($tracks)):
-            $totalTracks = count($tracks);
-            $tracksWithAudio = 0;
-            foreach ($tracks as $t) {
-              if (!empty($t['audio_filename'])) { $tracksWithAudio++; }
-            }
-            // Stessa logica e stesso tooltip dell'archivio: verde a
-            // due note SOLO se tutte le tracce hanno audio, arancio
-            // a una nota se mancano del tutto o solo in parte.
-            $albumHasAudio = $tracksWithAudio >= $totalTracks;
-            $audioTitle = $albumHasAudio
-              ? 'Tutte le tracce hanno audio'
-              : ($tracksWithAudio > 0
-                  ? $tracksWithAudio . ' di ' . $totalTracks . ' tracce con audio'
-                  : 'Nessun file audio caricato');
-          ?>
-            <span class="ms-2 text-muted small" title="<?= $audioTitle ?>">
-              <i class="bi <?= $albumHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?> me-1"></i><?= $totalTracks ?> <?= $totalTracks === 1 ? 'traccia' : 'tracce' ?>
-            </span>
-          <?php endif; ?>
-        </p>
+    <!-- Barra tracklist: etichetta + audio + menu azioni.
+         Titolo/artista/durata vivono ora nell'hero in cima alla pagina. -->
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <div class="d-flex align-items-center gap-3">
+        <h5 class="mb-0 fw-semibold">
+          <i class="bi bi-music-note-list me-2 text-warning opacity-75"></i>Tracklist
+        </h5>
       </div>
 
       <!-- Menu tre puntini azioni album -->
@@ -302,73 +385,72 @@ if ($albumTotalSec > 0) {
           title="Azioni">
           <i class="bi bi-three-dots-vertical"></i>
         </button>
-        <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="albumActionsMenu">
+        <ul class="dropdown-menu dropdown-menu-end"
+          aria-labelledby="albumActionsMenu">
+
           <?php if (!empty($playerTracks)): ?>
-            <li>
-              <button class="dropdown-item" type="button"
-                onclick="Player.load(window.__album)">
-                <i class="bi bi-play-fill me-2 text-warning"></i>Riproduci album
-              </button>
-            </li>
-            <li>
+            <li id="menuEnqueueAlbum">
               <button class="dropdown-item" type="button" id="btnEnqueueAlbum">
-                <i class="bi bi-plus-lg me-2 text-warning"></i>Accoda alla riproduzione
+                <i class="bi bi-plus-lg me-2 text-warning"></i>
+                Accoda alla riproduzione
               </button>
             </li>
-            <li>
+
+            <li id="menuEnqueueDivider">
               <hr class="dropdown-divider">
             </li>
           <?php endif; ?>
+
           <?php if (!empty($tracks)): ?>
-            <li>
+            <li id="menuBulkUpload"<?= $allTracksHaveAudio ? ' style="display:none"' : '' ?>>
               <button class="dropdown-item" type="button"
-                data-bs-toggle="modal" data-bs-target="#bulkUploadModal">
-                <i class="bi bi-folder2-open me-2 text-warning"></i>Carica tracce in blocco
+                data-bs-toggle="modal"
+                data-bs-target="#bulkUploadModal">
+                <i class="bi bi-folder2-open me-2 text-warning"></i>
+                Carica tracce in blocco
               </button>
             </li>
-            <li>
-              <button class="dropdown-item" type="button"
-                data-bs-toggle="modal" data-bs-target="#addToPlaylistModal">
-                <i class="bi bi-collection-play me-2 text-success"></i>Aggiungi a playlist
+
+            <li id="menuSelectTracks"<?= $anyTrackHasAudio ? '' : ' style="display:none"' ?>>
+              <button class="dropdown-item" type="button">
+                <i class="bi bi-check2-square me-2 text-warning"></i>
+                Seleziona tracce
               </button>
             </li>
+
+            <li>
+              <button class="dropdown-item" type="button"
+                data-bs-toggle="modal"
+                data-bs-target="#addToPlaylistModal">
+                <i class="bi bi-collection-play me-2 text-success"></i>
+                Aggiungi a playlist
+              </button>
+            </li>
+
             <li>
               <button class="dropdown-item" type="button" id="yt-play-all">
-                <i class="bi bi-youtube me-2 text-danger"></i>Riproduci tutti da YouTube
+                <i class="bi bi-youtube me-2 text-danger"></i>
+                Riproduci tutti da YouTube
               </button>
             </li>
-            <li>
-              <hr class="dropdown-divider">
-            </li>
           <?php endif; ?>
-          <li>
-            <a class="dropdown-item" href="<?= BASE_URL ?>/index.php?route=albums/edit/<?= $album['id'] ?>">
-              <i class="bi bi-pencil me-2"></i>Modifica disco
-            </a>
-          </li>
-          <li>
-            <button class="dropdown-item text-danger" type="button"
-              data-bs-toggle="modal" data-bs-target="#deleteModal">
-              <i class="bi bi-trash me-2"></i>Elimina disco
-            </button>
-          </li>
+
         </ul>
       </div>
     </div>
 
-    <div class="mb-4"></div>
-
     <?php if (!empty($tracks)): ?>
       <div class="card shadow-sm">
-        <div class="card-header fw-semibold">
-          <i class="bi bi-music-note-list me-2"></i>Tracklist
-        </div>
         <ul class="list-group list-group-flush" id="tracklistPlayer">
           <?php foreach ($tracks as $t): ?>
             <li class="list-group-item track-item py-2" data-track-id="<?= (int)$t['id'] ?>">
               <div class="d-flex align-items-center gap-3">
-                <span class="text-muted small" style="min-width:1.8rem;text-align:right">
-                  <?= $t['position'] ?>
+                <span class="text-muted small track-index-cell<?= !empty($t['audio_file_id']) ? ' has-cb' : '' ?>" style="min-width:1.8rem;text-align:right">
+                  <span class="track-num"><?= $t['position'] ?></span>
+                  <?php if (!empty($t['audio_file_id'])): ?>
+                    <input type="checkbox" class="form-check-input track-select-cb"
+                      data-track-id="<?= (int)$t['id'] ?>" aria-label="Seleziona traccia">
+                  <?php endif; ?>
                 </span>
                 <div class="flex-grow-1">
                   <span class="fw-semibold"><?= htmlspecialchars($t['title']) ?></span>
@@ -737,28 +819,32 @@ if ($albumTotalSec > 0) {
             var fd = new FormData(form);
 
             fetch(window.__uploadBulkUrl, {
-              method: 'POST',
-              headers: { 'X-Requested-With': 'XMLHttpRequest' },
-              body: fd
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-              if (data && data.success) {
-                // Ricarica morbida: player intatto, contenuto aggiornato.
-                if (typeof window._spaNavigate === 'function') {
-                  window._spaNavigate(location.href, false);
+                method: 'POST',
+                headers: {
+                  'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: fd
+              })
+              .then(function(r) {
+                return r.json();
+              })
+              .then(function(data) {
+                if (data && data.success) {
+                  // Ricarica morbida: player intatto, contenuto aggiornato.
+                  if (typeof window._spaNavigate === 'function') {
+                    window._spaNavigate(location.href, false);
+                  } else {
+                    location.reload();
+                  }
                 } else {
-                  location.reload();
+                  restoreUploadBtn();
+                  showUploadError((data && data.message) ? data.message : 'Errore durante il caricamento.');
                 }
-              } else {
+              })
+              .catch(function() {
                 restoreUploadBtn();
-                showUploadError((data && data.message) ? data.message : 'Errore durante il caricamento.');
-              }
-            })
-            .catch(function() {
-              restoreUploadBtn();
-              showUploadError('Errore di rete durante il caricamento. Riprova.');
-            });
+                showUploadError('Errore di rete durante il caricamento. Riprova.');
+              });
           });
 
           function restoreUploadBtn() {
@@ -883,9 +969,9 @@ if ($albumTotalSec > 0) {
       loading.style.display = 'none';
       var msg = empty.querySelector('span');
       if (msg) {
-        msg.textContent = transient
-          ? 'Recupero non riuscito (problema di rete): riprova con il pulsante di aggiornamento.'
-          : 'Nessuna descrizione disponibile.';
+        msg.textContent = transient ?
+          'Recupero non riuscito (problema di rete): riprova con il pulsante di aggiornamento.' :
+          'Nessuna descrizione disponibile.';
       }
       empty.style.display = '';
     }
@@ -967,6 +1053,199 @@ if ($albumTotalSec > 0) {
   })();
 </script>
 
+
+<script>
+  /* ----------------------------------------------------------------
+     Album recommendations — Last.fm + archivio locale
+  ---------------------------------------------------------------- */
+  (function() {
+    var block = document.getElementById('albumRecommendations');
+    var loading = document.getElementById('albumRecsLoading');
+    var list = document.getElementById('albumRecsList');
+
+    if (!block || !loading || !list) return;
+
+    var url = block.dataset.url || '';
+
+    if (!url) {
+      block.style.display = 'none';
+      return;
+    }
+
+    var controller = ('AbortController' in window) ? new AbortController() : null;
+    var timer = controller ? setTimeout(function() {
+      controller.abort();
+    }, 15000) : null;
+
+    fetch(url, {
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        signal: controller ? controller.signal : undefined
+      })
+      .then(function(r) {
+        return r.ok ? r.json() : Promise.reject(r.status);
+      })
+      .then(function(data) {
+        if (timer) clearTimeout(timer);
+
+        var items = (data && Array.isArray(data.recommendations))
+          ? data.recommendations
+          : [];
+        var suggestions = (data && Array.isArray(data.suggestions))
+          ? data.suggestions
+          : [];
+
+        // Nessuna delle due sezioni ha contenuto → nascondi il blocco.
+        if (!items.length && !suggestions.length) {
+          block.style.display = 'none';
+          return;
+        }
+
+        list.innerHTML = '';
+
+        // Lista unica: i dischi già presenti in Grizzly e quelli esterni
+        // convivono nello stesso flusso. Solo i primi mostrano un indicatore
+        // discreto "In collezione" e restano cliccabili verso la scheda.
+        function ownRow(item) {
+          var link = document.createElement('a');
+          link.className = 'album-rec-item album-rec-item-owned';
+          link.href = item.url || '#';
+
+          var img = document.createElement('img');
+          img.className = 'album-rec-cover';
+          img.src = item.cover || '';
+          img.alt = '';
+          img.loading = 'lazy';
+
+          var meta = document.createElement('span');
+          meta.className = 'album-rec-meta';
+
+          var title = document.createElement('span');
+          title.className = 'album-rec-title';
+          title.textContent = item.title || '';
+
+          var sub = document.createElement('span');
+          sub.className = 'album-rec-sub';
+          var subText = item.artist_name || '';
+          if (item.year) {
+            subText += ' · ' + item.year;
+          }
+          sub.textContent = subText;
+
+          var owned = document.createElement('span');
+          owned.className = 'album-rec-owned';
+
+          var ownedIcon = document.createElement('i');
+          ownedIcon.className = 'bi bi-check2-circle';
+          ownedIcon.setAttribute('aria-hidden', 'true');
+
+          var ownedText = document.createElement('span');
+          ownedText.textContent = 'In collezione';
+
+          owned.appendChild(ownedIcon);
+          owned.appendChild(ownedText);
+
+          meta.appendChild(title);
+          meta.appendChild(sub);
+          meta.appendChild(owned);
+
+          var arrow = document.createElement('i');
+          arrow.className = 'bi bi-chevron-right album-rec-arrow';
+          arrow.setAttribute('aria-hidden', 'true');
+
+          link.appendChild(img);
+          link.appendChild(meta);
+          link.appendChild(arrow);
+          return link;
+        }
+
+        // Suggerimento esterno: stesso ordine informativo delle righe locali,
+        // quindi ALBUM sopra e ARTISTA sotto. Non è cliccabile finché non
+        // definiamo una destinazione esterna coerente.
+        function suggestionRow(sug) {
+          var row = document.createElement('div');
+          row.className = 'album-rec-item album-rec-item-ext';
+
+          // Pixel trasparente: riempie l'<img> quando non c'è cover,
+          // così il browser non mostra l'icona "immagine rotta" e resta
+          // visibile solo lo sfondo della classe .album-rec-cover-empty.
+          var BLANK = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+
+          var img = document.createElement('img');
+          img.className = 'album-rec-cover';
+          img.alt = '';
+          img.loading = 'lazy';
+
+          if (sug.cover) {
+            img.src = sug.cover;
+            img.onerror = function() {
+              this.classList.add('album-rec-cover-empty');
+              this.onerror = null;
+              this.src = BLANK;
+            };
+          } else {
+            img.classList.add('album-rec-cover-empty');
+            img.src = BLANK;
+          }
+
+          var meta = document.createElement('span');
+          meta.className = 'album-rec-meta';
+
+          var title = document.createElement('span');
+          title.className = 'album-rec-title';
+          title.textContent = sug.album || sug.name || '';
+
+          var sub = document.createElement('span');
+          sub.className = 'album-rec-sub';
+          sub.textContent = sug.album ? (sug.name || '') : '';
+
+          meta.appendChild(title);
+          if (sub.textContent) {
+            meta.appendChild(sub);
+          }
+
+          row.appendChild(img);
+          row.appendChild(meta);
+          return row;
+        }
+
+        // Prima gli album già posseduti, poi i suggerimenti esterni,
+        // senza intestazioni intermedie che spezzano visivamente il box.
+        items.forEach(function(item) {
+          list.appendChild(ownRow(item));
+        });
+
+        suggestions.forEach(function(sug) {
+          list.appendChild(suggestionRow(sug));
+        });
+
+        loading.style.display = 'none';
+        list.style.display = '';
+
+        // Warm-up non bloccante: la verifica studio-album (MusicBrainz,
+        // rate-limit lento) è stata rimandata dal server per non rallentare
+        // questo caricamento. La inneschiamo ORA, dopo che i consigli sono
+        // già a schermo, così la cache si popola e alla PROSSIMA visita gli
+        // eventuali falsi positivi vengono filtrati. Esito ignorato di
+        // proposito: è puro warm-up, non deve toccare la UI.
+        try {
+          fetch('<?= BASE_URL ?>/index.php?route=albums/confirm-studio', {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+          }).catch(function () {});
+        } catch (e) {}
+      })
+      .catch(function() {
+        if (timer) clearTimeout(timer);
+
+        // Suggerimento accessorio: se rete/Last.fm falliscono,
+        // non mostrare errori invasivi nella scheda.
+        block.style.display = 'none';
+      });
+  })();
+</script>
+
+
 <!-- ============================================================
      MODAL BULK UPLOAD
 ============================================================ -->
@@ -975,9 +1254,19 @@ if ($albumTotalSec > 0) {
     <div class="modal-content">
 
       <div class="modal-header">
-        <h5 class="modal-title" id="bulkUploadModalLabel">
-          <i class="bi bi-folder2-open me-2 text-warning"></i>Carica tracce in blocco
-        </h5>
+        <div class="d-flex flex-column">
+          <h5 class="modal-title mb-0" id="bulkUploadModalLabel">
+            <i class="bi bi-folder2-open me-2 text-warning"></i>Carica tracce in blocco
+          </h5>
+          <!-- Riferimento all'album in caricamento: il modal copre la
+               scheda, quindi si ricorda qui per quale disco si stanno
+               abbinando i file. Dati già in $album, nessuna logica JS. -->
+          <div class="small text-muted mt-1">
+            <i class="bi bi-disc me-1"></i>
+            <span class="fw-semibold text-body"><?= htmlspecialchars($album['artist_name']) ?></span>
+            <span class="mx-1">·</span><?= htmlspecialchars($album['title']) ?><?php if (!empty($album['year'])): ?> <span class="text-muted">(<?= (int)$album['year'] ?>)</span><?php endif; ?>
+          </div>
+        </div>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
 
@@ -1067,6 +1356,58 @@ if ($albumTotalSec > 0) {
         </div>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     Selezione multipla tracce: la checkbox rimpiazza il numero
+     solo in modalità selezione (classe .selection-mode sul <ul>).
+     Toolbar e checkbox riusano gli stili già in app.css
+     (.bulk-toolbar, .bulk-count, .track-select-cb, .btn-xs).
+     ============================================================ -->
+<style>
+  #tracklistPlayer .track-select-cb { display: none; }
+  #tracklistPlayer.selection-mode .track-index-cell.has-cb .track-num { display: none; }
+  #tracklistPlayer.selection-mode .track-index-cell.has-cb .track-select-cb { display: inline-block; }
+</style>
+
+<!-- Toolbar selezione multipla (fixed, nascosta finché non si entra in selezione) -->
+<div id="albumBulkBar" class="bulk-toolbar" style="display:none">
+  <span class="bulk-count" id="albumBulkCount">0 selezionate</span>
+  <div class="d-flex align-items-center gap-2">
+    <button type="button" class="btn btn-xs btn-outline-secondary" id="albumSelectAll">
+      <i class="bi bi-check-all me-1"></i>Seleziona tutto
+    </button>
+    <button type="button" class="btn btn-xs btn-outline-secondary" id="albumBulkCancel">
+      Annulla
+    </button>
+    <button type="button" class="btn btn-xs btn-danger" id="albumBulkDelete" disabled>
+      <i class="bi bi-trash me-1"></i>Elimina audio
+    </button>
+  </div>
+</div>
+
+<!-- Modal conferma eliminazione audio in blocco -->
+<div class="modal fade" id="bulkAudioDeleteModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">
+          <i class="bi bi-trash me-2 text-danger"></i>Elimina audio selezionati
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        Rimuovere il file audio di <strong id="bulkDeleteCount">0</strong> tracce selezionate?
+        <div class="text-muted mt-1" style="font-size:.8rem">
+          I file audio vengono eliminati dal disco e dall'archivio. Le tracce restano nella tracklist.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Annulla</button>
+        <button type="button" class="btn btn-sm btn-danger" id="btnConfirmBulkDeleteAudio">Elimina</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1388,18 +1729,32 @@ if ($albumTotalSec > 0) {
         if (entry.isFile) {
           pending++;
           entry.file(
-            function(f) { out.push(f); pending--; maybeDone(); },
-            function() { pending--; maybeDone(); }
+            function(f) {
+              out.push(f);
+              pending--;
+              maybeDone();
+            },
+            function() {
+              pending--;
+              maybeDone();
+            }
           );
         } else if (entry.isDirectory) {
           pending++;
           var reader = entry.createReader();
           var readBatch = function() {
             reader.readEntries(function(entries) {
-              if (!entries.length) { pending--; maybeDone(); return; }
+              if (!entries.length) {
+                pending--;
+                maybeDone();
+                return;
+              }
               for (var j = 0; j < entries.length; j++) walkEntry(entries[j]);
               readBatch();
-            }, function() { pending--; maybeDone(); });
+            }, function() {
+              pending--;
+              maybeDone();
+            });
           };
           readBatch();
         }
@@ -1545,8 +1900,12 @@ if ($albumTotalSec > 0) {
       var m;
 
       // Pattern B: "Qualcosa - Qualcosa - NN - Titolo"
-      // Almeno 3 blocchi separati da " - " dove il terzo e' un numero
-      m = name.match(/^.+?\s+-\s+.+?\s+-\s+(\d{1,3})\s+-\s+(.+)$/);
+      // Almeno 3 blocchi separati da " - " dove il terzo blocco è il
+      // numero traccia. Il numero può essere preceduto da un indice di
+      // disco ("1-06", "2-11"): in quel caso si tiene la parte traccia
+      // (06, 11) e si ignora il disco, coerente con la numerazione della
+      // tracklist in archivio (una sola posizione per traccia).
+      m = name.match(/^.+?\s+-\s+.+?\s+-\s+(?:\d{1,2}-)?(\d{1,3})\s+-\s+(.+)$/);
       if (m) {
         return {
           trackNum: parseInt(m[1], 10),
@@ -2047,9 +2406,15 @@ if ($albumTotalSec > 0) {
 
       var modalEl = document.getElementById('bulkUploadModal');
       if (modalEl && modalEl.classList.contains('show')) {
-        modalEl.addEventListener('hidden.bs.modal', doNav, { once: true });
+        modalEl.addEventListener('hidden.bs.modal', doNav, {
+          once: true
+        });
         var inst = bootstrap.Modal.getInstance(modalEl);
-        if (inst) { inst.hide(); } else { doNav(); }
+        if (inst) {
+          inst.hide();
+        } else {
+          doNav();
+        }
       } else {
         doNav();
       }
@@ -2275,6 +2640,218 @@ if ($albumTotalSec > 0) {
     S.albumId = ALBUM_ID;
 
     /* ----------------------------------------------------------
+       Selezione multipla tracce + eliminazione audio in blocco.
+       Funzioni dichiarate qui (hoisting nell'IIFE) e usate dai
+       listener nel guard. Leggono sempre il DOM corrente per id,
+       così restano valide anche dopo le navigazioni SPA.
+    ---------------------------------------------------------- */
+    // "album completo" nel DOM: ogni traccia ha ancora il pulsante
+    // .btn-delete-audio (rimosso alla cancellazione). Da questo il
+    // menu decide fra "Carica tracce in blocco" e "Seleziona tracce".
+    function refreshTracklistMenuState() {
+      var list = document.getElementById('tracklistPlayer');
+      var menuBulk = document.getElementById('menuBulkUpload');
+      var menuSelect = document.getElementById('menuSelectTracks');
+      if (!list) return;
+      var items = list.querySelectorAll('.track-item');
+      var total = items.length;
+      var withAudio = 0;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].querySelector('.btn-delete-audio')) withAudio++;
+      }
+      var full = total > 0 && withAudio >= total;
+      if (menuBulk) menuBulk.style.display = (total > 0 && !full) ? '' : 'none';
+      // "Seleziona tracce" resta disponibile ogni volta che c'è almeno
+      // una traccia con audio da rimuovere, anche ad album non completo.
+      if (menuSelect) menuSelect.style.display = (withAudio > 0) ? '' : 'none';
+
+      // Azioni che hanno senso solo con audio locale presente: il pulsante
+      // "Riproduci album" nell'hero e la voce "Accoda alla riproduzione"
+      // col suo divisore. Nascosti live quando l'audio arriva a zero;
+      // ricompaiono al reload dopo un nuovo caricamento in blocco.
+      var hasPlayable = withAudio > 0;
+      var heroPlay = document.getElementById('albumHeroPlay');
+      if (heroPlay) heroPlay.style.display = hasPlayable ? '' : 'none';
+      var menuEnqueue = document.getElementById('menuEnqueueAlbum');
+      if (menuEnqueue) menuEnqueue.style.display = hasPlayable ? '' : 'none';
+      var menuEnqueueDiv = document.getElementById('menuEnqueueDivider');
+      if (menuEnqueueDiv) menuEnqueueDiv.style.display = hasPlayable ? '' : 'none';
+
+      // Icona "N tracce" nella riga fatti: verde (bi-music-note-beamed
+      // grz-track-audio) se tutte hanno audio, arancione (bi-music-note
+      // grz-track-noaudio) altrimenti. Aggiornata subito, senza attendere
+      // il reload, e con il tooltip riallineato al conteggio corrente.
+      var icon = document.getElementById('tracksAudioIcon');
+      if (icon) {
+        icon.className = 'bi ' + (full ?
+          'bi-music-note-beamed grz-track-audio' :
+          'bi-music-note grz-track-noaudio');
+      }
+      var fact = document.getElementById('tracksAudioFact');
+      if (fact) {
+        fact.title = full ? 'Tutte le tracce hanno audio' :
+          (withAudio > 0 ? (withAudio + ' di ' + total + ' tracce con audio') :
+            'Nessun file audio caricato');
+      }
+
+      // Esci dalla selezione solo se non resta più audio da gestire.
+      if (withAudio === 0) exitSelectionMode();
+    }
+
+    function enterSelectionMode() {
+      var list = document.getElementById('tracklistPlayer');
+      if (!list) return;
+      list.classList.add('selection-mode');
+      var bar = document.getElementById('albumBulkBar');
+      if (bar) bar.style.display = 'flex';
+      selectAllTracks(false);
+    }
+
+    function exitSelectionMode() {
+      var list = document.getElementById('tracklistPlayer');
+      if (list) list.classList.remove('selection-mode');
+      var bar = document.getElementById('albumBulkBar');
+      if (bar) bar.style.display = 'none';
+      var cbs = list ? list.querySelectorAll('.track-select-cb') : [];
+      cbs.forEach(function(c) { c.checked = false; });
+    }
+
+    function selectAllTracks(check) {
+      var list = document.getElementById('tracklistPlayer');
+      if (!list) return;
+      list.querySelectorAll('.track-select-cb').forEach(function(c) { c.checked = check; });
+      updateBulkCount();
+    }
+
+    function updateBulkCount() {
+      var list = document.getElementById('tracklistPlayer');
+      var n = list ? list.querySelectorAll('.track-select-cb:checked').length : 0;
+      var lbl = document.getElementById('albumBulkCount');
+      if (lbl) lbl.textContent = n + (n === 1 ? ' selezionata' : ' selezionate');
+      var del = document.getElementById('albumBulkDelete');
+      if (del) del.disabled = (n === 0);
+    }
+
+    // Raccoglie le tracce selezionate che hanno audio (audio id dal
+    // pulsante .btn-delete-audio già presente nella riga).
+    function collectSelectedAudio() {
+      var list = document.getElementById('tracklistPlayer');
+      var out = [];
+      if (!list) return out;
+      list.querySelectorAll('.track-select-cb:checked').forEach(function(cb) {
+        var item = cb.closest('.track-item');
+        if (!item) return;
+        var delBtn = item.querySelector('.btn-delete-audio');
+        if (!delBtn) return;
+        out.push({ trackItem: item, audioId: delBtn.dataset.audioId });
+      });
+      return out;
+    }
+
+    // Porta una riga allo stato "nessun audio": stessa trasformazione
+    // del delete singolo (svuota .track-audio-controls, rimuove le voci
+    // menu audio e la checkbox, così la traccia non è più selezionabile).
+    function markTrackNoAudio(trackItem) {
+      if (!trackItem) return;
+      var ctrl = trackItem.querySelector('.track-audio-controls');
+      if (ctrl) {
+        ctrl.innerHTML = '<span class="text-muted small fst-italic d-none d-md-inline">' +
+          '<i class="bi bi-music-note text-muted"></i> nessun audio</span>';
+      }
+      trackItem.querySelectorAll('.track-audio-menu-item').forEach(function(mi) { mi.remove(); });
+      var cbx = trackItem.querySelector('.track-select-cb');
+      if (cbx) cbx.remove();
+      var cell = trackItem.querySelector('.track-index-cell');
+      if (cell) cell.classList.remove('has-cb');
+      onTrackAudioRemoved(parseInt(trackItem.getAttribute('data-track-id'), 10));
+    }
+
+    // Ripercussioni della rimozione audio di UNA traccia sullo stato vivo
+    // della pagina, senza reload (che chiuderebbe il player nel footer):
+    //  1) toglie la traccia dalla coda del player, così la riproduzione
+    //     non ci finisce sopra; setPlaylist tiene il cursore sulla traccia
+    //     corrente per id ed emette player:changed → il pannello coda si
+    //     ri-renderizza da solo;
+    //  2) la toglie da window.__album.tracks, la sorgente usata da
+    //     "Riproduci album" e dagli accoda, così non viene più ricaricata;
+    //  3) toglie la spunta ✓ dall'opzione corrispondente nel select
+    //     "Associa a traccia" del caricamento singolo.
+    function onTrackAudioRemoved(trackId) {
+      if (!trackId) return;
+      if (typeof Player !== 'undefined' &&
+        typeof Player.getPlaylist === 'function' &&
+        typeof Player.setPlaylist === 'function') {
+        var q = Player.getPlaylist();
+        var filtered = q.filter(function(t) { return t && t.id !== trackId; });
+        if (filtered.length !== q.length) Player.setPlaylist(filtered);
+      }
+      if (window.__album && Array.isArray(window.__album.tracks)) {
+        window.__album.tracks = window.__album.tracks.filter(function(t) {
+          return t && t.id !== trackId;
+        });
+      }
+      var sel = document.getElementById('trackSelect');
+      if (sel) {
+        var opt = sel.querySelector('option[value="' + trackId + '"]');
+        if (opt) opt.textContent = opt.textContent.replace(/\u2713/g, '').replace(/\s+$/, '');
+      }
+    }
+
+    // Elimina in sequenza l'audio delle tracce selezionate riusando
+    // l'endpoint esistente upload/delete-audio (una richiesta per file,
+    // come fa il bulk uploader). A fine ciclo aggiorna il menu ed esce
+    // dalla selezione, senza reload: il player nel footer resta vivo.
+    function runBulkAudioDelete() {
+      var items = collectSelectedAudio();
+      var confirmBtn = document.getElementById('btnConfirmBulkDeleteAudio');
+      if (!items.length) {
+        var m0 = document.getElementById('bulkAudioDeleteModal');
+        var i0 = m0 ? bootstrap.Modal.getInstance(m0) : null;
+        if (i0) i0.hide();
+        return;
+      }
+      if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>\u2026';
+      }
+      var csrf = window.__csrfToken || '';
+      var idx = 0;
+      function step() {
+        if (idx >= items.length) {
+          var modalEl = document.getElementById('bulkAudioDeleteModal');
+          var inst = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+          if (inst) inst.hide();
+          if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Elimina';
+          }
+          exitSelectionMode();
+          refreshTracklistMenuState();
+          return;
+        }
+        var it = items[idx++];
+        var fd = new FormData();
+        fd.append('csrf_token', csrf);
+        fetch(BASE + '/index.php?route=upload/delete-audio/' + it.audioId, {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            body: fd
+          })
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            if (d && d.success) markTrackNoAudio(it.trackItem);
+            step();
+          })
+          .catch(function() { step(); });
+      }
+      step();
+    }
+
+    // Allinea lo stato del menu ad ogni esecuzione dell'IIFE
+    // (primo caricamento e ogni navigazione SPA).
+    refreshTracklistMenuState();
+
+    /* ----------------------------------------------------------
        Utility: fetch add-tracks
     ---------------------------------------------------------- */
     function sendToPlaylist(body, btnEl, onSuccess) {
@@ -2403,7 +2980,13 @@ if ($albumTotalSec > 0) {
               rowLi.querySelectorAll('.track-audio-menu-item').forEach(function(mi) {
                 mi.remove();
               });
+              var cbx = rowLi.querySelector('.track-select-cb');
+              if (cbx) cbx.remove();
+              var cell = rowLi.querySelector('.track-index-cell');
+              if (cell) cell.classList.remove('has-cb');
+              onTrackAudioRemoved(parseInt(rowLi.getAttribute('data-track-id'), 10));
             }
+            refreshTracklistMenuState();
           } else if (!d.success && row) {
             var e = document.createElement('span');
             e.className = 'text-danger small ms-2';
@@ -2437,6 +3020,34 @@ if ($albumTotalSec > 0) {
     ---------------------------------------------------------- */
     if (!window.__albumDetailBound) {
       window.__albumDetailBound = true;
+
+      // --- Selezione multipla tracce (elimina audio in blocco) ---
+      document.addEventListener('click', function(e) {
+        if (e.target.closest('#menuSelectTracks')) { enterSelectionMode(); return; }
+        if (e.target.closest('#albumBulkCancel')) { exitSelectionMode(); return; }
+        if (e.target.closest('#albumSelectAll')) {
+          var list = document.getElementById('tracklistPlayer');
+          if (!list) return;
+          var cbs = list.querySelectorAll('.track-select-cb');
+          var allChecked = cbs.length > 0 &&
+            Array.prototype.every.call(cbs, function(c) { return c.checked; });
+          selectAllTracks(!allChecked);
+          return;
+        }
+        if (e.target.closest('#albumBulkDelete')) {
+          var n = collectSelectedAudio().length;
+          if (!n) return;
+          var cnt = document.getElementById('bulkDeleteCount');
+          if (cnt) cnt.textContent = n;
+          var m = document.getElementById('bulkAudioDeleteModal');
+          if (m) bootstrap.Modal.getOrCreateInstance(m).show();
+          return;
+        }
+        if (e.target.closest('#btnConfirmBulkDeleteAudio')) { runBulkAudioDelete(); return; }
+      });
+      document.addEventListener('change', function(e) {
+        if (e.target.classList && e.target.classList.contains('track-select-cb')) updateBulkCount();
+      });
 
       // --- Click su playlist esistente nel dropdown traccia ---
       document.addEventListener('click', function(e) {
@@ -2778,6 +3389,224 @@ if ($albumTotalSec > 0) {
 
     } // fine guard __albumDetailBound
 
+  })();
+</script>
+
+<!-- ============================================================
+     HERO — estrazione colore dominante dalla cover.
+     Nessuna rete, nessuna dipendenza. Su cover cross-origin o
+     errore, resta il fallback neutro definito nel CSS.
+     ============================================================ -->
+<script>
+  (function() {
+    'use strict';
+
+    function extractDominant(img) {
+      var W = 48,
+        H = 48;
+      var canvas = document.createElement('canvas');
+      canvas.width = W;
+      canvas.height = H;
+      var ctx = canvas.getContext('2d', {
+        willReadFrequently: true
+      });
+      if (!ctx) return null;
+      ctx.drawImage(img, 0, 0, W, H);
+      var data;
+      try {
+        data = ctx.getImageData(0, 0, W, H).data;
+      } catch (e) {
+        return null;
+      }
+      var rs = 0,
+        gs = 0,
+        bs = 0,
+        n = 0;
+      for (var i = 0; i < data.length; i += 4) {
+        var r = data[i],
+          g = data[i + 1],
+          b = data[i + 2],
+          a = data[i + 3];
+        if (a < 200) continue;
+        var max = Math.max(r, g, b),
+          min = Math.min(r, g, b);
+        var v = max / 255;
+        var s = max === 0 ? 0 : (max - min) / max;
+        if (v > 0.15 && v < 0.97 && s > 0.22) {
+          rs += r;
+          gs += g;
+          bs += b;
+          n++;
+        }
+      }
+      if (n < 12) {
+        rs = gs = bs = n = 0;
+        for (var j = 0; j < data.length; j += 4) {
+          if (data[j + 3] < 200) continue;
+          rs += data[j];
+          gs += data[j + 1];
+          bs += data[j + 2];
+          n++;
+        }
+        if (n === 0) return null;
+      }
+      return [Math.round(rs / n), Math.round(gs / n), Math.round(bs / n)];
+    }
+
+    // Scurisce il colore estratto in base alla sua luminosita' percepita
+    // (formula Rec. 601). Piu' la cover e' chiara, piu' scuriamo: cosi'
+    // un azzurro pastello o un giallo chiaro diventano una base scura su
+    // cui il testo bianco resta leggibile, MANTENENDO la tinta della cover.
+    function darkenForText(rgb) {
+      var r = rgb[0],
+        g = rgb[1],
+        b = rgb[2];
+      var lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255; // 0 = nero, 1 = bianco
+      var scale = 0.85 - lum * 0.6;
+      if (scale < 0.32) scale = 0.32;
+      if (scale > 0.78) scale = 0.78;
+      return 'rgb(' + Math.round(r * scale) + ',' + Math.round(g * scale) + ',' + Math.round(b * scale) + ')';
+    }
+
+    // Idempotente: rilegge l'hero corrente e applica il colore. Puo' essere
+    // chiamata quante volte serve (primo load E ogni navigazione SPA), senza
+    // accumulare listener. Esposta come window.__applyAlbumHero: e' il router
+    // SPA in app.js a richiamarla dopo aver iniettato il nuovo contenuto,
+    // esattamente come fa con initTracklistPlayers()/reinitBootstrap().
+    function applyHeroColor() {
+      var hero = document.getElementById('albumHero');
+      if (!hero) return;
+      var img = hero.querySelector('.album-hero-cover');
+      if (!img) return;
+      var src = img.getAttribute('src') || '';
+      if (src.indexOf('placeholder') !== -1) return;
+
+      function run() {
+        if (!img.naturalWidth) return;
+        var rgb = extractDominant(img);
+        if (rgb) {
+          hero.style.setProperty('--cover', 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')');
+          hero.style.setProperty('--cover-safe', darkenForText(rgb));
+        }
+      }
+      if (img.complete && img.naturalWidth) {
+        run();
+      } else {
+        img.addEventListener('load', run, {
+          once: true
+        });
+        img.addEventListener('error', function() {}, {
+          once: true
+        });
+      }
+    }
+
+    window.__applyAlbumHero = applyHeroColor;
+
+    // Primo caricamento (pagina piena, non-SPA).
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', applyHeroColor);
+    } else {
+      applyHeroColor();
+    }
+  })();
+</script>
+
+<!-- ============================================================
+     PULSANTE HERO "RIPRODUCI ALBUM" — tre stati dinamici
+     Stato 1  Riproduci album  (play)   -> carica e avvia l'album
+     Stato 2  Pausa            (pause)  -> l'album è in riproduzione
+     Stato 3  Riprendi         (play)   -> l'album è in pausa, riprende
+     Lo stato è calcolato dal Player (isPlaying + traccia corrente con
+     albumId === questo album). Si sincronizza sull'evento 'player:changed'
+     già emesso dal Player, senza toccarne la logica interna.
+     ============================================================ -->
+<script>
+  (function () {
+    'use strict';
+
+    // Vero se la traccia attualmente caricata nel Player appartiene a
+    // QUESTO album (confronto per albumId, con fallback sull'appartenenza
+    // della traccia corrente alla tracklist dell'album).
+    function isThisAlbumLoaded() {
+      if (typeof Player === 'undefined' || typeof Player.currentTrack !== 'function') return false;
+      var t = Player.currentTrack();
+      if (!t) return false;
+      var myId = window.__albumId || (window.__album && window.__album.id) || null;
+      if (myId && t.albumId) return String(t.albumId) === String(myId);
+      // Fallback: la traccia corrente è una delle tracce di questo album?
+      if (window.__album && Array.isArray(window.__album.tracks)) {
+        return window.__album.tracks.some(function (x) {
+          return x && (x.id === t.id || x.src === t.src);
+        });
+      }
+      return false;
+    }
+
+    // Aggiorna icona + testo del pulsante secondo i tre stati.
+    function sync() {
+      var btn = document.getElementById('albumHeroPlay');
+      if (!btn) return;
+      var icon = btn.querySelector('i');
+      var label = btn.querySelector('.album-hero-play-label');
+      if (!icon || !label) return;
+
+      var loaded = isThisAlbumLoaded();
+      var playing = loaded && typeof Player !== 'undefined' && Player.isPlaying && Player.isPlaying();
+
+      if (playing) {
+        // Stato 2 — in riproduzione
+        icon.className = 'bi bi-pause-fill';
+        label.textContent = 'Pausa';
+        btn.title = 'Pausa';
+        btn.classList.add('is-playing');
+        btn.classList.remove('is-paused');
+      } else if (loaded) {
+        // Stato 3 — caricato ma in pausa
+        icon.className = 'bi bi-play-fill';
+        label.textContent = 'Riprendi';
+        btn.title = 'Riprendi';
+        btn.classList.add('is-paused');
+        btn.classList.remove('is-playing');
+      } else {
+        // Stato 1 — album non in riproduzione
+        icon.className = 'bi bi-play-fill';
+        label.textContent = 'Riproduci album';
+        btn.title = 'Riproduci album';
+        btn.classList.remove('is-playing', 'is-paused');
+      }
+    }
+
+    // Click: se questo album è già caricato E il Player espone togglePlay,
+    // fa toggle play/pausa; in TUTTI gli altri casi ripiega su load(), che
+    // esisteva già e avviava la riproduzione. Così il pulsante non resta
+    // mai "muto", nemmeno con una versione vecchia del Player in cache.
+    window.__albumHeroPlayClick = function () {
+      try {
+        if (typeof Player !== 'undefined' && isThisAlbumLoaded() && typeof Player.togglePlay === 'function') {
+          Player.togglePlay();
+        } else if (typeof Player !== 'undefined' && typeof Player.load === 'function') {
+          Player.load(window.__album);
+        }
+      } catch (e) {
+        // Ultima rete di sicurezza: se qualcosa lancia, prova comunque load().
+        if (typeof Player !== 'undefined' && typeof Player.load === 'function') {
+          try { Player.load(window.__album); } catch (e2) {}
+        }
+      }
+      // sync immediato ottimistico; l'evento player:changed lo confermerà
+      setTimeout(sync, 0);
+    };
+
+    // Espone sync per il router SPA e ascolta i cambi di stato del Player.
+    window.__syncAlbumHeroPlayBtn = sync;
+    document.addEventListener('player:changed', sync);
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', sync);
+    } else {
+      sync();
+    }
   })();
 </script>
 

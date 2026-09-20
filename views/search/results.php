@@ -62,7 +62,8 @@ $advCount = count(array_filter([
       </p>
     <?php endif; ?>
   </div>
-  <a href="<?= BASE_URL ?>/index.php" class="btn btn-sm btn-outline-secondary ms-3 flex-shrink-0">
+  <a href="<?= BASE_URL ?>/index.php" class="btn btn-sm btn-outline-secondary ms-3 flex-shrink-0"
+    onclick="event.preventDefault(); event.stopPropagation(); grzBack(this.getAttribute('href'));">
     <i class="bi bi-arrow-left me-1"></i>Indietro
   </a>
 </div>
@@ -314,5 +315,18 @@ $advCount = count(array_filter([
   <?php endif; ?>
 
 <?php endif; ?>
+
+<script>
+  // Navigazione "indietro" consapevole del percorso (vedi album/artista).
+  window.grzBack = function (fallbackUrl) {
+    if (window.history.state && window.history.state.url) {
+      window.history.back();
+    } else if (typeof window._spaNavigate === 'function') {
+      window._spaNavigate(fallbackUrl);
+    } else {
+      window.location.href = fallbackUrl;
+    }
+  };
+</script>
 
 <?php require BASE_PATH . '/views/layout/footer.php'; ?>

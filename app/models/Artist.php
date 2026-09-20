@@ -276,6 +276,17 @@ class Artist {
             $elapsedMinutes = (time() - strtotime($fetchedAt)) / 60;
             return $elapsedMinutes >= $errorCooldownMinutes;
         }
+        // Risultato PARZIALE: abbiamo già salvato e mostrato gli album
+        // raccolti, ma la scansione si era interrotta (una pagina caduta).
+        // Ritenta per RICOMPLETARE dopo un cooldown breve — molto più corto
+        // dell'errore, perché qui NON stiamo martellando su un fallimento:
+        // stiamo solo cercando di aggiungere i dischi mancanti. La guardia
+        // anti-regressione in saveDiscography assicura che un nuovo parziale
+        // più corto non peggiori quello che già mostriamo.
+        if ($status === 'partial') {
+            $elapsedMinutes = (time() - strtotime($fetchedAt)) / 60;
+            return $elapsedMinutes >= 60;
+        }
         // Stato 'ok': anche con dati vuoti è un "non trovato" confermato.
         // Con $okTtlDays > 0, però, la conferma SCADE: dopo N giorni si
         // rivalida da sola (usato dalla discografia — un artista attivo
@@ -373,16 +384,25 @@ class Artist {
     public function saveDiscography(int $artistId, array $items, string $status = 'ok', int $version = 0): void {
         $this->db->beginTransaction();
         try {
-            if ($status === 'ok') {
-                // GUARDIA ANTI-SVUOTAMENTO: con la rivalidazione periodica
-                // (TTL 30 giorni) un refetch "riuscito" ma degenere — zero
-                // risultati per un'anomalia lato MusicBrainz o un filtro
-                // troppo aggressivo — non deve cancellare una discografia
-                // buona già in cache. Stesso principio di updateMeta():
-                // migliorare o pareggiare, mai peggiorare. Timestamp,
-                // stato e versione si aggiornano comunque (sotto), così
-                // il tentativo resta tracciato e non si martella l'API.
-                $keepExisting = empty($items) && $this->hasDiscography($artistId);
+            // Sia 'ok' sia 'partial' scrivono le righe. La differenza è nel
+            // cooldown (vedi needsRefetch): 'ok' = definitivo (TTL lungo),
+            // 'partial' = incompleto (retry breve per ricompletarsi).
+            if ($status === 'ok' || $status === 'partial') {
+                // GUARDIA ANTI-SVUOTAMENTO / ANTI-REGRESSIONE:
+                //  - refetch 'ok' ma degenere (zero risultati per anomalia
+                //    MusicBrainz o filtro troppo aggressivo) non deve
+                //    cancellare una discografia buona già in cache;
+                //  - un risultato PARZIALE più CORTO non deve sostituire una
+                //    discografia esistente più LUNGA (es. avevo 25 album
+                //    completi, un parziale ne porta 16: tengo i 25). Un
+                //    parziale che invece AMPLIA (16 → 18) aggiorna.
+                // In sintesi: migliorare o pareggiare, mai peggiorare.
+                $existingCount = $this->discographyCount($artistId);
+                $newCount      = count($items);
+
+                $keepExisting =
+                    (empty($items) && $existingCount > 0)          // vuoto vs qualcosa
+                    || ($newCount > 0 && $newCount < $existingCount); // parziale più corto
 
                 if (!$keepExisting) {
                     $del = $this->db->prepare("DELETE FROM artist_discography WHERE artist_id = :id");
@@ -422,6 +442,17 @@ class Artist {
             $this->db->rollBack();
             throw $e;
         }
+    }
+
+    // Conta le righe di discografia in cache per un artista. Usato dalla
+    // guardia anti-regressione in saveDiscography (un parziale più corto
+    // non deve sostituire una discografia più lunga).
+    public function discographyCount(int $artistId): int {
+        $stmt = $this->db->prepare("
+            SELECT COUNT(*) FROM artist_discography WHERE artist_id = :id
+        ");
+        $stmt->execute([':id' => $artistId]);
+        return (int) $stmt->fetchColumn();
     }
 
 }

@@ -249,7 +249,7 @@ $artistNameValue = isset($old['artist_name'])
                   value="<?= formVal('label_new', $album, $old) ?>">
               </div>
 
-              <div class="col-6">
+              <div class="col-6" id="conditionField">
                 <label class="form-label fw-semibold">Stato conservazione</label>
                 <select name="condition" class="form-select">
                   <?php
@@ -839,6 +839,41 @@ $artistNameValue = isset($old['artist_name'])
           dropdown.style.display = 'none';
         }
       });
+    })();
+
+    // -------------------------------------------------------
+    // Stato conservazione: nascosto quando l'unico formato
+    // selezionato è "Digital". La condizione fisica non si
+    // applica a un supporto digitale; se però è posseduto anche
+    // un formato fisico (es. Vinile + Digital) il campo resta
+    // visibile, perché descrive comunque la copia fisica.
+    // Il valore del select non viene disabilitato: se il campo
+    // torna visibile (formato fisico aggiunto) lo stato scelto
+    // in precedenza è ancora presente.
+    // -------------------------------------------------------
+    (function initConditionToggle() {
+      const field  = document.getElementById('conditionField');
+      const checks = document.querySelectorAll('input[name="format_ids[]"]');
+      if (!field || !checks.length) return;
+
+      function isDigital(cb) {
+        const lbl = document.querySelector('label[for="' + cb.id + '"]');
+        const txt = lbl ? lbl.textContent.trim().toLowerCase() : '';
+        return txt === 'digital';
+      }
+
+      function syncCondition() {
+        const checked = Array.prototype.filter.call(checks, function(cb) {
+          return cb.checked;
+        });
+        const digitalOnly = checked.length > 0 && checked.every(isDigital);
+        field.style.display = digitalOnly ? 'none' : '';
+      }
+
+      Array.prototype.forEach.call(checks, function(cb) {
+        cb.addEventListener('change', syncCondition);
+      });
+      syncCondition();
     })();
 
     bindRemoveButtons();

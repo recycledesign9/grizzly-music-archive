@@ -130,6 +130,22 @@ class ArtistController
       $fetchOk = (bool) ($meta['fetch_ok'] ?? true);
       unset($meta['fetch_ok']);
 
+      // FIX REGRESSIONE DISCOGRAFIA (Supergrass/Pulp): la ricerca artista
+      // su MusicBrainz può fallire (503 intermittente sull'endpoint
+      // /artist/?query) mentre bio (Wikipedia) e foto (Deezer) riescono.
+      // In quel caso $meta['mb_artist_id'] arriva VUOTO e, senza questa
+      // guardia, sovrascriveva un MBID già valido con NULL: da lì la
+      // discografia usciva sempre vuota (fetchDiscography esce subito se
+      // mb_artist_id è vuoto) e ogni visita ripeteva il ciclo.
+      //  1) Se il fetch non ha prodotto un MBID ma nel DB ce n'è già uno
+      //     valido, si conserva quello vecchio invece di azzerarlo.
+      //  2) Se dopo questo l'MBID è ancora vuoto, lo status resta 'error'
+      //     a prescindere dall'esito bio, così il retry continua finché
+      //     MusicBrainz non risponde e l'MBID viene finalmente catturato.
+      if (empty($meta['mb_artist_id']) && !empty($artist['mb_artist_id'])) {
+        $meta['mb_artist_id'] = $artist['mb_artist_id'];
+      }
+
       // Download immagine in locale (best-effort)
       if (!empty($meta['image_url'])) {
         $local = $service->downloadImage($meta['image_url']);
@@ -139,6 +155,11 @@ class ArtistController
       }
 
       $status = $fetchOk ? 'ok' : 'error';
+      // Senza MBID la scheda è incompleta (niente discografia): tieni lo
+      // stato su 'error' così needsBioRefetch ritenta dopo il cooldown.
+      if (empty($meta['mb_artist_id'])) {
+        $status = 'error';
+      }
       $this->artistModel->updateMeta($id, $meta, $status, ArtistMetadataService::BIO_LOGIC_VERSION);
 
       // Ricarica per servire i path definitivi
@@ -208,15 +229,24 @@ class ArtistController
 
       require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
 
-      // Gia' in cache E ancora valida (stessa versione della logica di
-      // fetch, nessun errore da ritentare)? servi dal DB senza richiamare
-      // MusicBrainz. Il version bump fa sì che le discografie già in
-      // cache con l'algoritmo vecchio (troncato) si aggiornino da sole
-      // alla prossima visita, senza bisogno di toccare il DB a mano.
-      if (!$this->artistModel->needsDiscographyRefetch($artist, ArtistMetadataService::DISCOGRAPHY_LOGIC_VERSION)) {
+      // Discografia già salvata e NON vuota: la mostriamo dalla cache
+      // (rispettando needsDiscographyRefetch per gli aggiornamenti di
+      // versione). Se invece in cache non c'è NESSUNA riga, non ci
+      // fidiamo del cooldown: un vuoto salvato è quasi sempre un
+      // fallimento MusicBrainz transitorio (503 a metà scansione), non un
+      // artista senza dischi. In quel caso si ritenta SUBITO a ogni visita
+      // — con il retry HTTP sui 503 ora nel service, basta che l'utente
+      // riapra la pagina e la discografia si popola da sola, senza SQL
+      // manuale. (Il refetch resta comunque limitato a chi ha un MBID,
+      // vedi guardia $mbid poco sotto.)
+      $cachedDisco = $this->artistModel->getDiscography($id);
+      $hasCached   = !empty($cachedDisco);
+
+      if ($hasCached
+          && !$this->artistModel->needsDiscographyRefetch($artist, ArtistMetadataService::DISCOGRAPHY_LOGIC_VERSION)) {
         echo json_encode([
           'ok'    => true,
-          'items' => $this->mapDiscographyCovers($this->artistModel->getDiscography($id)),
+          'items' => $this->mapDiscographyCovers($cachedDisco),
         ]);
         return;
       }
@@ -233,7 +263,19 @@ class ArtistController
       $service = new ArtistMetadataService();
       $result  = $service->fetchDiscography($mbid);
 
-      $status = ($result['ok'] ?? true) ? 'ok' : 'error';
+      // Tre stati possibili (vedi fetchDiscography + Artist::saveDiscography):
+      //  - ok=false            → 'error': fetch fallito senza risultati,
+      //                          ritenta dopo il cooldown lungo.
+      //  - ok=true, partial    → 'partial': una pagina della scansione è
+      //                          caduta (es. HTTP 0 su cataloghi grossi come
+      //                          i Pumpkins) ma abbiamo già raccolto album:
+      //                          si salvano e si mostrano SUBITO, e si
+      //                          ricompletano da soli dopo un cooldown breve.
+      //  - ok=true, non partial → 'ok': discografia completa, TTL lungo.
+      $status = !($result['ok'] ?? true)
+        ? 'error'
+        : (!empty($result['partial']) ? 'partial' : 'ok');
+
       $this->artistModel->saveDiscography(
         $id,
         $result['items'] ?? [],

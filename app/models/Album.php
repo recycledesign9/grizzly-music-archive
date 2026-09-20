@@ -513,6 +513,283 @@ class Album
     return $this->db->query("SELECT * FROM labels ORDER BY name")->fetchAll();
   }
 
+
+
+  /**
+   * Coppie artista/titolo già presenti in archivio.
+   * Servono a non mostrare come "esterno" un disco già posseduto.
+   *
+   * @return array<int,array{artist:string,title:string}>
+   */
+  public function getOwnedAlbumPairs(): array
+  {
+    $stmt = $this->db->query("
+      SELECT ar.name AS artist, a.title
+      FROM albums a
+      JOIN artists ar ON ar.id = a.artist_id
+    ");
+
+    return $stmt->fetchAll(PDO::FETCH_ASSOC);
+  }
+
+  // ----------------------------------------------------------
+  // RACCOMANDAZIONI ALBUM
+  //
+  // Cerca SOLO album già presenti nell'archivio Grizzly.
+  // Ranking:
+  //   1. affinità Last.fm
+  //   2. stesso genere
+  //   3. vicinanza temporale
+  //
+  // Al massimo un album per artista.
+  // Se i match Last.fm locali non bastano, completa con album
+  // dello stesso genere.
+  // ----------------------------------------------------------
+  public function getRecommendations(
+    array $similarArtists,
+    int $excludeAlbumId,
+    int $excludeArtistId,
+    ?int $genreId,
+    ?int $year,
+    int $limit = 4,
+    array $albumTags = []
+  ): array {
+    $limit = max(1, min(8, $limit));
+
+    // Tag dell'album corrente (Last.fm, già normalizzati minuscoli) come
+    // set per confronto O(1): danno il bonus "coerenza col disco" che
+    // rende i consigli album-aware, non solo artist-aware.
+    $tagSet = [];
+    foreach ($albumTags as $t) {
+      $t = trim((string) $t);
+      if ($t !== '') {
+        $tagSet[mb_strtolower($t, 'UTF-8')] = true;
+      }
+    }
+
+    $similarity = [];
+    $artistScores = [];
+    $queryNames = [];
+
+    foreach ($similarArtists as $item) {
+      $name = trim((string)($item['name'] ?? ''));
+      if ($name === '') continue;
+
+      $norm = $this->normalizeArtistForRecommendation($name);
+      if ($norm === '') continue;
+
+      $match = max(0.0, min(1.0, (float)($item['match'] ?? 0)));
+      $albumScore = isset($item['_album_score'])
+        ? max(0.0, (float)$item['_album_score'])
+        : ($match * 1000.0);
+
+      if (!isset($artistScores[$norm]) || $albumScore > $artistScores[$norm]) {
+        $similarity[$norm] = $match;
+        $artistScores[$norm] = $albumScore;
+        $queryNames[$norm] = $name;
+      }
+    }
+
+    $candidates = [];
+
+    if (!empty($queryNames)) {
+      $placeholders = [];
+      $params = [
+        ':exclude_album'  => $excludeAlbumId,
+        ':exclude_artist' => $excludeArtistId,
+      ];
+
+      $i = 0;
+      foreach (array_values($queryNames) as $name) {
+        $ph = ':artist_' . $i++;
+        $placeholders[] = $ph;
+        $params[$ph] = $name;
+      }
+
+      $sql = "
+        SELECT
+          a.id,
+          a.title,
+          a.year,
+          a.cover_local,
+          a.cover_url,
+          a.genre_id,
+          a.created_at,
+          ar.id AS artist_id,
+          ar.name AS artist_name,
+          g.name AS genre_name
+        FROM albums a
+        JOIN artists ar ON ar.id = a.artist_id
+        LEFT JOIN genres g ON g.id = a.genre_id
+        WHERE a.id <> :exclude_album
+          AND a.artist_id <> :exclude_artist
+          AND ar.name IN (" . implode(',', $placeholders) . ")
+      ";
+
+      $stmt = $this->db->prepare($sql);
+
+      foreach ($params as $key => $value) {
+        $stmt->bindValue(
+          $key,
+          $value,
+          is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR
+        );
+      }
+
+      $stmt->execute();
+
+      foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $norm = $this->normalizeArtistForRecommendation((string)$row['artist_name']);
+        $match = $similarity[$norm] ?? 0.0;
+
+        if ($match <= 0.0 && !isset($artistScores[$norm])) {
+          continue;
+        }
+
+        // Gli artisti emersi solo da track.getSimilar hanno match=0 ma
+        // mantengono il loro _album_score specifico del disco.
+        $score = $artistScores[$norm] ?? ($match * 1000.0);
+
+        if ($genreId && (int)$row['genre_id'] === $genreId) {
+          $score += 80.0;
+        }
+
+        // Bonus ALBUM-AWARE: il genere del candidato compare tra i tag
+        // dell'album corrente? (es. album corrente taggato "noise rock",
+        // candidato di genere "Noise Rock" → +90). È questo che fa variare
+        // i consigli tra Il Vile e Che cosa vedi pur partendo dagli stessi
+        // artisti simili. Confronto sul NOME genere normalizzato.
+        if (!empty($tagSet) && !empty($row['genre_name'])) {
+          $gname = mb_strtolower(trim((string)$row['genre_name']), 'UTF-8');
+          if ($gname !== '' && isset($tagSet[$gname])) {
+            $score += 90.0;
+          }
+        }
+
+        if ($year && !empty($row['year'])) {
+          $diff = abs((int)$row['year'] - $year);
+
+          if ($diff <= 1)       $score += 60.0;
+          elseif ($diff <= 3)  $score += 45.0;
+          elseif ($diff <= 5)  $score += 30.0;
+          elseif ($diff <= 10) $score += 15.0;
+        }
+
+        $row['_score'] = $score;
+        $row['_basis'] = 'lastfm';
+        $candidates[] = $row;
+      }
+    }
+
+    usort($candidates, function (array $a, array $b): int {
+      if ($a['_score'] === $b['_score']) {
+        return strcmp((string)$a['title'], (string)$b['title']);
+      }
+      return ($a['_score'] < $b['_score']) ? 1 : -1;
+    });
+
+    $selected = [];
+    $usedArtists = [];
+
+    foreach ($candidates as $row) {
+      $artistId = (int)$row['artist_id'];
+
+      if (isset($usedArtists[$artistId])) continue;
+
+      $usedArtists[$artistId] = true;
+      $selected[] = $row;
+
+      if (count($selected) >= $limit) break;
+    }
+
+    // Fallback locale per completare la lista.
+    if (count($selected) < $limit && $genreId) {
+      $stmt = $this->db->prepare("
+        SELECT
+          a.id,
+          a.title,
+          a.year,
+          a.cover_local,
+          a.cover_url,
+          a.genre_id,
+          a.created_at,
+          ar.id AS artist_id,
+          ar.name AS artist_name
+        FROM albums a
+        JOIN artists ar ON ar.id = a.artist_id
+        WHERE a.genre_id = :genre_id
+          AND a.id <> :exclude_album
+          AND a.artist_id <> :exclude_artist
+        ORDER BY a.created_at DESC, a.id DESC
+      ");
+
+      $stmt->execute([
+        ':genre_id'       => $genreId,
+        ':exclude_album'  => $excludeAlbumId,
+        ':exclude_artist' => $excludeArtistId,
+      ]);
+
+      $fallback = [];
+
+      foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $artistId = (int)$row['artist_id'];
+
+        if (isset($usedArtists[$artistId])) continue;
+
+        $score = 0.0;
+
+        if ($year && !empty($row['year'])) {
+          $diff = abs((int)$row['year'] - $year);
+          $score = max(0.0, 100.0 - min(100, $diff * 5));
+        }
+
+        $row['_score'] = $score;
+        $row['_basis'] = 'genre';
+        $fallback[] = $row;
+      }
+
+      usort($fallback, function (array $a, array $b): int {
+        if ($a['_score'] === $b['_score']) {
+          return strcmp((string)$a['title'], (string)$b['title']);
+        }
+        return ($a['_score'] < $b['_score']) ? 1 : -1;
+      });
+
+      foreach ($fallback as $row) {
+        $artistId = (int)$row['artist_id'];
+
+        if (isset($usedArtists[$artistId])) continue;
+
+        $usedArtists[$artistId] = true;
+        $selected[] = $row;
+
+        if (count($selected) >= $limit) break;
+      }
+    }
+
+    foreach ($selected as &$row) {
+      unset($row['_score']);
+    }
+    unset($row);
+
+    return $selected;
+  }
+
+  private function normalizeArtistForRecommendation(string $name): string
+  {
+    $name = trim($name);
+
+    if (function_exists('mb_strtolower')) {
+      $name = mb_strtolower($name, 'UTF-8');
+    } else {
+      $name = strtolower($name);
+    }
+
+    $name = preg_replace('/\s+/u', ' ', $name);
+
+    return trim((string)$name);
+  }
+
   // ----------------------------------------------------------
   // Slug univoco
   // ----------------------------------------------------------
