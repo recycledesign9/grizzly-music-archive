@@ -106,8 +106,20 @@ class ArtistMetadataService
      * status:official nella query: ogni release-group mostrato ha almeno
      * una release ufficiale, qualunque sia la sua data. Rimossa la
      * conferma a campione confirmOfficialAmbiguous(), non più necessaria.
+     *
+     * v16: fix del 2026-09 — la deduplica finale per solo TITOLO
+     * collassava gli album omonimi dello stesso artista in un'unica voce
+     * (la più vecchia). Caso confermato: American Football, i cui album in
+     * studio si chiamano tutti "American Football" (1999, LP2 2016, LP3
+     * 2019, LP4 2026): restava solo il 1999. Stesso rischio per Peter
+     * Gabriel 1-4, Weezer, Seal. MusicBrainz distingue i release-group
+     * omonimi con il campo "disambiguation" (LP2, LP3, Blue Album...):
+     * ora la chiave di deduplica è titolo + disambiguation. Due gruppi
+     * con stesso titolo e stessa disambiguation (o entrambi senza) restano
+     * trattati come riedizione dello stesso album, e si tiene il più
+     * vecchio come prima.
      */
-    public const DISCOGRAPHY_LOGIC_VERSION = 15;
+    public const DISCOGRAPHY_LOGIC_VERSION = 16;
 
     /** Lunghezza massima bio salvata (caratteri) per non esagerare */
     private const BIO_MAX_CHARS = 2200;
@@ -1257,6 +1269,9 @@ class ArtistMetadataService
                     if ($rgId === '' || $title === '') {
                         continue;
                     }
+                    // Disambiguation MusicBrainz: distingue gli album
+                    // omonimi dello stesso artista (es. "LP2", "LP3").
+                    $disamb = trim((string) ($rg['disambiguation'] ?? ''));
 
                     // Controllo difensivo sullo stato: se la risposta
                     // include l'elenco delle release del gruppo con il
@@ -1312,14 +1327,16 @@ class ArtistMetadataService
                     }
                     $year = (int) $mYear[1];
 
-                    // Dedup per TITOLO + ANNO: due release-group omonimi di
-                    // anni diversi sono album distinti, non duplicati.
-                    $key = preg_replace('/\s+/', ' ', mb_strtolower($title)) . '|' . $year;
+                    // Dedup per TITOLO + DISAMBIGUATION + ANNO: due
+                    // release-group omonimi di anni diversi sono album
+                    // distinti, non duplicati.
+                    $key = $this->discographyTitleKey($title, $disamb) . '|' . $year;
                     if (!isset($candidates[$key])) {
                         $candidates[$key] = [
-                            'rgId'  => $rgId,
-                            'title' => $title,
-                            'year'  => $year,
+                            'rgId'   => $rgId,
+                            'title'  => $title,
+                            'year'   => $year,
+                            'disamb' => $disamb,
                         ];
                     }
                 }
@@ -1335,14 +1352,17 @@ class ArtistMetadataService
                 'title'               => $cand['title'],
                 'year'                => $cand['year'],
                 'mb_release_group_id' => $cand['rgId'],
+                'disamb'              => $cand['disamb'],
             ];
         }
 
-        // Dedup finale per TITOLO: se restano due entry omonime (raro:
-        // album + riedizione stesso titolo in anni diversi, entrambe con
-        // release ufficiali), tiene la più vecchia, cioè l'uscita
-        // originale. Si ordina prima per anno così la prima vista è
-        // quella corretta.
+        // Dedup finale per TITOLO + DISAMBIGUATION: se restano due entry
+        // con lo stesso titolo e la stessa disambiguation (raro: album +
+        // riedizione in anni diversi, entrambe con release ufficiali),
+        // tiene la più vecchia, cioè l'uscita originale. Album omonimi
+        // distinti da MusicBrainz con una disambiguation diversa (American
+        // Football LP2/LP3, Peter Gabriel 1-4) restano voci separate.
+        // Si ordina prima per anno così la prima vista è quella corretta.
         usort($out, function ($a, $b) {
             $ya = $a['year'] ?? 99999;
             $yb = $b['year'] ?? 99999;
@@ -1354,8 +1374,9 @@ class ArtistMetadataService
 
         $byTitle = [];
         foreach ($out as $item) {
-            $tkey = preg_replace('/\s+/', ' ', mb_strtolower($item['title']));
+            $tkey = $this->discographyTitleKey($item['title'], $item['disamb']);
             if (!isset($byTitle[$tkey])) {
+                unset($item['disamb']);
                 $byTitle[$tkey] = $item;
             }
         }
@@ -1381,6 +1402,18 @@ class ArtistMetadataService
         }
 
         return ['ok' => $ok, 'partial' => $partial, 'items' => $out];
+    }
+
+    /**
+     * Chiave di deduplica della discografia: titolo normalizzato più la
+     * disambiguation MusicBrainz, se presente. Senza disambiguation la
+     * chiave coincide con quella usata fino a v15.
+     */
+    private function discographyTitleKey(string $title, string $disamb): string
+    {
+        $key = preg_replace('/\s+/', ' ', mb_strtolower(trim($title)));
+        $disamb = preg_replace('/\s+/', ' ', mb_strtolower(trim($disamb)));
+        return $disamb === '' ? $key : $key . ' [' . $disamb . ']';
     }
 
     /**
