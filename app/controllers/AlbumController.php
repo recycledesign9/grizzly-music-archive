@@ -341,15 +341,25 @@ class AlbumController
     // (findByName): se l'inserimento viene bloccato non deve
     // restare nel DB un artista orfano creato da findOrCreate.
     // In modifica ($id) il record corrente viene escluso.
+    //
+    // Titolo uguale non significa sempre stesso album: alcuni
+    // artisti hanno più album omonimi (American Football LP1-LP4,
+    // Peter Gabriel 1-4, Weezer). findSameAlbum() confronta quindi
+    // il release-group MusicBrainz: stesso gruppo = stesso album
+    // (anche se edizione diversa, es. ristampa) e il salvataggio
+    // resta bloccato; gruppo diverso = album distinto e il
+    // salvataggio procede.
     // -------------------------------------------------------
     $checkArtistId = !empty($_POST['artist_id'])
       ? (int)$_POST['artist_id']
       : $this->artistModel->findByName($_POST['artist_name'] ?? '');
 
     if ($checkArtistId) {
-      $duplicate = $this->albumModel->findDuplicate(
+      $duplicate = $this->findSameAlbum(
         $checkArtistId,
         trim($_POST['title'] ?? ''),
+        trim($_POST['mbid'] ?? ''),
+        (int)($_POST['year'] ?? 0),
         $id
       );
 
@@ -1143,6 +1153,103 @@ class AlbumController
   }
 
   // Esegue la singola GET cURL. Ritorna [body|null, httpCode, error, errno].
+  // ----------------------------------------------------------
+  // Duplicati con titolo omonimo
+  //
+  // Restituisce la scheda esistente che rappresenta lo STESSO album
+  // (stesso artista, stesso titolo, stesso release-group MusicBrainz),
+  // oppure null se non ce n'è nessuna.
+  //
+  // Regole, per ogni scheda con artista e titolo uguali:
+  //  1) entrambe hanno un MBID di release e MusicBrainz risponde:
+  //     stesso release-group = stesso album (duplicato), gruppo
+  //     diverso = album distinto;
+  //  2) altrimenti (inserimento manuale senza MBID, MusicBrainz non
+  //     raggiungibile): anni entrambi noti e diversi = album distinti,
+  //     in tutti gli altri casi si considera duplicato, come prima.
+  // Le chiamate a MusicBrainz avvengono solo quando esiste già una
+  // scheda con lo stesso titolo, quindi il salvataggio normale non
+  // rallenta.
+  // ----------------------------------------------------------
+  private function findSameAlbum(int $artistId, string $title, string $mbid, int $year, ?int $excludeId): ?array
+  {
+    $sql = "
+        SELECT id, title, slug, year, mbid
+        FROM albums
+        WHERE artist_id = :artist_id
+          AND LOWER(TRIM(title)) = LOWER(TRIM(:title))
+    ";
+    $params = [':artist_id' => $artistId, ':title' => $title];
+    if ($excludeId !== null) {
+      $sql .= " AND id <> :exclude_id";
+      $params[':exclude_id'] = $excludeId;
+    }
+
+    $stmt = Database::getInstance()->prepare($sql);
+    $stmt->execute($params);
+    $candidates = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    if (empty($candidates)) {
+      return null;
+    }
+
+    $newGroup = $this->releaseGroupOf($mbid);
+
+    foreach ($candidates as $cand) {
+      $candGroup = $this->releaseGroupOf((string)($cand['mbid'] ?? ''));
+
+      if ($newGroup !== '' && $candGroup !== '') {
+        if ($newGroup === $candGroup) {
+          return $cand;
+        }
+        continue;
+      }
+
+      $candYear = (int)($cand['year'] ?? 0);
+      if ($year > 0 && $candYear > 0 && $year !== $candYear) {
+        continue;
+      }
+      return $cand;
+    }
+
+    return null;
+  }
+
+  // Release-group MusicBrainz di una release, oppure '' se l'MBID
+  // manca, non è valido o MusicBrainz non risponde. Cache per la
+  // durata della richiesta e pausa di 1,1 s tra due chiamate, come
+  // richiesto dal limite di MusicBrainz (1 richiesta al secondo).
+  private function releaseGroupOf(string $releaseMbid): string
+  {
+    static $cache = [];
+    static $lastCall = 0.0;
+
+    $releaseMbid = strtolower(trim($releaseMbid));
+    if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $releaseMbid)) {
+      return '';
+    }
+    if (array_key_exists($releaseMbid, $cache)) {
+      return $cache[$releaseMbid];
+    }
+
+    $wait = 1.1 - (microtime(true) - $lastCall);
+    if ($lastCall > 0 && $wait > 0) {
+      usleep((int)($wait * 1000000));
+    }
+    $lastCall = microtime(true);
+
+    $url = 'https://musicbrainz.org/ws/2/release/' . $releaseMbid . '?inc=release-groups&fmt=json';
+    [$body, $code] = $this->curlGet($url, APP_USER_AGENT, 8, true);
+
+    $group = '';
+    if ($body !== null && $code === 200) {
+      $data  = json_decode($body, true);
+      $group = strtolower((string)($data['release-group']['id'] ?? ''));
+    }
+
+    $cache[$releaseMbid] = $group;
+    return $group;
+  }
+
   private function curlGet(string $url, string $userAgent, int $timeoutSeconds, bool $verifySsl): array
   {
     $ch = curl_init($url);
