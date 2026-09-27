@@ -6,12 +6,14 @@ RUN apt-get update && apt-get install -y \
         libwebp-dev \
         libfreetype6-dev \
         libzip-dev \
+        libonig-dev \
+        libcurl4-openssl-dev \
         unzip \
     && docker-php-ext-configure gd \
         --with-freetype \
         --with-jpeg \
         --with-webp \
-    && docker-php-ext-install pdo pdo_mysql gd zip \
+    && docker-php-ext-install pdo pdo_mysql gd zip mbstring curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -27,7 +29,15 @@ COPY docker/apache/vhost.conf /etc/apache2/sites-available/000-default.conf
 RUN mkdir -p \
         /var/www/html/public/uploads/covers \
         /var/www/html/public/uploads/audio \
-    && chown -R www-data:www-data /var/www/html/public/uploads \
-    && chmod -R 775 /var/www/html/public/uploads
+        /var/www/html/storage/logs \
+        /var/lib/grizzly-worker \
+    && chown -R www-data:www-data \
+        /var/www/html/public/uploads \
+        /var/www/html/storage \
+        /var/lib/grizzly-worker \
+    && chmod -R 775 \
+        /var/www/html/public/uploads \
+        /var/www/html/storage \
+        /var/lib/grizzly-worker
 
 EXPOSE 80

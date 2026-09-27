@@ -1,6 +1,21 @@
+# Repository / secrets
 .git
 .env
 .DS_Store
+
+# Runtime-only / personal data
+public/uploads/
+storage/
+cache/
+tmp/
+*.log
+
+# Local database dumps
+su_grizzly_db.sql
+*.sql.gz
+*.sql.bz2
+
+# Files not needed inside the application image
 docker-compose.yml
 README.md
 LICENSE

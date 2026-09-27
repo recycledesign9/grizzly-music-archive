@@ -1,3 +1,21 @@
+# ── Shared environment for app and worker ───────────────────────────────────
+x-app-env: &app-env
+  DB_HOST:          db
+  DB_PORT:          3306
+  DB_NAME:          ${DB_NAME:-grizzly_db}
+  DB_USER:          ${DB_USER:-grizzly}
+  DB_PASS:          ${DB_PASS:-grizzly_secret}
+  BASE_URL:         ${BASE_URL:-http://localhost:8080}
+  ALLOWED_HOSTS:    ${ALLOWED_HOSTS:-localhost,localhost:8080,127.0.0.1,127.0.0.1:8080}
+  LASTFM_API_KEY:   ${LASTFM_API_KEY:-}
+  DISCOGS_TOKEN:    ${DISCOGS_TOKEN:-}
+  YOUTUBE_API_KEY:  ${YOUTUBE_API_KEY:-}
+  DEBUG:            ${DEBUG:-false}
+
+  # Internal Docker mapping only. The music-library path is configured
+  # exclusively from Grizzly: Settings -> Automatic scan.
+  MEDIA_SCAN_HOST_PREFIX: /hostfs
+
 services:
 
   # ── PHP 8.1 + Apache application ──────────────────────────────────────────
@@ -5,24 +23,60 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: grizzly-music-archive:latest
     ports:
       - "${APP_PORT:-8080}:80"
-    environment:
-      DB_HOST:          db
-      DB_PORT:          3306
-      DB_NAME:          ${DB_NAME:-grizzly_db}
-      DB_USER:          ${DB_USER:-grizzly}
-      DB_PASS:          ${DB_PASS:-grizzly_secret}
-      BASE_URL:         ${BASE_URL:-http://localhost:8080}
-      ALLOWED_HOSTS:    ${ALLOWED_HOSTS:-localhost,localhost:8080,127.0.0.1,127.0.0.1:8080}
-      LASTFM_API_KEY:   ${LASTFM_API_KEY:-}
-      DISCOGS_TOKEN:    ${DISCOGS_TOKEN:-}
-      YOUTUBE_API_KEY:  ${YOUTUBE_API_KEY:-}
-      DEBUG:            ${DEBUG:-false}
+    environment: *app-env
     volumes:
-      # Persistent uploads (covers + audio) — NOT committed to git
+      # Managed covers/audio uploaded by Grizzly.
       - uploads_data:/var/www/html/public/uploads
-      - /mnt:/mnt
+
+      # Shared runtime area. The web app reads the worker heartbeat from here.
+      - runtime_data:/var/www/html/storage
+
+      # Read-only view of the host filesystem.
+      # Users choose the real host path only from Settings.
+      - type: bind
+        source: /
+        target: /hostfs
+        read_only: true
+
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Watched-folder scanner worker ─────────────────────────────────────────
+  # Uses exactly the same application image as the web container.
+  worker:
+    image: grizzly-music-archive:latest
+    command: ["php", "/var/www/html/media-scan-worker.php"]
+    user: "www-data"
+    init: true
+    environment:
+      <<: *app-env
+
+      # media-scan-worker.php uses sys_get_temp_dir() for lock/state.
+      # Keeping TMPDIR on a named volume preserves scanner state across
+      # container recreation.
+      TMPDIR: /var/lib/grizzly-worker
+
+    volumes:
+      # Scanner may create/update local cover files.
+      - uploads_data:/var/www/html/public/uploads
+
+      # Shared heartbeat/runtime status.
+      - runtime_data:/var/www/html/storage
+
+      # Persistent scanner state and lock.
+      - worker_state:/var/lib/grizzly-worker
+
+      # Same read-only host view used by the web application for external audio.
+      - type: bind
+        source: /
+        target: /hostfs
+        read_only: true
+
     depends_on:
       db:
         condition: service_healthy
@@ -36,19 +90,26 @@ services:
       MYSQL_USER:          ${DB_USER:-grizzly}
       MYSQL_PASSWORD:      ${DB_PASS:-grizzly_secret}
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS:-root_secret_change_me}
+
     volumes:
       - mysql_data:/var/lib/mysql
-      # Init scripts run in alphabetical order on first start
+
+      # These scripts run only when the database volume is created for
+      # the first time. Upgrade migrations, when provided, are applied manually.
       - ./docker/db/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
       - ./docker/db/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASS:-root_secret_change_me}"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
+
     restart: unless-stopped
 
 volumes:
   mysql_data:
   uploads_data:
+  runtime_data:
+  worker_state:
