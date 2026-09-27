@@ -9,13 +9,6 @@
 
 SET FOREIGN_KEY_CHECKS = 0;
 
--- ── Formats ──────────────────────────────────────────────────────────────────
-INSERT INTO `formats` (`id`, `name`) VALUES
-(1, 'Vinile'),
-(2, 'CD'),
-(3, 'Musicassetta'),
-(4, 'Digital');
-
 -- ── Genres ───────────────────────────────────────────────────────────────────
 INSERT INTO `genres` (`id`, `name`) VALUES
 (1,  'Pop Rock'),
@@ -85,8 +78,8 @@ INSERT INTO `albums` (`id`, `artist_id`, `genre_id`, `label_id`, `format_id`, `t
 
 -- ── Album formats (bridge) ──────────────────────────────────────────────────
 -- One row per owned format; derived from the demo albums' primary format.
-INSERT INTO `album_formats` (`album_id`, `format_id`)
-SELECT `id`, `format_id` FROM `albums`;
+INSERT INTO `album_formats` (`album_id`, `format_id`, `is_manual`, `is_scanner`)
+SELECT `id`, `format_id`, 1, 0 FROM `albums`;
 
 -- ── Tracks ────────────────────────────────────────────────────────────────────
 -- Abbey Road (album 1)

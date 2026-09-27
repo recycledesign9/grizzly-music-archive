@@ -29,6 +29,7 @@ DROP TABLE IF EXISTS `artists`;
 DROP TABLE IF EXISTS `formats`;
 DROP TABLE IF EXISTS `genres`;
 DROP TABLE IF EXISTS `labels`;
+DROP TABLE IF EXISTS `media_scan_ignored`;
 DROP TABLE IF EXISTS `settings`;
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -77,6 +78,14 @@ CREATE TABLE `formats` (
   UNIQUE KEY `name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Required application formats. These are reference data, not demo content.
+-- Keep stable IDs because albums.format_id and scanner format mapping use them.
+INSERT INTO `formats` (`id`, `name`) VALUES
+(1, 'Vinile'),
+(2, 'CD'),
+(3, 'Musicassetta'),
+(4, 'Digital');
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Table: genres
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -118,6 +127,10 @@ CREATE TABLE `albums` (
   `cover_url`   VARCHAR(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `cover_local` VARCHAR(300) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `mbid`        VARCHAR(36)  COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `needs_review` TINYINT(1) NOT NULL DEFAULT 0
+                 COMMENT 'Set to 1 when scanner metadata needs manual verification',
+  `review_note` VARCHAR(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL
+                 COMMENT 'Scanner note describing uncertain or unmatched metadata',
   `created_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -128,6 +141,7 @@ CREATE TABLE `albums` (
   KEY `idx_album_title` (`title`),
   KEY `fk_album_genre` (`genre_id`),
   KEY `fk_album_label` (`label_id`),
+  KEY `idx_album_needs_review` (`needs_review`),
   FULLTEXT KEY `ft_album_search` (`title`),
   CONSTRAINT `fk_album_artist` FOREIGN KEY (`artist_id`) REFERENCES `artists` (`id`) ON UPDATE CASCADE,
   CONSTRAINT `fk_album_format` FOREIGN KEY (`format_id`) REFERENCES `formats` (`id`) ON UPDATE CASCADE,
@@ -142,8 +156,10 @@ CREATE TABLE `albums` (
 -- primary format (lowest format id) for legacy/display purposes.
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE `album_formats` (
-  `album_id`  INT(10)    UNSIGNED NOT NULL,
-  `format_id` TINYINT(3) UNSIGNED NOT NULL,
+  `album_id`   INT(10)    UNSIGNED NOT NULL,
+  `format_id`  TINYINT(3) UNSIGNED NOT NULL,
+  `is_manual`  TINYINT(1) NOT NULL DEFAULT 1,
+  `is_scanner` TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (`album_id`, `format_id`),
   KEY `idx_af_format` (`format_id`),
   CONSTRAINT `fk_af_album`
@@ -207,10 +223,18 @@ CREATE TABLE `audio_files` (
                   COMMENT 'Stored filename/path relative to the configured audio folder',
   `original_name` VARCHAR(300) COLLATE utf8mb4_unicode_ci NOT NULL,
   `filesize`      INT(10) UNSIGNED DEFAULT NULL,
+  `source_hash`   CHAR(40) COLLATE utf8mb4_unicode_ci DEFAULT NULL
+                  COMMENT 'SHA-1 fingerprint of scanner source content',
+  `source_path`   VARCHAR(1000) COLLATE utf8mb4_unicode_ci DEFAULT NULL
+                  COMMENT 'Absolute source path for external scanner media',
+  `source_mtime`  INT(10) UNSIGNED DEFAULT NULL,
+  `storage_type`  ENUM('managed','external') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'managed',
   `uploaded_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_audio_album` (`album_id`),
   KEY `idx_audio_track` (`track_id`),
+  KEY `idx_audio_source_path` (`source_path`(255)),
+  KEY `idx_audio_source_hash` (`source_hash`),
   CONSTRAINT `fk_audio_album` FOREIGN KEY (`album_id`) REFERENCES `albums` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_audio_track` FOREIGN KEY (`track_id`) REFERENCES `tracks` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -244,6 +268,20 @@ CREATE TABLE `playlist_tracks` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Table: media_scan_ignored
+-- Tombstones for external album folders intentionally removed from Grizzly.
+-- Prevents immediate re-import while the source folder still exists.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE `media_scan_ignored` (
+  `id`          INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `path_hash`   CHAR(40) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `source_path` VARCHAR(1000) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `created_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_media_scan_ignored_hash` (`path_hash`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Table: settings
 -- Application settings stored as key/value pairs.
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -257,9 +295,15 @@ CREATE TABLE `settings` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Default setting rows required by the application.
--- Empty audio_path means: use the default public/uploads/audio path.
+-- Scanner is intentionally disabled on first start and media_scan_path is blank.
+-- The user chooses the real host path from Settings; in Docker the worker/app
+-- resolve that path through MEDIA_SCAN_HOST_PREFIX without changing the DB value.
 INSERT INTO `settings` (`key`, `value`, `label`) VALUES
-('audio_path', '', 'Audio folder path (leave empty to use default)');
+('audio_path', '', 'Audio folder path (leave empty to use default)'),
+('media_scan_enabled', '0', 'Enable automatic media folder scan'),
+('media_scan_path', '', 'Folder to scan automatically'),
+('media_scan_interval', '10', 'Scanner interval in seconds'),
+('media_scan_stable_seconds', '30', 'Seconds a folder must remain unchanged before import');
 
 SET FOREIGN_KEY_CHECKS = 1;
 
