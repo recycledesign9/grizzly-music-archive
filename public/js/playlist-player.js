@@ -56,10 +56,12 @@ var PlaylistPlayer = (function () {
           : 0;
 
         _activePlaylistId = playlistId;
-        Player.load(albumLike, idx);
 
-        // Aggiorna contesto playlist nel player sticky
+        // Contesto playlist nel player sticky PRIMA di Player.load():
+        // updateUI() legge il nome della playlist per le etichette
+        // "in ascolto da …" nelle altre liste.
         setPlayerContext(playlistId, data.name || '');
+        Player.load(albumLike, idx);
       })
       .catch(function (err) {
         console.error('[PlaylistPlayer] Errore caricamento:', err);

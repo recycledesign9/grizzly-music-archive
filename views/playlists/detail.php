@@ -5,6 +5,7 @@
 
 $pageTitle = htmlspecialchars($playlist['name']) . ' — Playlist';
 require BASE_PATH . '/views/layout/header.php';
+require_once BASE_PATH . '/views/playlists/_mosaic.php';
 
 // Conta tracce riproducibili
 $playableTracks = array_filter($tracks, function ($t) {
@@ -25,266 +26,268 @@ foreach ($tracks as $t) {
     $missingYt++;
   }
 }
+
+// Priorità copertina: locale > URL remota > placeholder
+$trackCover = function (array $t): string {
+  if (!empty($t['cover_local'])) {
+    return BASE_URL . '/public/uploads/' . $t['cover_local'];
+  }
+  if (!empty($t['cover_url'])) {
+    return strpos($t['cover_url'], 'http') === 0
+      ? $t['cover_url']
+      : BASE_URL . '/public/uploads/' . $t['cover_url'];
+  }
+  return BASE_URL . '/public/img/placeholder.png';
+};
+
+// Mosaico: primi 4 album distinti nell'ordine della playlist
+$mosaicCovers = [];
+$seenAlbums   = [];
+foreach ($tracks as $t) {
+  $aid = (int)$t['album_id'];
+  if (isset($seenAlbums[$aid]) || (empty($t['cover_local']) && empty($t['cover_url']))) {
+    continue;
+  }
+  $seenAlbums[$aid] = true;
+  $mosaicCovers[]   = $trackCover($t);
+  if (count($mosaicCovers) === 4) {
+    break;
+  }
+}
+
+// Durata totale: somma solo le tracce con audio E con duration_sec noto
+$totalSec = 0;
+foreach ($tracks as $tr) {
+  if (!empty($tr['audio_filename']) && !empty($tr['duration_sec'])) {
+    $totalSec += (int)$tr['duration_sec'];
+  }
+}
+$durStr = '';
+if ($totalSec > 0) {
+  $h = floor($totalSec / 3600);
+  $m = floor(($totalSec % 3600) / 60);
+  $s = $totalSec % 60;
+  if ($h > 0) {
+    $durStr = $h . 'h ' . $m . 'min';
+  } elseif ($m > 0) {
+    $durStr = $m . ' min ' . str_pad($s, 2, '0', STR_PAD_LEFT) . ' sec';
+  } else {
+    $durStr = $s . ' sec';
+  }
+}
 ?>
 
-<!-- Intestazione playlist -->
-<div class="d-flex flex-wrap align-items-center gap-3 mb-4">
+<div class="grz-pl-page">
 
-  <div class="me-auto">
-    <div class="d-flex align-items-center gap-2">
-      <h4 class="mb-0" id="playlistNameDisplay">
-        <?= htmlspecialchars($playlist['name']) ?>
-      </h4>
-      <button class="btn btn-link btn-sm text-muted p-0 ms-1"
-        id="btnRenamePlaylist"
-        title="Rinomina playlist">
-        <i class="bi bi-pencil-fill" style="font-size:.8rem"></i>
-      </button>
-    </div>
-    <?php
-    // Durata totale: somma solo le tracce con audio E con duration_sec noto
-    $totalSec = 0;
-    foreach ($tracks as $tr) {
-      if (!empty($tr['audio_filename']) && !empty($tr['duration_sec'])) {
-        $totalSec += (int)$tr['duration_sec'];
-      }
-    }
-    $durStr = '';
-    if ($totalSec > 0) {
-      $h = floor($totalSec / 3600);
-      $m = floor(($totalSec % 3600) / 60);
-      $s = $totalSec % 60;
-      if ($h > 0) {
-        $durStr = $h . 'h ' . $m . 'min';
-      } elseif ($m > 0) {
-        $durStr = $m . ' min ' . str_pad($s, 2, '0', STR_PAD_LEFT) . ' sec';
-      } else {
-        $durStr = $s . ' sec';
-      }
-    }
-    ?>
-    <div class="text-muted small mt-1" id="playlistStats">
-      <span id="plStatTotal"><?= $totalCount ?></span>
-      <span id="plStatTotalLabel"> <?= $totalCount === 1 ? 'traccia' : 'tracce' ?></span>
-      <?php if ($totalCount > 0): ?>
-        <?php if ($playableCount < $totalCount): ?>
-          &mdash; <span id="plStatAudio" class="text-warning">
-            <?= $playableCount ?> con audio
-          </span>
+  <button type="button" class="grz-pl-back" onclick="grzBack('<?= BASE_URL ?>/index.php?route=playlists')">
+    <i class="bi bi-arrow-left" aria-hidden="true"></i>Indietro
+  </button>
+
+  <!-- Intestazione playlist -->
+  <header class="grz-plhero">
+    <?= grzPlaylistMosaic($mosaicCovers, 'grz-plhero__art') ?>
+
+    <div class="grz-plhero__body">
+      <span class="grz-plhero__eyebrow">Playlist</span>
+
+      <div class="grz-plhero__titlerow">
+        <h1 class="grz-plhero__title" id="playlistNameDisplay"><?= htmlspecialchars($playlist['name']) ?></h1>
+        <button class="grz-plhero__rename"
+          id="btnRenamePlaylist"
+          title="Rinomina playlist"
+          aria-label="Rinomina playlist">
+          <i class="bi bi-pencil" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <!-- Gli span con id sono aggiornati dallo script dopo rimozioni e riordini -->
+      <div class="grz-plhero__stats" id="playlistStats">
+        <span><span id="plStatTotal"><?= $totalCount ?></span><span id="plStatTotalLabel"> <?= $totalCount === 1 ? 'traccia' : 'tracce' ?></span></span>
+        <?php if ($totalCount > 0): ?>
+          <?php if ($playableCount < $totalCount): ?>
+            &mdash; <span id="plStatAudio" class="text-warning"><?= $playableCount ?> con audio</span>
+          <?php else: ?>
+            &mdash; <span id="plStatAudio" class="text-success">tutte con audio</span>
+          <?php endif; ?>
         <?php else: ?>
-          &mdash; <span id="plStatAudio" class="text-success">tutte con audio</span>
+          <span id="plStatAudio"></span>
         <?php endif; ?>
-      <?php else: ?>
-        <span id="plStatAudio"></span>
-      <?php endif; ?>
-      <?php if ($durStr): ?>
-        <span id="plStatDur" class="ms-1 text-muted">
-          &mdash; <?= $durStr ?>
-        </span>
-      <?php else: ?>
-        <span id="plStatDur" class="ms-1 text-muted" style="display:none"></span>
-      <?php endif; ?>
-    </div>
-  </div>
+        <?php if ($durStr): ?>
+          <span id="plStatDur" class="ms-1">&mdash; <?= $durStr ?></span>
+        <?php else: ?>
+          <span id="plStatDur" class="ms-1" style="display:none"></span>
+        <?php endif; ?>
+      </div>
 
-  <!-- Azioni principali -->
-  <div class="d-flex gap-2 flex-wrap">
+      <!-- Azioni principali -->
+      <div class="grz-plhero__actions">
 
-    <?php if ($playableCount > 0): ?>
-      <button class="btn btn-success btn-sm" id="btnPlayAll">
-        <i class="bi bi-play-fill me-1"></i>Riproduci
-      </button>
-    <?php else: ?>
-      <button class="btn btn-outline-secondary btn-sm" disabled title="Nessun file audio">
-        <i class="bi bi-play-fill me-1"></i>Riproduci
-      </button>
-    <?php endif; ?>
-
-    <!-- YouTube: bottone unico "risolvi e apri".
-         - Se tutte le tracce hanno già un video → apre subito watch_videos.
-         - Se mancano associazioni → le risolve in batch (progresso sul
-           bottone) e poi reindirizza la scheda già aperta al click.
-         La scheda viene aperta SUBITO al click (sincrono) per non essere
-         bloccata dai popup blocker; l'URL viene impostato a fine lavoro. -->
-    <?php if ($totalCount > 0): ?>
-      <button class="btn btn-outline-danger btn-sm" id="btnYoutube"
-        data-missing="<?= $missingYt ?>"
-        title="<?= $missingYt > 0
-          ? 'Cerca i video delle ' . $missingYt . ' tracce mancanti e apri la playlist su YouTube'
-          : 'Apri ' . count($ytIds) . ' ' . (count($ytIds) === 1 ? 'traccia' : 'tracce') . ' su YouTube' ?>">
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" class="me-1">
-          <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
-        </svg>
-        <span id="btnYoutubeLabel">YouTube</span>
-        <span class="badge bg-danger ms-1" style="font-size:.65rem" id="ytCountBadge"><?= count($ytIds) ?></span>
-      </button>
-    <?php endif; ?>
-
-    <button class="btn btn-outline-secondary btn-sm" id="btnToggleSelect"
-      title="Seleziona tracce per eliminazione multipla">
-      <i class="bi bi-check2-square me-1"></i>Seleziona
-    </button>
-
-    <a href="<?= BASE_URL ?>/index.php?route=playlists"
-      class="btn btn-outline-secondary btn-sm">
-      <i class="bi bi-arrow-left me-1"></i>Playlist
-    </a>
-
-  </div>
-</div>
-
-
-<?php if (empty($tracks)): ?>
-
-  <div class="text-center py-5">
-    <i class="bi bi-collection-play display-4 d-block mb-3 text-muted opacity-25"></i>
-    <p class="fw-semibold mb-1">Questa playlist è vuota</p>
-    <p class="text-muted small mb-4">
-      Vai all&#39;archivio, apri un disco e usa
-      <strong>Aggiungi a playlist</strong> su una traccia o sull&#39;album intero.
-    </p>
-    <a href="<?= BASE_URL ?>/index.php?route=albums/list"
-      class="btn btn-warning btn-sm px-4">
-      <i class="bi bi-collection me-2"></i>Vai all&#39;Archivio
-    </a>
-  </div>
-
-<?php else: ?>
-
-  <div class="card shadow-sm border-0">
-    <div class="card-header d-flex align-items-center justify-content-between py-2">
-      <span class="fw-semibold small">
-        <i class="bi bi-music-note-list me-2"></i>Tracce
-      </span>
-      <span class="text-muted small">
-        Trascina <i class="bi bi-grip-vertical"></i> per riordinare
-      </span>
-    </div>
-
-    <ul class="list-group list-group-flush" id="playlistTrackList">
-      <?php foreach ($tracks as $idx => $t):
-        $hasAudio = !empty($t['audio_filename']);
-        $duration = '';
-        if ($t['duration_sec']) {
-          $duration = floor($t['duration_sec'] / 60) . ':' . str_pad($t['duration_sec'] % 60, 2, '0', STR_PAD_LEFT);
-        }
-        // Priorità: cover locale > URL remota > placeholder
-        if (!empty($t['cover_local'])) {
-          $coverSrc = BASE_URL . '/public/uploads/' . $t['cover_local'];
-        } elseif (!empty($t['cover_url'])) {
-          $coverSrc = strpos($t['cover_url'], 'http') === 0
-            ? $t['cover_url']
-            : BASE_URL . '/public/uploads/' . $t['cover_url'];
-        } else {
-          $coverSrc = BASE_URL . '/public/img/placeholder.png';
-        }
-      ?>
-        <li class="list-group-item track-item px-3 py-2 d-flex align-items-center gap-3"
-          data-track-id="<?= (int)$t['track_id'] ?>"
-          data-position="<?= (int)$t['position'] ?>"
-          data-has-audio="<?= $hasAudio ? '1' : '0' ?>"
-          data-duration-sec="<?= (int)($t['duration_sec'] ?? 0) ?>"
-          <?= !$hasAudio ? 'style="opacity:.6"' : '' ?>>
-
-          <!-- Checkbox selezione multipla — visibile solo in modalità selezione -->
-          <input type="checkbox"
-            class="form-check-input track-select-cb flex-shrink-0"
-            data-track-id="<?= (int)$t['track_id'] ?>"
-            style="display:none;width:1.1rem;height:1.1rem;cursor:pointer;margin:0">
-
-          <!-- Cella unica handle + posizione: elimina lo spazio morto
-               tra grip e numero. Il numero diventa icona eq in
-               riproduzione (slot .pl-track-playing-icon), come nella
-               vista album. .drag-handle resta elemento autonomo perché
-               Sortable, i listener touch e la modalità selezione
-               (visibility) lo referenziano direttamente. -->
-          <span class="pl-pos-cell flex-shrink-0">
-            <span class="drag-handle text-muted"
-              style="cursor:grab;font-size:1.1rem"
-              title="Trascina per riordinare">
-              <i class="bi bi-grip-vertical"></i>
-            </span>
-            <span class="pl-track-pos-wrap text-muted small">
-              <span class="pl-track-playing-icon" style="display:none"></span>
-              <span class="pl-track-num"><?= (int)$t['position'] ?></span>
-            </span>
-          </span>
-
-          <!-- Cover album piccola — cliccabile verso il dettaglio album -->
-          <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= (int)$t['album_id'] ?>"
-            class="flex-shrink-0"
-            title="Vai all'album: <?= htmlspecialchars($t['album_title'], ENT_QUOTES) ?>">
-            <img src="<?= htmlspecialchars($coverSrc) ?>"
-              alt="<?= htmlspecialchars($t['album_title'], ENT_QUOTES) ?>"
-              width="36" height="36"
-              class="rounded"
-              style="object-fit:cover;display:block">
-          </a>
-
-          <!-- Titolo + album/artista -->
-          <div class="flex-grow-1 overflow-hidden">
-            <div class="fw-semibold text-truncate"><?= htmlspecialchars($t['title']) ?></div>
-            <div class="small text-muted text-truncate">
-              <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= (int)$t['artist_id'] ?>"
-                class="text-muted text-decoration-none">
-                <?= htmlspecialchars($t['artist_name']) ?>
-              </a>
-              &mdash;
-              <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= (int)$t['album_id'] ?>"
-                class="text-muted text-decoration-none">
-                <?= htmlspecialchars($t['album_title']) ?>
-              </a>
-            </div>
-          </div>
-
-          <!-- Durata -->
-          <?php if ($duration): ?>
-            <span class="text-muted small flex-shrink-0 d-none d-sm-inline"><?= $duration ?></span>
-          <?php endif; ?>
-
-          <!-- Badge audio -->
-          <?php if ($hasAudio): ?>
-            <span class="badge bg-success-subtle text-success flex-shrink-0"
-              title="File audio disponibile">
-              <i class="bi bi-music-note-beamed"></i>
-            </span>
-          <?php else: ?>
-            <span class="badge bg-secondary-subtle text-secondary flex-shrink-0"
-              title="Nessun file audio — traccia saltata in riproduzione">
-              <i class="bi bi-dash"></i>
-            </span>
-          <?php endif; ?>
-
-          <!-- Play singola traccia (solo se ha audio) -->
-          <?php if ($hasAudio): ?>
-            <button class="btn btn-xs btn-outline-success flex-shrink-0 btn-play-track btn-track-play"
-              data-playlist-id="<?= (int)$playlist['id'] ?>"
-              data-index="<?= $idx ?>"
-              data-track-id="<?= (int)$t['track_id'] ?>"
-              title="Riproduci da qui">
-              <i class="bi bi-play-fill"></i>
-            </button>
-          <?php else: ?>
-            <button class="btn btn-xs btn-outline-secondary flex-shrink-0" disabled
-              title="Audio non disponibile">
-              <i class="bi bi-play-fill"></i>
-            </button>
-          <?php endif; ?>
-
-          <!-- Rimuovi dalla playlist -->
-          <button class="btn btn-xs btn-outline-danger flex-shrink-0 btn-remove-track"
-            data-playlist-id="<?= (int)$playlist['id'] ?>"
-            data-track-id="<?= (int)$t['track_id'] ?>"
-            title="Rimuovi dalla playlist">
-            <i class="bi bi-x-lg"></i>
+        <?php if ($playableCount > 0): ?>
+          <button class="btn btn-success grz-plhero__play" id="btnPlayAll">
+            <i class="bi bi-play-fill me-1"></i>Riproduci
           </button>
+        <?php else: ?>
+          <button class="btn btn-outline-secondary grz-plhero__play" disabled title="Nessun file audio">
+            <i class="bi bi-play-fill me-1"></i>Riproduci
+          </button>
+        <?php endif; ?>
 
-        </li>
-      <?php endforeach; ?>
-    </ul>
-  </div>
+        <!-- YouTube: bottone unico "risolvi e apri".
+             - Se tutte le tracce hanno già un video → apre subito watch_videos.
+             - Se mancano associazioni → le risolve in batch (progresso sul
+               bottone) e poi reindirizza la scheda già aperta al click.
+             La scheda viene aperta SUBITO al click (sincrono) per non essere
+             bloccata dai popup blocker; l'URL viene impostato a fine lavoro. -->
+        <?php if ($totalCount > 0): ?>
+          <button class="btn btn-outline-danger grz-plhero__yt" id="btnYoutube"
+            data-missing="<?= $missingYt ?>"
+            title="<?= $missingYt > 0
+              ? 'Cerca i video delle ' . $missingYt . ' tracce mancanti e apri la playlist su YouTube'
+              : 'Apri ' . count($ytIds) . ' ' . (count($ytIds) === 1 ? 'traccia' : 'tracce') . ' su YouTube' ?>">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" class="grz-plhero__yt-logo me-1" aria-hidden="true">
+              <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+            </svg>
+            <span id="btnYoutubeLabel">YouTube</span>
+            <span class="badge ms-1" id="ytCountBadge"><?= count($ytIds) ?></span>
+          </button>
+        <?php endif; ?>
 
-<?php endif; ?>
+        <button class="btn btn-outline-secondary" id="btnToggleSelect"
+          title="Seleziona tracce per eliminazione multipla">
+          <i class="bi bi-check2-square me-1"></i>Seleziona
+        </button>
+
+      </div>
+    </div>
+  </header>
+
+
+  <?php if (empty($tracks)): ?>
+
+    <div class="grz-pl-empty">
+      <h2>Questa playlist è vuota</h2>
+      <p>Apri un disco dall'archivio e usa <strong>Aggiungi a playlist</strong> su una traccia o sull'album intero.</p>
+      <a href="<?= BASE_URL ?>/index.php?route=albums/list" class="btn btn-warning">
+        <i class="bi bi-collection me-1" aria-hidden="true"></i>Vai all'archivio
+      </a>
+    </div>
+
+  <?php else: ?>
+
+    <section class="grz-pltracks" aria-label="Tracce della playlist">
+      <div class="grz-pltracks__head">
+        <span>Tracce</span>
+        <span class="grz-pltracks__hint">Trascina <i class="bi bi-grip-vertical" aria-hidden="true"></i> per riordinare</span>
+      </div>
+
+      <ul class="grz-pltracks__list" id="playlistTrackList" data-player-context="playlist:<?= (int)$playlist['id'] ?>">
+        <?php foreach ($tracks as $idx => $t):
+          $hasAudio = !empty($t['audio_filename']);
+          $duration = '';
+          if ($t['duration_sec']) {
+            $duration = floor($t['duration_sec'] / 60) . ':' . str_pad($t['duration_sec'] % 60, 2, '0', STR_PAD_LEFT);
+          }
+          $coverSrc = $trackCover($t);
+        ?>
+          <li class="track-item grz-pltrack<?= $hasAudio ? '' : ' is-noaudio' ?>"
+            data-track-id="<?= (int)$t['track_id'] ?>"
+            data-position="<?= (int)$t['position'] ?>"
+            data-has-audio="<?= $hasAudio ? '1' : '0' ?>"
+            data-duration-sec="<?= (int)($t['duration_sec'] ?? 0) ?>">
+
+            <!-- Checkbox selezione multipla — visibile solo in modalità selezione -->
+            <input type="checkbox"
+              class="form-check-input track-select-cb flex-shrink-0"
+              data-track-id="<?= (int)$t['track_id'] ?>"
+              aria-label="Seleziona <?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
+              style="display:none;width:1.1rem;height:1.1rem;cursor:pointer;margin:0">
+
+            <!-- Handle + posizione. Il numero diventa icona eq in
+                 riproduzione (slot .pl-track-playing-icon), come nella
+                 vista album. .drag-handle resta elemento autonomo perché
+                 Sortable, i listener touch e la modalità selezione lo
+                 referenziano direttamente. -->
+            <span class="pl-pos-cell">
+              <span class="drag-handle" title="Trascina per riordinare">
+                <i class="bi bi-grip-vertical" aria-hidden="true"></i>
+              </span>
+              <span class="pl-track-pos-wrap">
+                <span class="pl-track-playing-icon" style="display:none"></span>
+                <span class="pl-track-num"><?= (int)$t['position'] ?></span>
+              </span>
+            </span>
+
+            <!-- Cover album — porta alla scheda del disco -->
+            <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= (int)$t['album_id'] ?>"
+              class="grz-pltrack__cover"
+              title="Vai all'album: <?= htmlspecialchars($t['album_title'], ENT_QUOTES) ?>">
+              <img src="<?= htmlspecialchars($coverSrc) ?>"
+                alt="<?= htmlspecialchars($t['album_title'], ENT_QUOTES) ?>"
+                width="44" height="44" loading="lazy">
+            </a>
+
+            <!-- Titolo + artista e album. Il titolo è il primo .fw-semibold
+                 della riga: lo script lo legge per la conferma di rimozione. -->
+            <div class="grz-pltrack__text">
+              <?php if ($hasAudio): ?>
+                <button type="button" class="fw-semibold grz-pltrack__title grz-pltrack__titlebtn" title="Riproduci <?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"><?= htmlspecialchars($t['title']) ?></button>
+              <?php else: ?>
+                <div class="fw-semibold grz-pltrack__title"><?= htmlspecialchars($t['title']) ?></div>
+              <?php endif; ?>
+              <div class="grz-pltrack__sub">
+                <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= (int)$t['artist_id'] ?>"><?= htmlspecialchars($t['artist_name']) ?></a>
+                <span aria-hidden="true">·</span>
+                <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= (int)$t['album_id'] ?>"><?= htmlspecialchars($t['album_title']) ?></a>
+              </div>
+            </div>
+
+            <!-- Stato audio -->
+            <?php if ($hasAudio): ?>
+              <span class="grz-pltrack__audio" title="File audio disponibile">
+                <i class="bi bi-music-note-beamed" aria-hidden="true"></i><span class="visually-hidden">Audio disponibile</span>
+              </span>
+            <?php else: ?>
+              <span class="grz-pltrack__audio is-missing" title="Nessun file audio: traccia saltata in riproduzione">
+                <span class="grz-pltrack__noaudio">senza audio</span>
+              </span>
+            <?php endif; ?>
+
+            <!-- Durata -->
+            <span class="grz-pltrack__dur"><?= $duration ?></span>
+
+            <!-- Play singola traccia (solo se ha audio) -->
+            <?php if ($hasAudio): ?>
+              <button class="grz-pltrack__btn btn-play-track btn-track-play"
+                data-playlist-id="<?= (int)$playlist['id'] ?>"
+                data-index="<?= $idx ?>"
+                data-track-id="<?= (int)$t['track_id'] ?>"
+                title="Riproduci da qui"
+                aria-label="Riproduci da qui">
+                <i class="bi bi-play-fill"></i>
+              </button>
+            <?php else: ?>
+              <button class="grz-pltrack__btn" disabled title="Audio non disponibile" aria-label="Audio non disponibile">
+                <i class="bi bi-play-fill" aria-hidden="true"></i>
+              </button>
+            <?php endif; ?>
+
+            <!-- Rimuovi dalla playlist -->
+            <button class="grz-pltrack__btn grz-pltrack__btn--remove btn-remove-track"
+              data-playlist-id="<?= (int)$playlist['id'] ?>"
+              data-track-id="<?= (int)$t['track_id'] ?>"
+              title="Rimuovi dalla playlist"
+              aria-label="Rimuovi dalla playlist">
+              <i class="bi bi-x-lg" aria-hidden="true"></i>
+            </button>
+
+          </li>
+        <?php endforeach; ?>
+      </ul>
+    </section>
+
+  <?php endif; ?>
+
+</div>
 
 
 <!-- ===== Toolbar selezione multipla ===== -->
@@ -355,6 +358,42 @@ foreach ($tracks as $t) {
 
 
 <script>
+  // Navigazione "indietro" consapevole del percorso (stessa logica di
+  // profile.php, results.php e form.php): torna alla pagina reale di
+  // provenienza se l'utente è arrivato navigando nell'app, altrimenti
+  // ripiega sull'elenco delle playlist.
+  // Titolo traccia cliccabile: equivale al pulsante play della riga,
+  // quindi avvia, mette in pausa o riprende con la stessa logica.
+  // In modalità selezione il clic spunta la casella della riga.
+  (function() {
+    var list = document.getElementById('playlistTrackList');
+    if (!list) return;
+    list.addEventListener('click', function(e) {
+      var titleBtn = e.target.closest('.grz-pltrack__titlebtn');
+      if (!titleBtn) return;
+      var row = titleBtn.closest('li.track-item');
+      if (!row) return;
+      var cb = row.querySelector('.track-select-cb');
+      if (cb && cb.style.display !== 'none') {
+        cb.checked = !cb.checked;
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+        return;
+      }
+      var playBtn = row.querySelector('.btn-play-track');
+      if (playBtn) playBtn.click();
+    });
+  })();
+
+  window.grzBack = function(fallbackUrl) {
+    if (window.history.state && window.history.state.url) {
+      window.history.back();
+    } else if (typeof window._spaNavigate === 'function') {
+      window._spaNavigate(fallbackUrl);
+    } else {
+      window.location.href = fallbackUrl;
+    }
+  };
+
   (function() {
 
     var PLAYLIST_ID = <?= (int)$playlist['id'] ?>;
@@ -388,8 +427,20 @@ foreach ($tracks as $t) {
         var clickedTrackId = parseInt(btn.dataset.trackId, 10);
         var audio = document.getElementById('global-audio');
 
-        // Caso 1: traccia già attiva → toggle
+        // Contesto caricato nel player: questa playlist?
+        // Player.context() è la fonte di verità; activeId() resta come
+        // ripiego per versioni del player senza context().
+        var isThisPlaylist = (typeof Player !== 'undefined' && typeof Player.context === 'function')
+          ? Player.context() === 'playlist:' + PLAYLIST_ID
+          : (typeof PlaylistPlayer !== 'undefined' &&
+             typeof PlaylistPlayer.activeId === 'function' &&
+             PlaylistPlayer.activeId() === PLAYLIST_ID);
+
+        // Caso 1: traccia già attiva IN QUESTA playlist → toggle.
+        // Se lo stesso brano suona da un'altra playlist o dal suo album,
+        // si passa ai casi successivi e parte questa playlist da qui.
         var isCurrentTrack = (
+          isThisPlaylist &&
           typeof Player !== 'undefined' &&
           typeof Player.currentTrackId === 'function' &&
           Player.currentTrackId() === clickedTrackId &&
@@ -405,11 +456,6 @@ foreach ($tracks as $t) {
         }
 
         // Caso 2: playlist già caricata → usa queue corrente (aggiornata da reorder/add)
-        var isThisPlaylist = (
-          typeof PlaylistPlayer !== 'undefined' &&
-          typeof PlaylistPlayer.activeId === 'function' &&
-          PlaylistPlayer.activeId() === PLAYLIST_ID
-        );
         if (isThisPlaylist && typeof Player !== 'undefined' &&
           typeof Player.getPlaylist === 'function') {
           var queue = Player.getPlaylist();

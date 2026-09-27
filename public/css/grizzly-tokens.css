@@ -1,0 +1,328 @@
+/* ============================================================
+   GRIZZLY: Music Archive — Design tokens (v7)
+   Caricare DOPO bootstrap.min.css e PRIMA di app.css.
+   Ogni override usa html[data-bs-theme=...] per avere
+   specificità maggiore delle regole di app.css, che viene
+   caricato dopo e altrimenti prevarrebbe.
+   ============================================================ */
+
+/* ── Font dati (IBM Plex Mono, OFL, self-hosted) ──────────── */
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../fonts/IBMPlexMono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../fonts/IBMPlexMono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
+/* ── Font UI e titoli (OFL, self-hosted) ──────────────────
+   Archivo per testo, etichette e dati descrittivi.
+   Inter Tight per i titoli grandi: disegno vicino a
+   SF Pro Display, che su macOS era il titolo di system-ui.  */
+@font-face {
+  font-family: "Archivo";
+  src: url("../fonts/Archivo-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter Tight";
+  src: url("../fonts/InterTight-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── Token comuni ─────────────────────────────────────────── */
+:root {
+  --grz-font-ui: "Archivo", system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", "Noto Sans", "Liberation Sans", Arial, sans-serif;
+  --grz-font-title: "Inter Tight", "Archivo", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --grz-font-data: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo,
+    Consolas, "Liberation Mono", monospace;
+  --bs-body-font-family: var(--grz-font-ui);
+  --bs-font-sans-serif: var(--grz-font-ui);
+  --bs-font-monospace: var(--grz-font-data);
+
+  --grz-accent: #f5b400;
+  --grz-accent-hover: #e0a500;
+  --grz-accent-active: #cc9600;
+  --grz-on-accent: #1a1300;
+
+  --grz-fmt-vinile: #c2410c;
+  --grz-fmt-cd: #2563eb;
+  --grz-fmt-cassetta: #0f766e;
+  --grz-fmt-digital: #7c3aed;
+}
+
+/* ── Light: telaio scuro, pagina pietra, superfici bianche ── */
+html[data-bs-theme="light"] {
+  --grz-chassis: #1c1b19;
+  --grz-canvas: #eeece8;
+  --grz-field-border: #9c978f;           /* 3:1 sul bianco */
+  --grz-accent-ink: #855800;             /* 6.2:1 sul bianco */
+  --grz-accent-soft: rgba(245, 180, 0, 0.16);
+
+  --bs-body-bg: #ffffff;                 /* superfici (card, dropdown) */
+  --bs-body-bg-rgb: 255, 255, 255;
+  --bs-body-color: #1c1b19;              /* 17:1 */
+  --bs-body-color-rgb: 28, 27, 25;
+  --bs-emphasis-color: #0f0e0d;
+  --bs-emphasis-color-rgb: 15, 14, 13;
+  --bs-secondary-color: #5c5852;         /* 7:1 sul bianco, 6:1 sul canvas */
+  --bs-secondary-color-rgb: 92, 88, 82;
+  --bs-tertiary-color: #6f6a63;
+  --bs-tertiary-color-rgb: 111, 106, 99;
+  --bs-secondary-bg: #eae8e4;
+  --bs-secondary-bg-rgb: 234, 232, 228;
+  --bs-tertiary-bg: #f6f5f2;
+  --bs-tertiary-bg-rgb: 246, 245, 242;
+  --bs-border-color: #dcd9d3;
+  --bs-border-color-translucent: rgba(28, 27, 25, 0.12);
+  --bs-link-color: #855800;
+  --bs-link-color-rgb: 133, 88, 0;
+  --bs-link-hover-color: #5c3d00;
+  --bs-link-hover-color-rgb: 92, 61, 0;
+
+  --grz-amber-dim: var(--grz-accent-ink);
+  --eq-color: var(--grz-accent-ink);
+  --grz-fmt-vinile: #c2410c;
+  --grz-fmt-cd: #2563eb;
+  --grz-fmt-cassetta: #0f766e;
+  --grz-fmt-digital: #7c3aed;
+}
+
+/* ── Dark "inchiostro": blu profondo, complementare all'ambra ── */
+html[data-bs-theme="dark"] {
+  --grz-chassis: #0a0e14;
+  --grz-canvas: #111823;
+  --grz-field-border: #62728c;           /* 3:1 sulle superfici */
+  --grz-accent-ink: #f5b400;             /* 8.8:1 sulle superfici */
+  --grz-accent-soft: rgba(245, 180, 0, 0.12);
+
+  --bs-body-bg: #18212e;                 /* superfici */
+  --bs-body-bg-rgb: 24, 33, 46;
+  --bs-body-color: #e6eaf0;              /* 13.4:1 */
+  --bs-body-color-rgb: 230, 234, 240;
+  --bs-emphasis-color: #ffffff;
+  --bs-emphasis-color-rgb: 255, 255, 255;
+  --bs-secondary-color: #9aa7b8;         /* 6.6:1 */
+  --bs-secondary-color-rgb: 154, 167, 184;
+  --bs-tertiary-color: #7f8ca0;
+  --bs-tertiary-color-rgb: 127, 140, 160;
+  --bs-secondary-bg: #1e2938;
+  --bs-secondary-bg-rgb: 30, 41, 56;
+  --bs-tertiary-bg: #1e2938;
+  --bs-tertiary-bg-rgb: 30, 41, 56;
+  --bs-border-color: #2b3748;
+  --bs-border-color-translucent: rgba(230, 234, 240, 0.1);
+  --bs-link-color: #f5b400;
+  --bs-link-color-rgb: 245, 180, 0;
+  --bs-link-hover-color: #ffcc40;
+  --bs-link-hover-color-rgb: 255, 204, 64;
+
+  --grz-amber-dim: var(--grz-accent-ink);
+  --grz-fmt-vinile: #f59e5b;
+  --grz-fmt-cd: #7aa7ff;
+  --grz-fmt-cassetta: #4fd1b5;
+  --grz-fmt-digital: #b69cff;
+}
+
+/* Il canvas è solo lo sfondo pagina: card e dropdown restano
+   su --bs-body-bg e si staccano dal fondo.                    */
+html[data-bs-theme] body {
+  background-color: var(--grz-canvas);
+  font-family: var(--grz-font-ui);
+}
+/* Biografia artista: solo spaziatura tra lettere, corpo invariato */
+html[data-bs-theme] .artist-bio-text {
+  letter-spacing: 0.015em;
+}
+
+/* ── Titoli grandi ────────────────────────────────────────── */
+html[data-bs-theme] h1,
+html[data-bs-theme] .h1,
+html[data-bs-theme] h2,
+html[data-bs-theme] .h2,
+html[data-bs-theme] .album-hero-title,
+html[data-bs-theme] .grz-dash-hero__title {
+  font-family: var(--grz-font-title);
+  letter-spacing: -0.02em;
+}
+html[data-bs-theme] .album-hero-title {
+  font-weight: 800;
+}
+
+/* ── Telaio: navbar e player dello stesso colore ──────────── */
+html[data-bs-theme] .navbar.bg-dark {
+  background-color: var(--grz-chassis) !important;
+}
+/* Menu: la barra ambra segna solo la voce attiva ed è lunga quanto
+   il contenuto (icona + testo), non quanto il link: tra due voci resta
+   sempre lo spazio del padding, quindi le barre non si uniscono.
+   L'hover schiarisce solo il testo, così "dove sono" e "dove punto"
+   restano due stati distinti. Solo da 992px: sotto, il menu è una
+   colonna e la voce attiva è segnata dal colore. */
+html[data-bs-theme] .navbar .nav-link {
+  transition: color 0.15s ease;
+}
+html[data-bs-theme] .navbar .nav-link:hover,
+html[data-bs-theme] .navbar .nav-link:focus-visible,
+html[data-bs-theme] .navbar .nav-link.active,
+html[data-bs-theme] .navbar .nav-link[aria-current="page"] {
+  color: #ffffff;
+}
+@media (min-width: 992px) {
+  html[data-bs-theme] .navbar .nav-link {
+    position: relative;
+  }
+  html[data-bs-theme] .navbar .nav-link::after {
+    content: "";
+    position: absolute;
+    left: var(--bs-navbar-nav-link-padding-x, 0.5rem);
+    right: var(--bs-navbar-nav-link-padding-x, 0.5rem);
+    bottom: 0;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--grz-accent);
+    transform: scaleX(0);
+    transition: transform 0.2s ease;
+  }
+  html[data-bs-theme] .navbar .nav-link.active::after,
+  html[data-bs-theme] .navbar .nav-link[aria-current="page"]::after {
+    transform: scaleX(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-bs-theme] .navbar .nav-link,
+  html[data-bs-theme] .navbar .nav-link::after { transition: none; }
+}
+html[data-bs-theme="light"] .sticky-player {
+  background: rgba(28, 27, 25, 0.96);
+  box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.2);   /* toglie l'alone grigio */
+}
+
+/* ── Card ─────────────────────────────────────────────────── */
+html[data-bs-theme="light"] .card {
+  box-shadow: 0 1px 2px rgba(28, 27, 25, 0.06);
+}
+/* Intestazioni nere in Impostazioni: diventano superficie tenue */
+html[data-bs-theme] .card-header.bg-dark,
+html[data-bs-theme] .card-header.bg-secondary {
+  background-color: var(--bs-tertiary-bg) !important;
+  color: var(--bs-body-color) !important;
+  border-bottom: 1px solid var(--bs-border-color);
+}
+
+/* ── Campi: bordo leggibile (WCAG 1.4.11, 3:1) ────────────── */
+html[data-bs-theme] .form-control,
+html[data-bs-theme] .form-select {
+  border-color: var(--grz-field-border);
+  background-color: var(--bs-body-bg);
+}
+
+/* ── Pulsanti ─────────────────────────────────────────────── */
+html[data-bs-theme] .btn-warning {
+  --bs-btn-color: var(--grz-on-accent);
+  --bs-btn-bg: var(--grz-accent);
+  --bs-btn-border-color: var(--grz-accent);
+  --bs-btn-hover-color: var(--grz-on-accent);
+  --bs-btn-hover-bg: var(--grz-accent-hover);
+  --bs-btn-hover-border-color: var(--grz-accent-hover);
+  --bs-btn-active-color: var(--grz-on-accent);
+  --bs-btn-active-bg: var(--grz-accent-active);
+  --bs-btn-active-border-color: var(--grz-accent-active);
+  --bs-btn-disabled-bg: var(--grz-accent);
+  --bs-btn-disabled-border-color: var(--grz-accent);
+}
+html[data-bs-theme="light"] .btn-outline-warning {
+  --bs-btn-color: var(--grz-accent-ink);
+  --bs-btn-border-color: #c99400;
+  --bs-btn-hover-color: var(--grz-on-accent);
+  --bs-btn-hover-bg: var(--grz-accent);
+  --bs-btn-hover-border-color: var(--grz-accent);
+  --bs-btn-active-color: var(--grz-on-accent);
+  --bs-btn-active-bg: var(--grz-accent-hover);
+  --bs-btn-active-border-color: var(--grz-accent-hover);
+}
+/* Blu (filtro) e ciano (recupera) escono dal sistema:
+   diventano azioni secondarie neutre.                        */
+html[data-bs-theme] .btn-primary,
+html[data-bs-theme] .btn-outline-info {
+  --bs-btn-color: var(--bs-body-color);
+  --bs-btn-bg: transparent;
+  --bs-btn-border-color: var(--grz-field-border);
+  --bs-btn-hover-color: var(--bs-body-bg);
+  --bs-btn-hover-bg: var(--bs-body-color);
+  --bs-btn-hover-border-color: var(--bs-body-color);
+  --bs-btn-active-color: var(--bs-body-bg);
+  --bs-btn-active-bg: var(--bs-body-color);
+  --bs-btn-active-border-color: var(--bs-body-color);
+}
+html[data-bs-theme] .form-check-input:checked {
+  background-color: var(--grz-accent-ink);
+  border-color: var(--grz-accent-ink);
+}
+/* In dark l'ambra è chiara: il pallino e la spunta diventano scuri */
+html[data-bs-theme="dark"] .form-switch .form-check-input:checked {
+  --bs-form-switch-bg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 8 8'%3e%3ccircle r='3' fill='%231a1300'/%3e%3c/svg%3e");
+}
+html[data-bs-theme="dark"] .form-check-input[type="checkbox"]:checked:not([role="switch"]) {
+  --bs-form-check-bg-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3e%3cpath fill='none' stroke='%231a1300' stroke-linecap='round' stroke-linejoin='round' stroke-width='3' d='m6 10 3 3 6-6'/%3e%3c/svg%3e");
+}
+
+/* ── Testo in ambra ───────────────────────────────────────── */
+html[data-bs-theme="light"] .text-warning {
+  color: var(--grz-accent-ink) !important;   /* era 1.63:1 */
+}
+
+/* ── Badge formato: pill neutra + punto colorato ──────────── */
+html[data-bs-theme] .badge-format.bg-warning,
+html[data-bs-theme] .badge-format.bg-info,
+html[data-bs-theme] .badge-format.bg-success,
+html[data-bs-theme] .badge-format.bg-primary,
+html[data-bs-theme] .badge-format.bg-secondary {
+  background: var(--bs-tertiary-bg) !important;
+  color: var(--bs-body-color) !important;
+  border: 1px solid var(--bs-border-color) !important;
+}
+html[data-bs-theme] .badge-format::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  opacity: 1;
+}
+html[data-bs-theme] .badge-format.bg-warning::before  { background: var(--grz-fmt-vinile); }
+html[data-bs-theme] .badge-format.bg-info::before     { background: var(--grz-fmt-cd); }
+html[data-bs-theme] .badge-format.bg-success::before  { background: var(--grz-fmt-cassetta); }
+html[data-bs-theme] .badge-format.bg-primary::before  { background: var(--grz-fmt-digital); }
+html[data-bs-theme] .badge-format.bg-secondary::before { background: var(--grz-fmt-digital); }
+
+/* ── Dati di catalogo in mono con cifre tabulari ──────────── */
+.grz-col-year,
+.grz-album-tile__year,
+.official-disco__year,
+.sp-time,
+.album-hero-mbid {
+  font-family: var(--grz-font-data);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+/* Anno in archivio: dato, non accento */
+html[data-bs-theme] .grz-archive-row .grz-col-year {
+  color: var(--bs-secondary-color);
+  font-weight: 500;
+}
+
+/* ── Focus da tastiera ────────────────────────────────────── */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--grz-accent);
+  outline-offset: 2px;
+}

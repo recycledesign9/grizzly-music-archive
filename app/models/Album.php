@@ -79,7 +79,13 @@ class Album
            FROM audio_files af3
            JOIN tracks t3 ON t3.id = af3.track_id
            WHERE t3.album_id = a.id
-         ) AS tracks_with_audio_count
+         ) AS tracks_with_audio_count,
+         EXISTS (
+           SELECT 1
+           FROM audio_files af_ext
+           WHERE af_ext.album_id = a.id
+             AND af_ext.storage_type = 'external'
+         ) AS has_external_audio
   FROM albums a
   LEFT JOIN artists ar ON a.artist_id = ar.id
   LEFT JOIN formats  f ON a.format_id = f.id
@@ -201,18 +207,24 @@ class Album
     return $out;
   }
 
-  // Sincronizza i formati dell'album sulla tabella ponte e
-  // riallinea la colonna legacy `format_id` (formato principale
-  // = id formato più basso tra i selezionati). In transazione.
+  // Sincronizza i formati selezionati MANUALMENTE dall'utente.
+  //
+  // `album_formats` conserva due provenienze indipendenti:
+  //   is_manual  = formato dichiarato nel form
+  //   is_scanner = formato dedotto dalla posizione della cartella audio
+  //
+  // Il salvataggio manuale NON deve quindi cancellare il formato automatico:
+  // aggiorna soltanto il flag manuale e rimuove le righe che non hanno più
+  // nessuna provenienza.
   public function syncFormats(int $albumId, array $formatIds): void
   {
     $formatIds = array_values(array_unique(array_map('intval', $formatIds)));
-    $formatIds = array_filter($formatIds, function ($v) {
+    $formatIds = array_values(array_filter($formatIds, function ($v) {
       return $v > 0;
-    });
+    }));
 
     if (empty($formatIds)) {
-      return; // mai lasciare un album senza formati
+      return; // il form non consente album senza formati
     }
 
     $ownTransaction = !$this->db->inTransaction();
@@ -221,20 +233,62 @@ class Album
     }
 
     try {
-      $del = $this->db->prepare("DELETE FROM album_formats WHERE album_id = :id");
-      $del->execute([':id' => $albumId]);
-
-      $ins = $this->db->prepare("
-          INSERT IGNORE INTO album_formats (album_id, format_id)
-          VALUES (:album_id, :format_id)
+      $prevStmt = $this->db->prepare("
+          SELECT format_id, is_manual, is_scanner
+          FROM album_formats
+          WHERE album_id = :album_id
+          ORDER BY format_id
       ");
-      foreach ($formatIds as $fid) {
-        $ins->execute([':album_id' => $albumId, ':format_id' => $fid]);
+      $prevStmt->execute([':album_id' => $albumId]);
+      $previousRows = $prevStmt->fetchAll(PDO::FETCH_ASSOC);
+
+      $previousIds = array_map('intval', array_column($previousRows, 'format_id'));
+      sort($previousIds);
+      $submittedIds = $formatIds;
+      sort($submittedIds);
+
+      // Se l'insieme dei checkbox non è cambiato, il form potrebbe essere
+      // stato salvato solo per titolo/note/cover: NON trasformiamo quindi
+      // silenziosamente un formato scanner-only in manuale.
+      $formatsChangedByUser = ($previousIds !== $submittedIds);
+
+      if ($formatsChangedByUser) {
+        // L'utente ha davvero modificato i "Formati posseduti".
+        // Tutti i checkbox rimasti selezionati diventano manuali; questo
+        // permette, ad esempio, Vinile(scanner) + CD(manuale) e fa sì che
+        // Vinile resti posseduto anche se in futuro la cartella audio viene
+        // spostata sotto CD.
+        $clear = $this->db->prepare("
+            UPDATE album_formats
+            SET is_manual = 0
+            WHERE album_id = :album_id
+        ");
+        $clear->execute([':album_id' => $albumId]);
+
+        $ins = $this->db->prepare("
+            INSERT INTO album_formats (album_id, format_id, is_manual, is_scanner)
+            VALUES (:album_id, :format_id, 1, 0)
+            ON DUPLICATE KEY UPDATE is_manual = 1
+        ");
+
+        foreach ($submittedIds as $fid) {
+          $ins->execute([
+            ':album_id'  => $albumId,
+            ':format_id' => $fid,
+          ]);
+        }
+
+        // Le righe non più né manuali né scanner possono sparire.
+        $cleanup = $this->db->prepare("
+            DELETE FROM album_formats
+            WHERE album_id = :album_id
+              AND is_manual = 0
+              AND is_scanner = 0
+        ");
+        $cleanup->execute([':album_id' => $albumId]);
       }
 
-      // Colonna legacy: formato principale
-      $upd = $this->db->prepare("UPDATE albums SET format_id = :fid WHERE id = :id");
-      $upd->execute([':fid' => min($formatIds), ':id' => $albumId]);
+      $this->refreshPrimaryFormat($albumId);
 
       if ($ownTransaction) {
         $this->db->commit();
@@ -244,6 +298,133 @@ class Album
         $this->db->rollBack();
       }
       throw $e;
+    }
+  }
+
+  /**
+   * Sincronizza il SOLO formato dedotto dallo scanner.
+   *
+   * Se la cartella viene spostata da Digital a CD/Vinile/Musicassetta,
+   * il vecchio flag scanner viene tolto e il nuovo viene impostato.
+   * Un formato selezionato manualmente resta presente anche quando non è più
+   * il formato dedotto dalla cartella.
+   */
+  public function syncScannerFormat(int $albumId, int $formatId): void
+  {
+    if ($albumId <= 0 || $formatId <= 0) {
+      return;
+    }
+
+    $ownTransaction = !$this->db->inTransaction();
+    if ($ownTransaction) {
+      $this->db->beginTransaction();
+    }
+
+    try {
+      // Compatibilità con gli album scannerizzati PRIMA dell'introduzione
+      // dei flag di provenienza. Se un album creato dallo scanner ha un solo
+      // formato e nessun flag scanner, quella riga è con ragionevole certezza
+      // il formato automatico originario: la "adottiamo" come scanner-only.
+      $probe = $this->db->prepare("
+          SELECT
+            a.needs_review,
+            (SELECT COUNT(*)
+               FROM audio_files au
+              WHERE au.album_id = a.id
+                AND au.source_path IS NOT NULL) AS scanner_audio,
+            (SELECT COUNT(*)
+               FROM album_formats af0
+              WHERE af0.album_id = a.id) AS format_count,
+            (SELECT COUNT(*)
+               FROM album_formats af1
+              WHERE af1.album_id = a.id
+                AND af1.is_scanner = 1) AS scanner_count
+          FROM albums a
+          WHERE a.id = :album_id
+          LIMIT 1
+      ");
+      $probe->execute([':album_id' => $albumId]);
+      $legacy = $probe->fetch(PDO::FETCH_ASSOC);
+
+      if ($legacy
+          && (int)$legacy['needs_review'] === 1
+          && (int)$legacy['scanner_audio'] > 0
+          && (int)$legacy['format_count'] === 1
+          && (int)$legacy['scanner_count'] === 0) {
+        $adopt = $this->db->prepare("
+            UPDATE album_formats
+            SET is_manual = 0,
+                is_scanner = 1
+            WHERE album_id = :album_id
+        ");
+        $adopt->execute([':album_id' => $albumId]);
+      }
+
+      // Il formato scanner deve essere uno solo per album.
+      $clear = $this->db->prepare("
+          UPDATE album_formats
+          SET is_scanner = 0
+          WHERE album_id = :album_id
+      ");
+      $clear->execute([':album_id' => $albumId]);
+
+      // Se il formato esiste già perché aggiunto manualmente, diventa "both":
+      // is_manual resta 1 e aggiungiamo soltanto is_scanner = 1.
+      $ins = $this->db->prepare("
+          INSERT INTO album_formats (album_id, format_id, is_manual, is_scanner)
+          VALUES (:album_id, :format_id, 0, 1)
+          ON DUPLICATE KEY UPDATE is_scanner = 1
+      ");
+      $ins->execute([
+        ':album_id'  => $albumId,
+        ':format_id' => $formatId,
+      ]);
+
+      $cleanup = $this->db->prepare("
+          DELETE FROM album_formats
+          WHERE album_id = :album_id
+            AND is_manual = 0
+            AND is_scanner = 0
+      ");
+      $cleanup->execute([':album_id' => $albumId]);
+
+      $this->refreshPrimaryFormat($albumId);
+
+      if ($ownTransaction) {
+        $this->db->commit();
+      }
+    } catch (Throwable $e) {
+      if ($ownTransaction && $this->db->inTransaction()) {
+        $this->db->rollBack();
+      }
+      throw $e;
+    }
+  }
+
+  /**
+   * Mantiene allineata la colonna legacy albums.format_id al formato con id
+   * più basso tra quelli realmente presenti nella tabella ponte.
+   */
+  private function refreshPrimaryFormat(int $albumId): void
+  {
+    $stmt = $this->db->prepare("
+        SELECT MIN(format_id)
+        FROM album_formats
+        WHERE album_id = :album_id
+    ");
+    $stmt->execute([':album_id' => $albumId]);
+    $primary = (int)$stmt->fetchColumn();
+
+    if ($primary > 0) {
+      $upd = $this->db->prepare("
+          UPDATE albums
+          SET format_id = :format_id
+          WHERE id = :album_id
+      ");
+      $upd->execute([
+        ':format_id' => $primary,
+        ':album_id'  => $albumId,
+      ]);
     }
   }
 

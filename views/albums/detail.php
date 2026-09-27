@@ -142,6 +142,11 @@ $audioTitle = $albumHasAudio
   };
 </script>
 
+<!-- Involucro della scheda: contenitore delle container query, così
+     il layout segue lo spazio reale (con o senza coda agganciata).
+     Chiuso prima dei modali: un contenitore di query fa da riferimento
+     per gli elementi position: fixed al suo interno. -->
+<div class="grz-album">
 <div class="row g-4">
 
   <?php if ($flashSuccess): ?>
@@ -229,6 +234,23 @@ $audioTitle = $albumHasAudio
                     <i class="bi bi-pencil me-2"></i>Modifica disco
                   </a>
                 </li>
+                <?php if ($album['mbid']): ?>
+                  <li><hr class="dropdown-divider"></li>
+                  <li>
+                    <a class="dropdown-item" href="https://musicbrainz.org/release/<?= htmlspecialchars($album['mbid']) ?>"
+                      target="_blank" rel="noopener">
+                      <i class="bi bi-box-arrow-up-right me-2"></i>Apri su MusicBrainz
+                    </a>
+                  </li>
+                  <li>
+                    <button class="dropdown-item grz-copy-mbid" type="button"
+                      data-mbid="<?= htmlspecialchars($album['mbid'], ENT_QUOTES) ?>">
+                      <i class="bi bi-fingerprint me-2"></i>Copia MBID
+                      <span class="grz-copy-mbid__id"><?= substr(htmlspecialchars($album['mbid']), 0, 8) ?></span>
+                    </button>
+                  </li>
+                <?php endif; ?>
+                <li><hr class="dropdown-divider"></li>
                 <li>
                   <button class="dropdown-item text-danger" type="button"
                     data-bs-toggle="modal" data-bs-target="#deleteModal">
@@ -267,13 +289,7 @@ $audioTitle = $albumHasAudio
             <?php if ((int)$album['copies'] > 1): ?>
               <span><i class="bi bi-collection"></i><?= (int)$album['copies'] ?> copie</span>
             <?php endif; ?>
-            <?php if ($album['mbid']): ?>
-              <span><i class="bi bi-fingerprint"></i>
-                <a href="https://musicbrainz.org/release/<?= htmlspecialchars($album['mbid']) ?>"
-                  target="_blank" rel="noopener"
-                  class="album-hero-mbid font-monospace"><?= substr(htmlspecialchars($album['mbid']), 0, 8) ?>…</a>
-              </span>
-            <?php endif; ?>
+
           </div>
 
           <div class="album-hero-badges">
@@ -286,6 +302,15 @@ $audioTitle = $albumHasAudio
               <span class="badge badge-genre"><?= htmlspecialchars($album['genre_name']) ?></span>
             <?php endif; ?>
           </div>
+
+          <?php if ($album['notes']): ?>
+            <!-- Note personali: descrivono la copia posseduta, accanto
+                 ai dati del disco (stessa logica del form) -->
+            <p class="album-hero-mynote">
+              <i class="bi bi-pencil" aria-hidden="true"></i>
+              <span><?= nl2br(htmlspecialchars($album['notes'])) ?></span>
+            </p>
+          <?php endif; ?>
         </div>
       </div>
     </div>
@@ -297,12 +322,7 @@ $audioTitle = $albumHasAudio
   <div class="col-12 col-md-4 col-lg-3 album-detail-sidebar">
 
     <!-- Note personali -->
-    <?php if ($album['notes']): ?>
-      <div class="album-notes-block mb-3">
-        <i class="bi bi-pencil-square me-2 text-warning opacity-75"></i>
-        <span class="small"><?= nl2br(htmlspecialchars($album['notes'])) ?></span>
-      </div>
-    <?php endif; ?>
+    <?php /* Note personali spostate nella testata, sotto le pillole */ ?>
 
     <!-- Descrizione automatica / Note sull'album -->
     <div class="album-desc-block album-desc-block-sidebar mb-4" id="albumDescBlock"
@@ -364,7 +384,7 @@ $audioTitle = $albumHasAudio
   </div><!-- /col cover -->
 
   <!-- Tracklist + player -->
-  <div class="col-12 col-md-8 col-lg-9">
+  <div class="col-12 col-md-8 col-lg-9 album-detail-main">
 
     <!-- Barra tracklist: etichetta + audio + menu azioni.
          Titolo/artista/durata vivono ora nell'hero in cima alla pagina. -->
@@ -441,7 +461,7 @@ $audioTitle = $albumHasAudio
 
     <?php if (!empty($tracks)): ?>
       <div class="card shadow-sm">
-        <ul class="list-group list-group-flush" id="tracklistPlayer">
+        <ul class="list-group list-group-flush" id="tracklistPlayer" data-player-context="album:<?= (int)$album['id'] ?>">
           <?php foreach ($tracks as $t): ?>
             <li class="list-group-item track-item py-2" data-track-id="<?= (int)$t['id'] ?>">
               <div class="d-flex align-items-center gap-3">
@@ -453,7 +473,13 @@ $audioTitle = $albumHasAudio
                   <?php endif; ?>
                 </span>
                 <div class="flex-grow-1">
-                  <span class="fw-semibold"><?= htmlspecialchars($t['title']) ?></span>
+                  <?php if ($t['audio_filename']): ?>
+                    <!-- Titolo cliccabile: equivale al pulsante play della riga -->
+                    <button type="button" class="fw-semibold track-title-play"
+                      title="Riproduci <?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"><?= htmlspecialchars($t['title']) ?></button>
+                  <?php else: ?>
+                    <span class="fw-semibold"><?= htmlspecialchars($t['title']) ?></span>
+                  <?php endif; ?>
                   <?php if ($t['duration_sec']): ?>
                     <span class="text-muted small ms-2">
                       <?= Track::formatDuration($t['duration_sec']) ?>
@@ -477,38 +503,10 @@ $audioTitle = $albumHasAudio
                       <button type="button"
                         class="btn btn-xs btn-outline-warning btn-enqueue-track d-none d-md-inline-flex"
                         data-track-id="<?= (int)$t['id'] ?>"
-                        title="Aggiungi alla coda di riproduzione">
+                        title="Aggiungi alla coda di riproduzione"
+                        aria-label="Aggiungi <?= htmlspecialchars($t['title'], ENT_QUOTES) ?> alla coda">
                         <i class="bi bi-plus-lg"></i>
                       </button>
-                      <!-- Azioni secondarie sul file audio -->
-                      <div class="dropdown d-none d-md-block">
-                        <button type="button"
-                          class="btn btn-xs btn-outline-secondary"
-                          data-bs-toggle="dropdown"
-                          aria-expanded="false"
-                          title="Altre azioni">
-                          <i class="bi bi-three-dots-vertical"></i>
-                        </button>
-                        <ul class="dropdown-menu dropdown-menu-end shadow-sm">
-                          <li>
-                            <a class="dropdown-item small"
-                              href="<?= MediaPathResolver::getDownloadUrl($t['audio_filename']) ?>" download>
-                              <i class="bi bi-download me-2 text-muted"></i>Scarica MP3
-                            </a>
-                          </li>
-                          <?php if (!empty($t['audio_file_id'])): ?>
-                            <li>
-                              <button type="button"
-                                class="dropdown-item small text-danger btn-delete-audio"
-                                data-audio-id="<?= (int)$t['audio_file_id'] ?>"
-                                data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
-                                data-csrf="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
-                                <i class="bi bi-x-lg me-2"></i>Rimuovi audio
-                              </button>
-                            </li>
-                          <?php endif; ?>
-                        </ul>
-                      </div>
                     </div>
                   <?php else: ?>
                     <span class="text-muted small fst-italic d-none d-md-inline">
@@ -527,170 +525,72 @@ $audioTitle = $albumHasAudio
                       <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
                     </svg>
                   </button>
-                  <!-- Dropdown: aggiungi traccia a playlist -->
                   <?php $inPlaylists = $trackPlaylistMap[(int)$t['id']] ?? []; ?>
-                  <div class="dropdown d-none d-md-block">
-                    <button type="button"
-                      class="btn btn-xs btn-outline-secondary"
-                      data-bs-toggle="dropdown"
-                      data-bs-auto-close="outside"
-                      aria-expanded="false"
-                      title="Aggiungi a playlist">
-                      <i class="bi bi-collection-play"></i>
-                    </button>
-                    <ul class="dropdown-menu dropdown-menu-end shadow-sm" style="min-width:230px">
-                      <li>
-                        <h6 class="dropdown-header py-1 small">Aggiungi a playlist</h6>
-                      </li>
-                      <?php if (empty($userPlaylists)): ?>
-                        <li><span class="dropdown-item-text small text-muted">Nessuna playlist</span></li>
-                      <?php else: ?>
-                        <?php foreach ($userPlaylists as $pl):
-                          $alreadyIn = in_array((int)$pl['id'], $inPlaylists);
-                        ?>
-                          <li class="d-flex align-items-center px-1 gap-1">
-                            <?php if ($alreadyIn): ?>
-                              <span class="dropdown-item small text-muted d-flex align-items-center
-                                        justify-content-between flex-grow-1 pe-0 disabled">
-                                <span><i class="bi bi-check2 me-2 text-success"></i><?= htmlspecialchars($pl['name']) ?></span>
-                                <span class="badge bg-success-subtle text-success ms-2"
-                                  style="font-size:.65rem;white-space:nowrap">presente</span>
-                              </span>
-                            <?php else: ?>
-                              <button class="dropdown-item small btn-add-track-to-playlist
-                                          d-flex align-items-center justify-content-between
-                                          flex-grow-1 pe-0"
-                                type="button"
-                                data-track-id="<?= (int)$t['id'] ?>"
-                                data-playlist-id="<?= (int)$pl['id'] ?>"
-                                data-playlist-name="<?= htmlspecialchars($pl['name'], ENT_QUOTES) ?>">
-                                <span><i class="bi bi-collection me-2 text-muted"></i><?= htmlspecialchars($pl['name']) ?></span>
-                              </button>
-                            <?php endif; ?>
-                            <a href="<?= BASE_URL ?>/index.php?route=playlists/detail/<?= (int)$pl['id'] ?>"
-                              class="btn btn-xs btn-link text-muted flex-shrink-0 px-1"
-                              title="Apri playlist">
-                              <i class="bi bi-box-arrow-up-right" style="font-size:.65rem"></i>
-                            </a>
-                          </li>
-                        <?php endforeach; ?>
-                      <?php endif; ?>
-                      <li>
-                        <hr class="dropdown-divider my-1">
-                      </li>
-                      <li>
-                        <button class="dropdown-item small btn-add-track-new-playlist"
-                          type="button"
-                          data-track-id="<?= (int)$t['id'] ?>"
-                          data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>">
-                          <i class="bi bi-plus-circle me-2 text-success"></i>Nuova playlist…
-                        </button>
-                      </li>
-                    </ul>
-                  </div>
-                  <!-- Menu unico azioni traccia — solo mobile (d-md-none).
-                       Assorbe coda, download/rimozione audio, YouTube e
-                       playlist. Gli item riusano le classi delegate del
-                       dropdown desktop (.btn-enqueue-track, .btn-delete-audio,
-                       .btn-add-track-to-playlist, .btn-add-track-new-playlist);
+                  <!-- Menu ⋮ della traccia (tutte le larghezze).
+                       Desktop: Aggiungi a playlist…, Scarica, Rimuovi audio.
+                       Mobile: in più "Aggiungi alla coda" e YouTube, che su
+                       desktop sono pulsanti sempre visibili nella riga.
+                       Le voci legate al file audio hanno .track-audio-menu-item:
+                       l'handler di rimozione audio le toglie insieme al file.
                        YouTube passa dal proxy .btn-yt-menu perché duplicare
                        .btn-yt raddoppierebbe la coda di playAlbum(). -->
-                  <div class="dropdown d-md-none track-mobile-menu">
+                  <div class="dropdown track-mobile-menu track-menu">
                     <button type="button"
-                      class="btn btn-xs btn-outline-secondary"
+                      class="btn btn-xs btn-outline-secondary track-menu-toggle"
                       data-bs-toggle="dropdown"
-                      data-bs-auto-close="outside"
                       aria-expanded="false"
-                      title="Azioni traccia">
-                      <i class="bi bi-three-dots-vertical"></i>
+                      title="Altre azioni"
+                      aria-label="Altre azioni per <?= htmlspecialchars($t['title'], ENT_QUOTES) ?>">
+                      <i class="bi bi-three-dots-vertical" aria-hidden="true"></i>
                     </button>
-                    <ul class="dropdown-menu dropdown-menu-end shadow-sm" style="min-width:230px">
+                    <ul class="dropdown-menu dropdown-menu-end shadow-sm track-menu-list">
                       <?php if ($t['audio_filename']): ?>
-                        <li class="track-audio-menu-item">
+                        <li class="track-audio-menu-item d-md-none">
                           <button type="button"
-                            class="dropdown-item small btn-enqueue-track"
+                            class="dropdown-item btn-enqueue-track"
                             data-track-id="<?= (int)$t['id'] ?>">
-                            <i class="bi bi-plus-lg" style="margin-right:.5rem"></i>Aggiungi alla coda
+                            <i class="bi bi-plus-lg" aria-hidden="true"></i>Aggiungi alla coda
                           </button>
                         </li>
+                      <?php endif; ?>
+                      <li>
+                        <button type="button"
+                          class="dropdown-item btn-open-track-playlist"
+                          data-track-id="<?= (int)$t['id'] ?>"
+                          data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
+                          data-in-playlists="<?= htmlspecialchars(implode(',', array_map('intval', $inPlaylists)), ENT_QUOTES) ?>">
+                          <i class="bi bi-collection-play" aria-hidden="true"></i>Aggiungi a playlist…
+                        </button>
+                      </li>
+                      <li class="d-md-none">
+                        <button type="button"
+                          class="dropdown-item btn-yt-menu"
+                          data-track-id="<?= (int)$t['id'] ?>">
+                          <i class="bi bi-youtube text-danger" aria-hidden="true"></i>Cerca su YouTube
+                        </button>
+                      </li>
+                      <?php if ($t['audio_filename']): ?>
                         <li class="track-audio-menu-item">
-                          <a class="dropdown-item small"
+                          <hr class="dropdown-divider">
+                        </li>
+                        <li class="track-audio-menu-item">
+                          <a class="dropdown-item"
                             href="<?= MediaPathResolver::getDownloadUrl($t['audio_filename']) ?>" download>
-                            <i class="bi bi-download me-2 text-muted"></i>Scarica MP3
+                            <i class="bi bi-download" aria-hidden="true"></i>Scarica file audio
                           </a>
                         </li>
                         <?php if (!empty($t['audio_file_id'])): ?>
                           <li class="track-audio-menu-item">
                             <button type="button"
-                              class="dropdown-item small text-danger btn-delete-audio"
+                              class="dropdown-item text-danger btn-delete-audio"
                               data-audio-id="<?= (int)$t['audio_file_id'] ?>"
                               data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"
                               data-csrf="<?= htmlspecialchars($_SESSION['csrf_token']) ?>">
-                              <i class="bi bi-x-lg me-2"></i>Rimuovi audio
+                              <i class="bi bi-x-lg" aria-hidden="true"></i>Rimuovi audio
                             </button>
                           </li>
                         <?php endif; ?>
-                        <li class="track-audio-menu-item">
-                          <hr class="dropdown-divider my-1">
-                        </li>
                       <?php endif; ?>
-                      <li>
-                        <button type="button"
-                          class="dropdown-item small btn-yt-menu"
-                          data-track-id="<?= (int)$t['id'] ?>">
-                          <i class="bi bi-youtube me-2 text-danger"></i>Cerca su YouTube
-                        </button>
-                      </li>
-                      <li>
-                        <hr class="dropdown-divider my-1">
-                      </li>
-                      <li>
-                        <h6 class="dropdown-header py-1 small">Aggiungi a playlist</h6>
-                      </li>
-                      <?php if (empty($userPlaylists)): ?>
-                        <li><span class="dropdown-item-text small text-muted">Nessuna playlist</span></li>
-                      <?php else: ?>
-                        <?php foreach ($userPlaylists as $pl):
-                          $alreadyIn = in_array((int)$pl['id'], $inPlaylists);
-                        ?>
-                          <li class="d-flex align-items-center px-1 gap-1">
-                            <?php if ($alreadyIn): ?>
-                              <span class="dropdown-item small text-muted d-flex align-items-center
-                                        justify-content-between flex-grow-1 pe-0 disabled">
-                                <span><i class="bi bi-check2 me-2 text-success"></i><?= htmlspecialchars($pl['name']) ?></span>
-                                <span class="badge bg-success-subtle text-success ms-2"
-                                  style="font-size:.65rem;white-space:nowrap">presente</span>
-                              </span>
-                            <?php else: ?>
-                              <button class="dropdown-item small btn-add-track-to-playlist
-                                          d-flex align-items-center justify-content-between
-                                          flex-grow-1 pe-0"
-                                type="button"
-                                data-track-id="<?= (int)$t['id'] ?>"
-                                data-playlist-id="<?= (int)$pl['id'] ?>"
-                                data-playlist-name="<?= htmlspecialchars($pl['name'], ENT_QUOTES) ?>">
-                                <span><i class="bi bi-collection me-2 text-muted"></i><?= htmlspecialchars($pl['name']) ?></span>
-                              </button>
-                            <?php endif; ?>
-                            <a href="<?= BASE_URL ?>/index.php?route=playlists/detail/<?= (int)$pl['id'] ?>"
-                              class="btn btn-xs btn-link text-muted flex-shrink-0 px-1"
-                              title="Apri playlist">
-                              <i class="bi bi-box-arrow-up-right" style="font-size:.65rem"></i>
-                            </a>
-                          </li>
-                        <?php endforeach; ?>
-                      <?php endif; ?>
-                      <li>
-                        <hr class="dropdown-divider my-1">
-                      </li>
-                      <li>
-                        <button class="dropdown-item small btn-add-track-new-playlist"
-                          type="button"
-                          data-track-id="<?= (int)$t['id'] ?>"
-                          data-track-title="<?= htmlspecialchars($t['title'], ENT_QUOTES) ?>">
-                          <i class="bi bi-plus-circle me-2 text-success"></i>Nuova playlist…
-                        </button>
-                      </li>
                     </ul>
                   </div>
                 </div><!-- /.track-actions -->
@@ -706,12 +606,14 @@ $audioTitle = $albumHasAudio
       </div>
     <?php endif; ?>
 
-    <!-- Upload MP3 singolo (inalterato) -->
-    <div class="card shadow-sm mt-4">
-      <div class="card-header fw-semibold">
-        <i class="bi bi-upload me-2"></i>Carica file audio (MP3 / FLAC)
-      </div>
-      <div class="card-body">
+    <!-- Upload MP3 singolo: pannello richiudibile, chiuso di default
+         (operazione occasionale). Id e form invariati. -->
+    <details class="grz-upload-panel mt-4" id="uploadAudioPanel">
+      <summary class="grz-upload-panel__summary">
+        <span><i class="bi bi-upload me-2" aria-hidden="true"></i>Carica file audio</span>
+        <span class="grz-upload-panel__hint">MP3 o FLAC, associato a una traccia</span>
+      </summary>
+      <div class="grz-upload-panel__body">
         <form action="<?= BASE_URL ?>/index.php?route=upload/audio/<?= $album['id'] ?>"
           method="post" enctype="multipart/form-data" class="row g-2"
           id="uploadAudioForm">
@@ -747,7 +649,7 @@ $audioTitle = $albumHasAudio
           </div>
         </form>
       </div>
-    </div>
+    </details>
 
     <script>
       (function() {
@@ -887,6 +789,7 @@ $audioTitle = $albumHasAudio
 
 
 </div><!-- /row -->
+</div><!-- /.grz-album -->
 
 <script>
   /* ----------------------------------------------------------------
@@ -1440,9 +1343,12 @@ $audioTitle = $albumHasAudio
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title" id="addToPlaylistLabel">
-          <i class="bi bi-collection-play me-2 text-success"></i>Aggiungi a playlist
-        </h5>
+        <div>
+          <h5 class="modal-title" id="addToPlaylistLabel">
+            <i class="bi bi-collection-play me-2"></i>Aggiungi a playlist
+          </h5>
+          <div class="grz-atp-track" hidden></div>
+        </div>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
@@ -2939,7 +2845,7 @@ $audioTitle = $albumHasAudio
         }
       });
       var sel = document.getElementById('selectExistingPlaylist');
-      if (sel) {
+      if (sel && !sel.querySelector('option[value="' + String(plId).replace(/"/g, '') + '"]')) {
         var opt = document.createElement('option');
         opt.value = plId;
         opt.textContent = plName;
@@ -3077,6 +2983,57 @@ $audioTitle = $albumHasAudio
         );
       });
 
+      // --- Click su "Aggiungi a playlist…" nel menu ⋮ della traccia ---
+      // Apre lo stesso modale dell'album intero, in modalità
+      // 'track-choose': scelta tra playlist esistente (quelle che già
+      // contengono la traccia sono disabilitate) oppure nuova playlist.
+      document.addEventListener('click', function(e) {
+        var btn = e.target.closest('.btn-open-track-playlist');
+        if (!btn) return;
+        var refs = getRefs();
+        if (!refs.modal) return;
+
+        S.modalMode = 'track-choose';
+        S.pendingTrackId = btn.dataset.trackId;
+        S.pendingTrigger = btn;
+
+        var inList = (btn.dataset.inPlaylists || '').split(',').filter(Boolean);
+        var title = btn.dataset.trackTitle || 'traccia';
+
+        if (refs.modalTitle) {
+          refs.modalTitle.innerHTML = '<i class="bi bi-collection-play me-2"></i>Aggiungi a playlist';
+        }
+        var sub = refs.modal.querySelector('.grz-atp-track');
+        if (sub) {
+          sub.textContent = title;
+          sub.hidden = false;
+        }
+        if (refs.selWrap) refs.selWrap.style.display = '';
+        if (refs.orDivider) refs.orDivider.style.display = '';
+        if (refs.selExist) {
+          refs.selExist.value = '';
+          Array.prototype.forEach.call(refs.selExist.options, function(o) {
+            if (!o.value) return;
+            if (!o.dataset.label) o.dataset.label = o.textContent.trim();
+            var present = inList.indexOf(o.value) !== -1;
+            o.disabled = present;
+            o.textContent = o.dataset.label + (present ? ' · già presente' : '');
+          });
+        }
+        if (refs.inputNew) refs.inputNew.value = '';
+        if (refs.feedback) refs.feedback.innerHTML = '';
+        if (refs.btnConfirm) {
+          refs.btnConfirm.disabled = false;
+          refs.btnConfirm.innerHTML = '<i class="bi bi-plus-lg me-1"></i>Aggiungi traccia';
+        }
+
+        // Chiude il menu ⋮ prima di aprire il modale
+        var toggle = btn.closest('.dropdown') ? btn.closest('.dropdown').querySelector('[data-bs-toggle="dropdown"]') : null;
+        if (toggle && bootstrap.Dropdown.getInstance(toggle)) bootstrap.Dropdown.getInstance(toggle).hide();
+
+        bootstrap.Modal.getOrCreateInstance(refs.modal).show();
+      });
+
       // --- Click su "Nuova playlist…" nel dropdown traccia ---
       document.addEventListener('click', function(e) {
         var btn = e.target.closest('.btn-add-track-new-playlist');
@@ -3115,7 +3072,9 @@ $audioTitle = $albumHasAudio
         if (e.relatedTarget && e.relatedTarget.dataset.bsTarget === '#addToPlaylistModal') {
           S.modalMode = 'album';
         }
-        if (S.modalMode === 'track') return;
+        if (S.modalMode === 'track' || S.modalMode === 'track-choose') return;
+        var subAlbum = refs.modal.querySelector('.grz-atp-track');
+        if (subAlbum) subAlbum.hidden = true;
         if (refs.modalTitle) refs.modalTitle.innerHTML =
           '<i class="bi bi-collection-play me-2 text-success"></i>Aggiungi a playlist';
         if (refs.selWrap) refs.selWrap.style.display = '';
@@ -3135,6 +3094,15 @@ $audioTitle = $albumHasAudio
         if (!refs.modal || e.target !== refs.modal) return;
         S.modalMode = 'album';
         S.pendingTrackId = null;
+        S.pendingTrigger = null;
+        if (refs.selExist) {
+          Array.prototype.forEach.call(refs.selExist.options, function(o) {
+            o.disabled = false;
+            if (o.dataset.label) o.textContent = o.dataset.label;
+          });
+        }
+        var subReset = refs.modal.querySelector('.grz-atp-track');
+        if (subReset) subReset.hidden = true;
         if (refs.selWrap) refs.selWrap.style.display = '';
         if (refs.orDivider) refs.orDivider.style.display = '';
         if (refs.inputNew) refs.inputNew.value = '';
@@ -3305,9 +3273,19 @@ $audioTitle = $albumHasAudio
         if (!e.target.closest('#btnConfirmAddToPlaylist')) return;
         var refs = getRefs();
         var newName = refs.inputNew ? refs.inputNew.value.trim() : '';
-        var existing = (S.modalMode === 'album' && refs.selExist) ? refs.selExist.value.trim() : '';
+        var existing = ((S.modalMode === 'album' || S.modalMode === 'track-choose') && refs.selExist) ? refs.selExist.value.trim() : '';
 
-        if (S.modalMode === 'track') {
+        if (S.modalMode === 'track-choose') {
+          if (!existing && !newName) {
+            if (refs.feedback) refs.feedback.innerHTML =
+              '<div class="alert alert-warning py-1 small mb-0">Seleziona una playlist oppure inserisci un nome.</div>';
+            return;
+          }
+          var body = 'track_ids[]=' + encodeURIComponent(S.pendingTrackId) +
+            (existing ?
+              '&playlist_id=' + encodeURIComponent(existing) :
+              '&playlist_id=new&playlist_name=' + encodeURIComponent(newName));
+        } else if (S.modalMode === 'track') {
           if (!newName) {
             if (refs.feedback) refs.feedback.innerHTML =
               '<div class="alert alert-warning py-1 small mb-0">Inserisci un nome per la nuova playlist.</div>';
@@ -3329,8 +3307,16 @@ $audioTitle = $albumHasAudio
         }
 
         sendToPlaylist(body, refs.btnConfirm, function(d) {
-          var msg = S.modalMode === 'track' ? 'Traccia aggiunta!' : 'Tracce aggiunte!';
+          var msg = (S.modalMode === 'track' || S.modalMode === 'track-choose') ? 'Traccia aggiunta!' : 'Tracce aggiunte!';
           var plId = d.playlist_id || null;
+
+          // La voce di menu ricorda la playlist: alla prossima apertura
+          // del modale compare come "già presente".
+          if (plId && S.pendingTrigger) {
+            var list = (S.pendingTrigger.dataset.inPlaylists || '').split(',').filter(Boolean);
+            if (list.indexOf(String(plId)) === -1) list.push(String(plId));
+            S.pendingTrigger.dataset.inPlaylists = list.join(',');
+          }
 
           if (refs.feedback) {
             // "Vai alla playlist" è un bottone, NON un <a href>.
@@ -3533,6 +3519,12 @@ $audioTitle = $albumHasAudio
       var t = Player.currentTrack();
       if (!t) return false;
       var myId = window.__albumId || (window.__album && window.__album.id) || null;
+      // Con il contesto disponibile conta cosa è stato avviato, non a
+      // quale album appartiene la traccia: un brano di questo disco che
+      // suona da una playlist non rende "in riproduzione" l'album.
+      if (myId && typeof Player.context === 'function') {
+        return Player.context() === 'album:' + myId;
+      }
       if (myId && t.albumId) return String(t.albumId) === String(myId);
       // Fallback: la traccia corrente è una delle tracce di questo album?
       if (window.__album && Array.isArray(window.__album.tracks)) {
@@ -3607,6 +3599,53 @@ $audioTitle = $albumHasAudio
     } else {
       sync();
     }
+  })();
+</script>
+
+<script>
+  // "Copia MBID" nel menu ⋮ della testata
+  (function () {
+    document.querySelectorAll('.grz-copy-mbid').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.dataset.mbid || '';
+        var done = function () {
+          var label = btn.querySelector('.grz-copy-mbid__id');
+          if (label) label.textContent = 'copiato';
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(id).then(done, function () { window.prompt('MBID', id); });
+        } else {
+          window.prompt('MBID', id);
+        }
+      });
+    });
+  })();
+</script>
+
+<script>
+  // Titolo traccia cliccabile: inoltra il clic al pulsante play della
+  // riga (creato da initTracklistPlayers in app.js), quindi segue la
+  // stessa logica di avvio, pausa e contesto. In modalità selezione
+  // spunta la casella; se l'audio è stato rimosso non fa nulla.
+  (function () {
+    var list = document.getElementById('tracklistPlayer');
+    if (!list) return;
+    list.addEventListener('click', function (e) {
+      var titleBtn = e.target.closest('.track-title-play');
+      if (!titleBtn) return;
+      var row = titleBtn.closest('.track-item');
+      if (!row) return;
+      if (list.classList.contains('selection-mode')) {
+        var cb = row.querySelector('.track-select-cb');
+        if (cb) {
+          cb.checked = !cb.checked;
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        return;
+      }
+      var playBtn = row.querySelector('.btn-track-play');
+      if (playBtn) playBtn.click();
+    });
   })();
 </script>
 

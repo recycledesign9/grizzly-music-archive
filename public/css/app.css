@@ -768,7 +768,7 @@ body:has(#sticky-player[style*="flex"]) {
 }
 
 /* ============================================================
-   YouTube Lightbox + btn-yt
+   YouTube Lightbox  btn-yt
    Aggiungere in coda a public/css/app.css
    ============================================================ */
 
@@ -2139,7 +2139,7 @@ body:has(#sticky-player[style*="flex"]) {
   }
 }
 /* ============================================================
-   ALBUM DETAIL — Responsive fix sidebar + note album
+   ALBUM DETAIL — Responsive fix sidebar  note album
    ============================================================ */
 
 .album-detail-sidebar {
@@ -2156,8 +2156,9 @@ body:has(#sticky-player[style*="flex"]) {
 }
 
 .album-detail-sidebar .album-desc-text {
-  font-size: 0.82rem;
+  font-size: 0.84rem;
   line-height: 1.6;
+  letter-spacing: 0.019em;
   max-width: none;
 }
 
@@ -2761,7 +2762,7 @@ body:has(#sticky-player[style*="flex"]) {
 }
 
 /* Su mobile la cover non deve diventare gigantesca:
-   limita la larghezza e centra cover + badge */
+   limita la larghezza e centra cover  badge */
 @media (max-width: 767.98px) {
   .album-detail-cover-wrap {
     max-width: 320px;
@@ -2948,7 +2949,6 @@ body:has(#sticky-player[style*="flex"]) {
   }
 }
 
-
 /* ============================================================
    ALBUM DETAIL — Album consigliati
    Compatto nella sidebar sotto "Note sull'album".
@@ -3112,10 +3112,11 @@ body:has(#sticky-player[style*="flex"]) {
 /* Cover assente per un suggerimento esterno: riquadro neutro coerente
    col tema (l'<img> senza src mostra solo questo sfondo). */
 .album-rec-cover-empty {
-  background:
-    linear-gradient(135deg,
-      var(--bs-secondary-bg) 0%,
-      var(--bs-tertiary-bg, var(--bs-secondary-bg)) 100%);
+  background: linear-gradient(
+    135deg,
+    var(--bs-secondary-bg) 0%,
+    var(--bs-tertiary-bg, var(--bs-secondary-bg)) 100%
+  );
 }
 
 @media (max-width: 767.98px) {
@@ -3123,7 +3124,6 @@ body:has(#sticky-player[style*="flex"]) {
     grid-column: 1 / -1;
   }
 }
-
 
 /* ============================================================
    Search Results Page
@@ -3331,7 +3331,8 @@ body:has(#sticky-player[style*="flex"]) {
 
 :root {
   --grz-amber: #f59e0b;
-  --grz-amber-dim: #d97706;
+  /* --grz-amber-dim: #d97706;*/
+  --grz-amber-dim: #ffc107;
   --grz-amber-glow: rgba(245, 158, 11, 0.18);
   --grz-amber-glow-s: rgba(245, 158, 11, 0.08);
   --grz-surface-2: var(--bs-tertiary-bg);
@@ -3818,23 +3819,39 @@ body:has(#sticky-player[style*="flex"]) {
   }
 }
 
-/* ===== QUEUE PANEL — coda di riproduzione player nativo ===== */
+/* ============================================================
+   QUEUE PANEL — coda di riproduzione del player
+   Fa parte del "telaio" come navbar e barra del player: stesso
+   colore scuro in entrambi i temi (in dark il blu inchiostro).
+   Struttura: in riproduzione · successivi · già ascoltati.
+   ============================================================ */
 .qp-panel {
+  --qp-bg: #1c1b19;
+  --qp-text: #f2f0ec;
+  --qp-muted: #b3aea6;
+  --qp-line: rgba(242, 240, 236, 0.09);
+  --qp-hover: rgba(242, 240, 236, 0.06);
   position: fixed;
   right: 18px;
-  bottom: 84px; /* 72px sticky player + margine */
+  bottom: 84px; /* 72px sticky player  margine */
   z-index: 1049;
-  width: 340px;
-  max-height: min(55vh, 480px);
+  width: 360px;
+  max-height: min(62vh, 560px);
   display: none;
   flex-direction: column;
-  background: rgba(20, 20, 20, 0.96);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--qp-bg);
+  color: var(--qp-text);
+  border: 1px solid var(--qp-line);
   border-radius: 14px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
   overflow: hidden;
+}
+html[data-bs-theme="dark"] .qp-panel {
+  --qp-bg: #111823;
+  --qp-text: #e6eaf0;
+  --qp-muted: #9aa7b8;
+  --qp-line: rgba(230, 234, 240, 0.09);
+  --qp-hover: rgba(230, 234, 240, 0.05);
 }
 .qp-panel.is-open {
   display: flex;
@@ -3843,190 +3860,334 @@ body:has(#sticky-player[style*="flex"]) {
 .qp-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--qp-line);
   flex-shrink: 0;
 }
 .qp-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #fff;
   flex: 1;
+  font-family: var(--grz-font-title, inherit);
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.qp-count {
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-size: 0.75rem;
+  color: var(--qp-muted);
+  white-space: nowrap;
+}
+.qp-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--qp-muted);
+}
+.qp-close:hover {
+  background: var(--qp-hover);
+  color: var(--qp-text);
+}
+
+.qp-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--qp-line) transparent;
+}
+
+/* In riproduzione */
+.qp-now {
+  padding: 14px 16px 16px;
+  border-bottom: 1px solid var(--qp-line);
+}
+.qp-now:empty {
+  display: none;
+}
+.qp-now-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--grz-accent, #f5b400);
+}
+.qp-now-label .track-playing-icon {
+  margin-left: 0;
+  --eq-color: var(--grz-accent, #f5b400);
+}
+.qp-now-from {
+  margin-left: auto;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--qp-muted);
+}
+.qp-now-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.qp-now-cover {
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--qp-hover);
+}
+.qp-now-title {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--qp-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.qp-count {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.42);
-  white-space: nowrap;
+
+/* Intestazioni di sezione */
+.qp-section-head {
+  display: block;
+  padding: 14px 16px 6px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--qp-muted);
 }
-.qp-close {
-  width: 26px;
-  height: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 12px;
+.qp-empty {
+  padding: 4px 16px 10px;
+  font-size: 0.8125rem;
+  color: var(--qp-muted);
+}
+.qp-history {
+  margin-top: 4px;
+  border-top: 1px solid var(--qp-line);
+}
+.qp-history > summary {
   cursor: pointer;
-  border-radius: 6px;
-  transition:
-    color 0.15s,
-    background 0.15s;
-}
-.qp-close:hover {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.07);
-}
-
-.qp-list {
   list-style: none;
-  margin: 0;
-  padding: 6px;
-  overflow-y: auto;
-  flex: 1;
+}
+.qp-history > summary::-webkit-details-marker {
+  display: none;
+}
+.qp-history > summary::after {
+  content: "\F282"; /* bi-chevron-down */
+  font-family: "bootstrap-icons";
+  margin-left: 6px;
+  font-size: 0.7rem;
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+.qp-history[open] > summary::after {
+  transform: rotate(180deg);
+}
+.qp-history > summary:hover {
+  color: var(--qp-text);
+}
+.qp-list--history .qp-item {
+  opacity: 0.6;
+}
+.qp-list--history .qp-item:hover,
+.qp-list--history .qp-item:focus-visible {
+  opacity: 1;
 }
 
-/* Scrollbar coda — sottile e scura (Windows mostra quella di default) */
+/* Righe */
 .qp-list {
-  scrollbar-width: thin; /* Firefox + Chromium 121+ */
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  margin: 0;
+  padding: 0 8px;
+  list-style: none;
 }
-.qp-list::-webkit-scrollbar {
-  /* Chromium/Safari legacy */
-  width: 8px;
-}
-.qp-list::-webkit-scrollbar-track {
-  background: transparent;
-}
-.qp-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
-}
-.qp-list::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.3);
-}
-
 .qp-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 8px;
+  gap: 10px;
+  min-height: 52px;
+  padding: 6px 8px;
   border-radius: 8px;
   cursor: pointer;
-  transition: background 0.15s;
   user-select: none;
+  transition: background 0.15s ease;
 }
 .qp-item:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--qp-hover);
 }
-.qp-item.qp-current {
-  background: rgba(255, 193, 7, 0.08);
-  cursor: default;
+.qp-item:focus-visible {
+  outline: 2px solid var(--grz-accent, #f5b400);
+  outline-offset: -2px;
 }
 .qp-item.qp-unavailable {
-  opacity: 0.38;
+  opacity: 0.4;
   cursor: default;
 }
-
+.qp-item.qp-ghost {
+  opacity: 0.35;
+  background: rgba(245, 180, 0, 0.12);
+}
 .qp-handle {
-  color: rgba(255, 255, 255, 0.25);
-  cursor: grab;
+  display: inline-flex;
   flex-shrink: 0;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
+  color: var(--qp-muted);
+  cursor: grab;
+  opacity: 0.45;
+}
+.qp-item:hover .qp-handle {
+  opacity: 1;
 }
 .qp-handle:active {
   cursor: grabbing;
 }
-
-.qp-pos {
-  min-width: 22px;
-  text-align: center;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.42);
-  font-variant-numeric: tabular-nums;
+.qp-cover {
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
+  border-radius: 4px;
+  object-fit: cover;
+  background: var(--qp-hover);
 }
-
-/* Wrapper titolo + artista (due righe nelle playlist, una negli album) */
 .qp-meta {
-  flex: 1;
-  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
-
 .qp-item-title {
-  font-size: 12.5px;
-  color: rgba(255, 255, 255, 0.85);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.3;
-}
-.qp-item.qp-current .qp-item-title {
-  color: #ffc107;
+  font-size: 0.875rem;
   font-weight: 600;
-}
-
-.qp-item-artist {
-  font-size: 10.5px;
-  color: rgba(255, 255, 255, 0.42);
+  color: var(--qp-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.3;
 }
-.qp-item.qp-current .qp-item-artist {
-  color: rgba(255, 193, 7, 0.65);
+.qp-item-artist {
+  font-size: 0.75rem;
+  color: var(--qp-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
 .qp-remove {
-  width: 24px;
-  height: 24px;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: none;
-  border: none;
-  color: rgba(255, 255, 255, 0.35);
-  font-size: 11px;
-  cursor: pointer;
-  border-radius: 6px;
-  opacity: 0;
   flex-shrink: 0;
-  transition:
-    opacity 0.15s,
-    color 0.15s,
-    background 0.15s;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--qp-muted);
+  opacity: 0;
+  transition: opacity 0.15s ease;
 }
-.qp-item:hover .qp-remove {
+.qp-item:hover .qp-remove,
+.qp-item:focus-within .qp-remove,
+.qp-remove:focus-visible {
   opacity: 1;
 }
 .qp-remove:hover {
-  color: #fff;
-  background: rgba(220, 53, 69, 0.35);
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+}
+@media (hover: none) {
+  .qp-remove,
+  .qp-handle {
+    opacity: 1;
+  }
 }
 
-/* Ghost durante il drag SortableJS */
-.qp-item.qp-ghost {
-  opacity: 0.3;
-  background: rgba(255, 193, 7, 0.12);
+/* Pulsante "fissa" (visibile solo dove il pannello può agganciarsi) */
+.qp-pin {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--qp-muted);
+}
+.qp-pin:hover {
+  background: var(--qp-hover);
+  color: var(--qp-text);
+}
+.qp-pin.is-active {
+  color: var(--grz-accent, #f5b400);
+}
+@media (min-width: 1200px) {
+  .qp-pin {
+    display: inline-flex;
+  }
 }
 
-/* Mobile: pannello a tutta larghezza */
+/* Coda agganciata: colonna a destra tra navbar e player, il
+   contenuto della pagina si restringe per non essere coperto */
+.qp-panel.is-docked {
+  --qp-dock-w: 360px;
+  top: var(--grz-nav-h, 64px);
+  right: 0;
+  bottom: 0;
+  width: var(--qp-dock-w);
+  max-height: none;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+  box-shadow: none;
+  z-index: 1020;
+}
+body:has(#sticky-player[style*="flex"]) .qp-panel.is-docked {
+  bottom: 72px;
+}
+body.qp-docked #page-content {
+  margin-right: 360px;
+}
+body.qp-docked .bulk-toolbar {
+  left: calc((100% - 360px) / 2);
+}
+
+/* Barra del player: stesso telaio della coda in dark */
+html[data-bs-theme="dark"] .sticky-player {
+  background: rgba(10, 14, 20, 0.96);
+}
+#sp-queue[aria-expanded="true"] {
+  color: var(--grz-accent, #f5b400);
+}
+
+/* Mobile: foglio a tutta larghezza sopra il player */
 @media (max-width: 575.98px) {
   .qp-panel {
-    right: 12px;
-    left: 12px;
+    right: 8px;
+    left: 8px;
+    bottom: calc(80px + env(safe-area-inset-bottom, 0px));
     width: auto;
+    max-height: 70vh;
+    border-radius: 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .qp-item,
+  .qp-remove,
+  .qp-history > summary::after {
+    transition: none;
   }
 }
 
@@ -4531,7 +4692,7 @@ a.badge-format:hover {
 
 /* Contenuto colonna Anno */
 .grz-archive-row .grz-col-year {
-  font-size: 1.05rem;
+  font-size: 0.91rem;
   font-weight: 700;
   color: var(--grz-amber-dim);
   font-variant-numeric: tabular-nums;
@@ -4545,6 +4706,261 @@ a.badge-format:hover {
 .grz-archive-row .grz-col-tracks i {
   margin-right: 4px;
   font-size: 0.72rem;
+}
+
+/* ============================================================
+   Archivio — selettore di vista e vista griglia
+   La griglia mostra gli stessi album della lista (stessa pagina,
+   filtri e ordinamento): classi proprie, nessuna dipendenza dalla
+   griglia della dashboard. La scheda non usa overflow:hidden né
+   transform, così il menu azioni non viene tagliato e non finisce
+   sotto le schede vicine.
+   ============================================================ */
+.grz-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--grz-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.grz-view-toggle__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 31px;
+  color: var(--grz-text-2);
+  text-decoration: none;
+  transition:
+    color 0.12s ease,
+    background 0.12s ease;
+}
+.grz-view-toggle__btn + .grz-view-toggle__btn {
+  border-left: 1px solid var(--grz-border);
+}
+.grz-view-toggle__btn:hover {
+  color: var(--grz-text-1);
+  background: rgba(var(--bs-warning-rgb), 0.08);
+}
+.grz-view-toggle__btn.is-active {
+  color: var(--grz-amber);
+  background: rgba(var(--bs-warning-rgb), 0.14);
+}
+.grz-view-toggle__btn:focus-visible {
+  outline: 2px solid var(--grz-amber);
+  outline-offset: -2px;
+}
+
+/* Barra di ordinamento (solo vista griglia) */
+.grz-archive-sortbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 0.9rem;
+}
+.grz-archive-sortbar__label {
+  margin-right: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--grz-text-2);
+}
+.grz-archive-sortbar__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 11px;
+  font-size: 0.8rem;
+  color: var(--grz-text-2);
+  text-decoration: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+.grz-archive-sortbar__link:hover {
+  color: var(--grz-amber-dim);
+}
+.grz-archive-sortbar__link.is-active {
+  color: var(--grz-text-1);
+  font-weight: 600;
+  border-color: var(--grz-border);
+  background: var(--grz-surface-2);
+}
+.grz-archive-sortbar__link i {
+  font-size: 0.72rem;
+  color: var(--grz-amber-dim);
+}
+
+/* Griglia
+   Stessa densità della griglia in Panoramica (schede da circa 150 px
+   in su), con il numero di colonne limitato ai divisori di 24 (2, 3,
+   4, 6, 8, 12): le opzioni "per pagina" della vista griglia sono 24,
+   48 e 96, quindi ogni pagina forma righe complete. La container
+   query misura lo spazio reale, che si riduce con la coda aperta.
+   Soglia per n colonne: n × 150 px + (n − 1) × 12 px di gap. */
+.grz-archive-grid-wrap {
+  container-type: inline-size;
+}
+.grz-archive-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@container (min-width: 474px) {
+  .grz-archive-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@container (min-width: 636px) {
+  .grz-archive-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@container (min-width: 960px) {
+  .grz-archive-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+@container (min-width: 1284px) {
+  .grz-archive-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+}
+@container (min-width: 1932px) {
+  .grz-archive-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+}
+
+.grz-archive-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--grz-surface-2);
+  border: 1px solid var(--grz-border);
+  border-radius: var(--grz-radius);
+  transition:
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
+}
+.grz-archive-tile:hover,
+.grz-archive-tile:focus-within {
+  box-shadow: var(--grz-shadow-hover);
+  border-color: rgba(var(--bs-warning-rgb), 0.35);
+}
+/* Scheda con il menu azioni aperto sopra le schede vicine.
+   Con z-index la scheda diventa un contesto di sovrapposizione e il
+   menu (z-index 1000) resta confinato al suo interno: il valore deve
+   quindi superare quello dei badge sovrapposti alle copertine
+   (z-index 2), altrimenti i badge della scheda sottostante coprono
+   il menu. */
+.grz-archive-tile:has(.dropdown-menu.show),
+.grz-archive-tile:focus-within {
+  z-index: 10;
+}
+
+/* Area cover: riferimento di posizione per badge formato, tracce e
+   libreria esterna (classi condivise con la scheda in Panoramica). */
+.grz-archive-tile__media {
+  position: relative;
+}
+.grz-archive-tile__cover {
+  display: block;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border-radius: calc(var(--grz-radius) - 1px) calc(var(--grz-radius) - 1px) 0 0;
+  background: var(--grz-surface-3);
+}
+.grz-archive-tile__cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  -webkit-user-drag: none;
+  user-select: none;
+  transition: opacity 0.15s ease;
+}
+.grz-archive-tile__cover:hover img {
+  opacity: 0.88;
+}
+
+.grz-archive-tile__info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+  padding: 8px 9px 8px;
+}
+.grz-archive-tile__title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  /* Due righe fisse: le schede della stessa riga restano allineate */
+  height: calc(0.82rem * 1.25 * 2);
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--grz-text-1);
+  text-decoration: none;
+}
+.grz-archive-tile__title:hover {
+  color: var(--grz-amber-dim);
+}
+.grz-archive-tile__artist {
+  font-size: 0.74rem;
+  color: var(--grz-text-2);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grz-archive-tile__artist:hover {
+  color: var(--grz-text-1);
+  text-decoration: underline;
+}
+
+/* Riga finale: anno, copie, menu azioni allineato a destra */
+.grz-archive-tile__foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  margin-top: 2px;
+}
+.grz-archive-tile__year {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--grz-amber-dim);
+  font-variant-numeric: tabular-nums;
+}
+.grz-archive-tile__actions {
+  margin-left: auto;
+}
+.grz-archive-tile__menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  color: var(--grz-text-2);
+  background: transparent;
+  transition:
+    color 0.12s ease,
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+.grz-archive-tile__menu-btn:hover,
+.grz-archive-tile__menu-btn[aria-expanded="true"] {
+  color: var(--grz-text-1);
+  border-color: var(--grz-border);
+  background: var(--grz-surface-3);
+}
+.grz-archive-tile__menu-btn:focus-visible {
+  outline: 2px solid var(--grz-amber);
+  outline-offset: 1px;
 }
 
 /* Stato audio del disco — icona nota musicale colorata invece di
@@ -4751,57 +5167,6 @@ a.badge-format:hover {
   min-width: 0;
   max-width: 100%;
 }
-#albumForm .track-row {
-  display: flex;
-  flex-wrap: nowrap;
-  width: 100%;
-  max-width: 100%;
-}
-#albumForm .track-row input[name="track_title[]"] {
-  flex: 1 1 0;
-  width: 1%;
-  min-width: 0;
-}
-#albumForm .track-row input[name="track_duration[]"] {
-  flex: 0 0 70px;
-  width: 70px;
-  min-width: 0;
-  max-width: 70px !important;
-}
-#albumForm .track-row .track-num,
-#albumForm .track-row .remove-track {
-  flex-shrink: 0;
-}
-@media (max-width: 380px) {
-  #albumForm .track-row input[name="track_duration[]"] {
-    flex-basis: 58px;
-    width: 58px;
-    max-width: 58px !important;
-  }
-}
-@media (max-width: 575.98px) {
-  .album-form-tracklist-header {
-    flex-wrap: wrap;
-    gap: 0.75rem;
-  }
-  .album-form-tracklist-header > .fw-semibold {
-    flex: 0 0 100%;
-  }
-  .album-form-tracklist-actions {
-    width: 100%;
-    min-width: 0;
-  }
-  #fetchTracklist {
-    flex: 1 1 0;
-    min-width: 0;
-    white-space: normal;
-    line-height: 1.2;
-  }
-  #addTrack {
-    flex: 0 0 42px;
-    width: 42px;
-  }
-}
 
 /* ============================================================
    GUARDIA OVERFLOW ORIZZONTALE — page-level
@@ -4844,7 +5209,7 @@ a.badge-format:hover {
 
 /* ============================================================
    DASHBOARD — STAT BAND
-   Sostituisce hero + griglia KPI: titolo e conteggi su una riga,
+   Sostituisce hero  griglia KPI: titolo e conteggi su una riga,
    barra proporzionale dei formati con segmenti e chip cliccabili
    (filtrano l'archivio per format_id). Colori identici agli
    accenti KPI storici per coerenza con i badge formato.
@@ -5134,7 +5499,7 @@ a.badge-format:hover {
 }
 
 /* Pulsante "Indietro" condiviso (album, artista, aggiungi disco, cerca):
-   rettangolo compatto con freccia + testo. Un'unica definizione, così le
+   rettangolo compatto con freccia  testo. Un'unica definizione, così le
    quattro pagine restano allineate e non possono divergere. */
 .grz-back {
   display: inline-flex;
@@ -5150,14 +5515,17 @@ a.badge-format:hover {
 
   color: #fff;
   background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.20);
+  border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 8px;
 
   cursor: pointer;
   text-decoration: none;
   text-shadow: none;
 
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
 }
 
 .grz-back i {
@@ -5530,7 +5898,7 @@ a.badge-format:hover {
 [data-bs-theme="light"] .grz-back:focus-visible {
   color: #202124;
   background: rgba(0, 0, 0, 0.08);
-  border-color: rgba(0, 0, 0, 0.30);
+  border-color: rgba(0, 0, 0, 0.3);
 }
 
 [data-bs-theme="light"] .album-hero-title {
@@ -5763,5 +6131,2465 @@ a.badge-format:hover {
   .album-hero-ghost {
     width: 44px;
     height: 44px;
+  }
+}
+
+/* ============================================================
+   FORM DISCO — Aggiungi / Modifica
+   Tre blocchi: identifica il disco (recupero dalle fonti),
+   dati del disco  cover, la tua copia. Barra azioni sticky.
+   Colori dai token (grizzly-tokens.css) con fallback.
+   ============================================================ */
+
+.grz-form-page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.grz-form-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.grz-form-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  border: 1px solid var(--grz-field-border, var(--bs-border-color));
+  color: var(--bs-body-color);
+  text-decoration: none;
+  padding: 0;
+  background: transparent;
+}
+.grz-form-back:hover {
+  background: var(--bs-tertiary-bg);
+  color: var(--bs-body-color);
+}
+.grz-form-title {
+  margin: 0;
+  font-size: clamp(1.6rem, 3vw, 2rem);
+  font-weight: 800;
+}
+
+.grz-album-form {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ── Sezioni ── */
+.grz-fsec {
+  min-width: 0;
+  padding: 28px;
+  border-radius: 14px;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+}
+.grz-fsec__head {
+  margin-bottom: 22px;
+}
+.grz-fsec__head h2 {
+  margin: 0;
+  font-size: 1.375rem;
+  font-weight: 700;
+}
+.grz-fsec__head p {
+  margin: 4px 0 0;
+  font-size: 0.875rem;
+  color: var(--bs-secondary-color);
+}
+.grz-fsec__head--row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* ── Etichette e campi ── */
+.grz-album-form .form-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.grz-album-form .form-control:not(textarea) {
+  min-height: 44px;
+}
+.grz-album-form .form-control {
+  font-size: 1rem;
+  border-radius: 8px;
+}
+.grz-mono {
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+}
+.grz-src {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--grz-accent-ink, #855800);
+  white-space: nowrap;
+}
+.grz-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.grz-fieldset > legend {
+  float: none;
+  width: 100%;
+}
+
+/* ── 1. Identifica il disco ── */
+.grz-lookup__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 16px;
+  /* start, non end: un messaggio d'errore sotto un campo allunga
+     solo la sua colonna e non sposta il pulsante */
+  align-items: start;
+}
+.grz-lookup__action {
+  display: flex;
+  flex-direction: column;
+}
+.grz-lookup__spacer {
+  visibility: hidden;
+}
+/* Specificità pari a ".grz-album-form .form-control:not(textarea)"
+   più una classe: campi e pulsante hanno la stessa altezza esatta. */
+.grz-album-form .grz-lookup .form-control:not(textarea) {
+  height: 48px;
+  min-height: 48px;
+  font-size: 1.0625rem;
+  border-radius: 10px;
+}
+.grz-lookup-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 48px;
+  min-height: 48px;
+  padding: 0 22px;
+  border-radius: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.grz-lookup-result {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 10px;
+  border: 1px solid var(--bs-border-color);
+  background: var(--bs-tertiary-bg);
+}
+.grz-lookup-result[hidden] {
+  display: none;
+}
+.grz-lookup-result--found {
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.16));
+  border-color: rgba(245, 180, 0, 0.45);
+}
+.grz-lookup-result--error {
+  background: var(--bs-danger-bg-subtle);
+  border-color: var(--bs-danger-border-subtle);
+}
+.grz-lookup-result__thumb {
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--bs-secondary-bg);
+}
+.grz-lookup-result__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.grz-lookup-result__status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--grz-accent-ink, #855800);
+}
+.grz-lookup-result--error .grz-lookup-result__status {
+  color: var(--bs-danger-text-emphasis);
+}
+.grz-lookup-result--empty .grz-lookup-result__status {
+  color: var(--bs-body-color);
+}
+.grz-lookup-result__title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.grz-lookup-result__title:empty {
+  display: none;
+}
+.grz-lookup-result__meta {
+  font-size: 0.875rem;
+  color: var(--bs-secondary-color);
+}
+.grz-lookup-result__side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+  text-align: right;
+}
+.grz-lookup-result--error .grz-lookup-result__side,
+.grz-lookup-result--empty .grz-lookup-result__side {
+  display: none;
+}
+.grz-lookup-retry {
+  padding: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--bs-link-color);
+}
+
+/* ── 2. Dati del disco + cover ── */
+.grz-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 24px;
+  /* stretch: "Dati del disco" e "Cover" hanno la stessa altezza */
+  align-items: stretch;
+}
+.grz-meta-grid {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.grz-tracklist__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.grz-tracklist__label {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.grz-tracklist__summary {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--bs-secondary-color);
+}
+.grz-tracks-replace {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.16));
+  font-size: 0.875rem;
+}
+.grz-tracks-replace[hidden] {
+  display: none;
+}
+.grz-tracks {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.grz-trow {
+  display: grid;
+  grid-template-columns: 28px 28px minmax(0, 1fr) 76px 36px;
+  gap: 6px;
+  align-items: center;
+  min-height: 48px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--bs-border-color);
+  background: var(--bs-body-bg);
+}
+.grz-trow.is-dragging {
+  opacity: 0.45;
+}
+.grz-trow .track-num {
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+  text-align: right;
+}
+.grz-album-form .grz-trow .form-control {
+  min-height: 36px;
+  padding: 4px 8px;
+  border-color: transparent;
+  background-color: transparent;
+  box-shadow: none;
+}
+.grz-album-form .grz-trow .form-control:hover {
+  border-color: var(--bs-border-color);
+}
+.grz-album-form .grz-trow .form-control:focus {
+  border-color: var(--grz-field-border, var(--bs-border-color));
+  background-color: var(--bs-body-bg);
+}
+.grz-album-form .grz-trow .form-control.is-invalid {
+  border-color: var(--bs-form-invalid-border-color);
+}
+.grz-trow .grz-dur {
+  font-size: 0.875rem;
+  text-align: right;
+  color: var(--bs-secondary-color);
+}
+.grz-trow__handle,
+.grz-trow__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--bs-secondary-color);
+}
+.grz-trow__handle {
+  cursor: grab;
+}
+.grz-trow__remove {
+  width: 32px;
+  opacity: 0.55;
+}
+.grz-trow:hover .grz-trow__remove,
+.grz-trow:focus-within .grz-trow__remove {
+  opacity: 1;
+}
+.grz-trow__remove:hover {
+  color: var(--bs-danger);
+  background: var(--bs-danger-bg-subtle);
+}
+.grz-trow__handle:hover {
+  background: var(--bs-tertiary-bg);
+}
+@media (pointer: coarse) {
+  .grz-trow__remove {
+    opacity: 1;
+  }
+}
+.grz-tracks__add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  background: var(--bs-tertiary-bg);
+  color: var(--bs-body-color);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.grz-tracks__add:hover {
+  background: var(--bs-secondary-bg);
+}
+
+.grz-cover .grz-fsec__head {
+  margin-bottom: 16px;
+}
+.grz-cover__preview img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 10px;
+  background: var(--bs-tertiary-bg);
+}
+.grz-cover__msg {
+  min-height: 1.25rem;
+  margin: 8px 0;
+  color: var(--bs-secondary-color);
+}
+.grz-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 88px;
+  padding: 12px;
+  border: 1px dashed var(--grz-field-border, var(--bs-border-color));
+  border-radius: 10px;
+  text-align: center;
+  cursor: pointer;
+}
+.grz-drop:hover,
+.grz-drop.is-over {
+  border-color: var(--grz-accent, #f5b400);
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.16));
+}
+.grz-drop:focus-within {
+  outline: 2px solid var(--grz-accent, #f5b400);
+  outline-offset: 2px;
+}
+.grz-drop__title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.grz-drop__hint {
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+}
+
+/* ── 3. La tua copia ── */
+.grz-copy-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 28px;
+  margin-bottom: 22px;
+}
+.grz-copy-grid__right {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 20px;
+  align-items: start;
+}
+
+.grz-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.grz-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  margin: 0;
+  padding: 0 16px;
+  border-radius: 22px;
+  border: 1px solid var(--grz-field-border, var(--bs-border-color));
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+.grz-chip:hover {
+  background: var(--bs-tertiary-bg);
+}
+.btn-check:checked + .grz-chip {
+  padding: 0 15px;
+  border: 2px solid var(--grz-accent, #f5b400);
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.16));
+  font-weight: 600;
+}
+.btn-check:focus-visible + .grz-chip,
+.btn-check:focus-visible + .grz-grade__opt {
+  outline: 2px solid var(--grz-accent, #f5b400);
+  outline-offset: 2px;
+}
+.grz-chips.is-invalid .grz-chip {
+  border-color: var(--bs-form-invalid-border-color);
+}
+.grz-chip__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bs-secondary-color);
+}
+.grz-chip__dot[data-fmt="vinile"] {
+  background: var(--grz-fmt-vinile, #c2410c);
+}
+.grz-chip__dot[data-fmt="cd"] {
+  background: var(--grz-fmt-cd, #2563eb);
+}
+.grz-chip__dot[data-fmt="cassetta"] {
+  background: var(--grz-fmt-cassetta, #0f766e);
+}
+.grz-chip__dot[data-fmt="digital"] {
+  background: var(--grz-fmt-digital, #7c3aed);
+}
+
+.grz-grade {
+  display: flex;
+  border: 1px solid var(--grz-field-border, var(--bs-border-color));
+  border-radius: 10px;
+  overflow: hidden;
+}
+.grz-grade__opt {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 44px;
+  margin: 0;
+  border-right: 1px solid var(--bs-border-color);
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+.grz-grade .grz-grade__opt:last-of-type {
+  border-right: 0;
+}
+.grz-grade__opt:hover {
+  background: var(--bs-tertiary-bg);
+}
+.btn-check:checked + .grz-grade__opt {
+  background: var(--bs-body-color);
+  color: var(--bs-body-bg);
+}
+.grz-grade__text {
+  margin-top: 8px;
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+}
+
+.grz-stepper {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  height: 44px;
+  border: 1px solid var(--grz-field-border, var(--bs-border-color));
+  border-radius: 10px;
+  overflow: hidden;
+}
+.grz-stepper button {
+  border: 0;
+  background: var(--bs-tertiary-bg);
+  color: var(--bs-body-color);
+  font-size: 1.125rem;
+}
+.grz-stepper button:hover {
+  background: var(--bs-secondary-bg);
+}
+.grz-stepper input {
+  min-width: 0;
+  border: 0;
+  background: var(--bs-body-bg);
+  color: var(--bs-body-color);
+  text-align: center;
+  font-size: 1rem;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.grz-stepper input::-webkit-outer-spin-button,
+.grz-stepper input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ── Barra azioni ── */
+.grz-form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 0;
+  border-top: 1px solid var(--bs-border-color);
+  background: var(--grz-canvas, var(--bs-body-bg));
+}
+body:has(#sticky-player[style*="flex"]) .grz-form-actions {
+  bottom: 72px;
+}
+.grz-form-actions__status {
+  margin-right: auto;
+  font-size: 0.875rem;
+  color: var(--bs-secondary-color);
+}
+.grz-form-actions__status.is-ready {
+  color: var(--bs-body-color);
+}
+.grz-form-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 20px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.grz-form-actions__save {
+  padding: 0 28px !important;
+  font-weight: 700 !important;
+}
+
+/* ── Responsive ── */
+@media (max-width: 991.98px) {
+  .grz-form-grid,
+  .grz-copy-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .grz-cover__preview {
+    max-width: 360px;
+  }
+}
+@media (max-width: 767.98px) {
+  .grz-fsec {
+    padding: 20px;
+  }
+  .grz-lookup__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .grz-lookup__spacer {
+    display: none;
+  }
+  .grz-lookup-result {
+    flex-wrap: wrap;
+  }
+  .grz-lookup-result__side {
+    align-items: flex-start;
+    text-align: left;
+    flex-basis: 100%;
+  }
+  .grz-meta-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .grz-meta-grid > :first-child {
+    grid-column: 1 / -1;
+    max-width: 160px;
+  }
+}
+@media (max-width: 575.98px) {
+  .grz-copy-grid__right {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .grz-meta-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .grz-trow {
+    grid-template-columns: 24px 22px minmax(0, 1fr) 64px 32px;
+    gap: 4px;
+    padding: 0 4px;
+  }
+  .grz-form-actions__status {
+    display: none;
+  }
+  .grz-form-actions .btn {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+  body:has(#sticky-player[style*="flex"]) .grz-form-actions {
+    bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+}
+
+/* ============================================================
+   SCHEDA DISCO — Note sull'album e Potrebbero piacerti
+   Stesso linguaggio delle sezioni del form: superficie piena
+   (bianca in light, blu inchiostro in dark) con bordo, così i
+   due riquadri si staccano dal fondo pagina invece di fondersi.
+   ============================================================ */
+html[data-bs-theme] .album-desc-block,
+html[data-bs-theme] .album-recs-block {
+  border-radius: 14px;
+  border: 1px solid var(--bs-border-color);
+  background: var(--bs-body-bg);
+}
+html[data-bs-theme="light"] .album-desc-block,
+html[data-bs-theme="light"] .album-recs-block {
+  box-shadow: 0 1px 2px rgba(28, 27, 25, 0.06);
+}
+html[data-bs-theme] .album-detail-sidebar .album-desc-block-sidebar,
+html[data-bs-theme] .album-detail-sidebar .album-recs-block {
+  padding: 18px 20px;
+}
+
+/* Intestazioni: etichetta leggibile (niente opacità al 50%) */
+html[data-bs-theme] .album-desc-header,
+html[data-bs-theme] .album-recs-header {
+  border-bottom: 1px solid var(--bs-border-color);
+}
+html[data-bs-theme] .album-desc-label,
+html[data-bs-theme] .album-recs-header {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  color: var(--bs-secondary-color);
+  opacity: 1;
+}
+
+/* Testo e piede della nota */
+html[data-bs-theme] .album-desc-text {
+  color: var(--bs-body-color);
+  opacity: 1;
+}
+html[data-bs-theme] .album-desc-wiki-link {
+  color: var(--bs-secondary-color);
+  opacity: 1;
+}
+html[data-bs-theme] .album-desc-wiki-link:hover {
+  color: var(--bs-body-color);
+}
+html[data-bs-theme] .album-desc-lang-badge {
+  padding: 2px 8px;
+  font-size: 0.6875rem;
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.16));
+  color: var(--grz-accent-ink, #855800);
+}
+
+/* ============================================================
+   ACCENTI IN LIGHT MODE
+   In app.css l'ambra chiara (#ffc107, var(--bs-warning),
+   var(--grz-amber), #d97706) è usata anche come colore di testo
+   e icone. Sul fondo chiaro si passa all'ambra scura dei token.
+   Esclusi hero artista, pannello coda e player: restano scuri
+   in entrambi i temi e mantengono l'ambra chiara.
+   ============================================================ */
+html[data-bs-theme="light"]
+  .album-hero-facts
+  i:not(.grz-track-audio):not(.grz-track-noaudio),
+html[data-bs-theme="light"] .album-desc-icon,
+html[data-bs-theme="light"] .album-desc-toggle,
+html[data-bs-theme="light"] .album-recs-header i,
+html[data-bs-theme="light"] .btn-enqueue-track.enqueue-dup,
+html[data-bs-theme="light"] .sr-artist-row:hover,
+html[data-bs-theme="light"] .sr-single-cta,
+html[data-bs-theme="light"] .sr-title-link:hover,
+html[data-bs-theme="light"] .grz-dash-hero__eyebrow,
+html[data-bs-theme="light"] .grz-section-header__label i,
+html[data-bs-theme="light"] .grz-section-header__link:hover,
+html[data-bs-theme="light"] .grz-btn-show-more:hover,
+html[data-bs-theme="light"] .grz-top-artist-row__rank,
+html[data-bs-theme="light"] .grz-top-artist-row__name:hover,
+html[data-bs-theme="light"] .grz-top-artist-row__count,
+html[data-bs-theme="light"] .bulk-dropzone.is-dragover,
+html[data-bs-theme="light"] .filters-form.filters-open .btn-adv-toggle,
+html[data-bs-theme="light"] .icon-partial,
+html[data-bs-theme="light"] .dash-pl-play,
+html[data-bs-theme="light"] .pl-row-icon.icon-partial,
+html[data-bs-theme="light"] .pl-btn-play,
+html[data-bs-theme="light"] .dash-pl-play.is-player-playing,
+html[data-bs-theme="light"] .dash-pl-play.is-player-paused,
+html[data-bs-theme="light"] .grz-track-noaudio {
+  color: var(--grz-accent-ink, #855800);
+}
+html[data-bs-theme="light"] .pl-btn-play--active {
+  color: var(--grz-accent-ink, #855800) !important;
+}
+html[data-bs-theme="light"] .grz-dash-hero__dot {
+  background: var(--grz-accent-ink, #855800);
+}
+
+/* ============================================================
+   IMPOSTAZIONI
+   Indice laterale fisso  quattro sezioni. Ogni riga ha due
+   colonne: a sinistra cosa è e a cosa serve, a destra i controlli.
+   Un solo pulsante primario per sezione; il rosso compare solo
+   nel blocco di import.
+   ============================================================ */
+.grz-settings {
+  max-width: 1120px;
+  margin: 0 auto;
+}
+.grz-settings__head {
+  margin-bottom: 24px;
+}
+.grz-settings__title {
+  margin: 0;
+  font-size: clamp(1.6rem, 3vw, 2rem);
+  font-weight: 800;
+}
+.grz-settings__layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+
+/* Indice */
+.grz-settings__nav {
+  position: sticky;
+  top: 88px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.grz-settings__navlink {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: var(--bs-secondary-color);
+  font-size: 0.9375rem;
+  text-decoration: none;
+  box-shadow: inset 2px 0 0 transparent;
+}
+.grz-settings__navlink:hover {
+  color: var(--bs-body-color);
+  background: var(--bs-body-bg);
+}
+.grz-settings__navlink.is-active {
+  color: var(--bs-body-color);
+  font-weight: 600;
+  background: var(--bs-body-bg);
+  box-shadow: inset 2px 0 0 var(--grz-accent, #f5b400);
+}
+
+/* Sezioni */
+.grz-settings__content {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+.grz-set {
+  border-radius: 14px;
+  border: 1px solid var(--bs-border-color);
+  background: var(--bs-body-bg);
+  scroll-margin-top: 88px;
+}
+html[data-bs-theme="light"] .grz-set {
+  box-shadow: 0 1px 2px rgba(28, 27, 25, 0.06);
+}
+.grz-set__head {
+  padding: 24px 28px 20px;
+  border-bottom: 1px solid var(--bs-border-color);
+}
+.grz-set__head--row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.grz-set__head h2 {
+  margin: 0;
+  font-size: 1.375rem;
+  font-weight: 700;
+}
+.grz-set__head p {
+  margin: 4px 0 0;
+  font-size: 0.875rem;
+  color: var(--bs-secondary-color);
+}
+
+.grz-set__row {
+  display: grid;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+  gap: 24px;
+  padding: 22px 28px;
+  border-bottom: 1px solid var(--bs-border-color);
+}
+.grz-set__row:last-child {
+  border-bottom: 0;
+}
+.grz-set__label h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-family: var(--grz-font-ui, inherit);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.grz-set__label p {
+  margin: 6px 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--bs-secondary-color);
+}
+.grz-set__control {
+  min-width: 0;
+}
+.grz-set__control .form-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+.grz-set .form-control,
+.grz-set .form-select,
+.grz-set .input-group-text {
+  min-height: 42px;
+}
+.grz-set .form-control-sm,
+.grz-set .form-select-sm,
+.grz-set .input-group-sm .input-group-text {
+  min-height: 32px;
+}
+
+/* Stato cartella audio */
+.grz-set__path {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bs-tertiary-bg);
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+.grz-set__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 0.875rem;
+}
+.grz-set__dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+.grz-set__dot--ok {
+  background: var(--bs-success);
+}
+.grz-set__dot--err {
+  background: var(--bs-danger);
+}
+
+/* Pannello richiudibile (cambio percorso) */
+.grz-set__panel {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 10px;
+}
+.grz-set__panel > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.grz-set__panel > summary::-webkit-details-marker {
+  display: none;
+}
+.grz-set__panel > summary::after {
+  content: "\F282"; /* bi-chevron-down */
+  font-family: "bootstrap-icons";
+  font-size: 0.8rem;
+  color: var(--bs-secondary-color);
+  transition: transform 0.15s ease;
+}
+.grz-set__panel[open] > summary::after {
+  transform: rotate(180deg);
+}
+.grz-set__panel[open] > summary {
+  border-bottom: 1px solid var(--bs-border-color);
+}
+.grz-set__panel-body {
+  padding: 16px 14px;
+}
+
+/* Dettagli testuali */
+.grz-set__more {
+  margin-top: 14px;
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+}
+.grz-set__more > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--bs-body-color);
+}
+.grz-set__more > summary::marker {
+  color: var(--bs-secondary-color);
+}
+.grz-set__more p {
+  margin: 8px 0 0;
+  line-height: 1.55;
+}
+
+.grz-set__pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+.grz-set__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 16px;
+}
+.grz-set__actions--flush {
+  margin-top: 0;
+}
+.grz-set__actions .btn,
+.grz-set__control > .btn {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+}
+.grz-set__switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  margin: 0;
+}
+.grz-set__switch .form-check-input {
+  width: 2.5em;
+  height: 1.35em;
+  margin-top: 0;
+}
+.grz-set__switch .form-check-label {
+  font-weight: 600;
+}
+
+/* Barra migrazione */
+.grz-set__progress {
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bs-secondary-bg);
+}
+.grz-set__progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--grz-accent, #f5b400);
+  transition: width 0.3s ease;
+}
+
+/* Import: unica area in rosso della pagina */
+.grz-set__danger {
+  padding: 16px;
+  border-radius: 10px;
+  border: 1px solid var(--bs-danger-border-subtle);
+  background: var(--bs-danger-bg-subtle);
+}
+.grz-set__danger-text {
+  margin: 0 0 12px;
+  font-size: 0.875rem;
+  color: var(--bs-danger-text-emphasis);
+}
+.grz-set__danger-note {
+  margin: 12px 0 0;
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+}
+
+@media (max-width: 991.98px) {
+  .grz-settings__layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .grz-settings__nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 6px;
+    padding-bottom: 4px;
+  }
+  .grz-settings__navlink {
+    flex-shrink: 0;
+    border: 1px solid var(--bs-border-color);
+    box-shadow: none;
+    white-space: nowrap;
+  }
+  .grz-settings__navlink.is-active {
+    box-shadow: none;
+    border-color: var(--grz-accent, #f5b400);
+  }
+  .grz-set__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+}
+@media (max-width: 575.98px) {
+  .grz-set__head,
+  .grz-set__row {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+  .grz-set__pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .grz-set__panel > summary::after,
+  .grz-set__progress-bar {
+    transition: none;
+  }
+}
+
+/* ============================================================
+   PLAYLIST — elenco (griglia di card) e dettaglio (hero  tracce)
+   Identità: il mosaico delle copertine è la "busta" della
+   playlist, come la cover per un disco. L'ambra resta l'unico
+   accento: play, linea di avanzamento, riga in riproduzione.
+   ============================================================ */
+.grz-pl-page {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* ── Mosaico copertine ── */
+.grz-mosaic {
+  position: relative;
+  display: grid;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--bs-tertiary-bg);
+}
+.grz-mosaic::after {
+  /* filo interno: separa copertine chiare dal fondo chiaro */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+  pointer-events: none;
+}
+[data-bs-theme="dark"] .grz-mosaic::after {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+.grz-mosaic img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.grz-mosaic--grid {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+/* Playlist vuota: un vinile senza busta, stesso motivo del
+   segnaposto delle copertine nella scheda disco. */
+.grz-mosaic--empty {
+  place-items: center;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(245, 180, 0, 0.1), transparent 70%),
+    var(--bs-tertiary-bg);
+}
+.grz-vinyl {
+  position: relative;
+  width: 62%;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  background:
+    /* Anello stampato sull'etichetta */
+    radial-gradient(
+      circle closest-side,
+      transparent 0 11.5%,
+      rgba(0, 0, 0, 0.18) 12% 12.6%,
+      transparent 13%
+    ),
+    /* Etichetta (1/3 del diametro, come un LP) e zona liscia
+       senza solchi. closest-side: le percentuali sono sul raggio
+       del disco, non sulla diagonale del riquadro. */
+    radial-gradient(
+        circle closest-side,
+        var(--grz-accent, #f5b400) 0 33%,
+        rgba(0, 0, 0, 0.35) 33.3% 34%,
+        #101010 34% 40%,
+        transparent 40.5%
+      ),
+    repeating-radial-gradient(
+      circle,
+      #151515 0 2px,
+      #222 2px 3px,
+      #151515 3px 5px
+    );
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.28),
+    inset 0 0 0 2px #0b0b0b;
+}
+.grz-vinyl::before {
+  /* riflesso */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 20deg,
+    transparent 0 12%,
+    rgba(255, 255, 255, 0.09) 16%,
+    transparent 22% 62%,
+    rgba(255, 255, 255, 0.06) 66%,
+    transparent 72%
+  );
+}
+.grz-vinyl::after {
+  /* foro centrale */
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3.5%;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  background: var(--bs-tertiary-bg);
+  transform: translate(-50%, -50%);
+}
+.grz-plcard.is-empty .grz-plcard__meta {
+  color: var(--bs-secondary-color);
+}
+.grz-plcard__hint {
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--bs-secondary-color);
+}
+
+/* ── Elenco: testata ── */
+.grz-pl-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+.grz-pl-head__title {
+  margin: 0;
+  font-size: clamp(1.6rem, 3vw, 2rem);
+  font-weight: 800;
+}
+.grz-pl-head__sub {
+  margin: 4px 0 0;
+  font-size: 0.9375rem;
+  color: var(--bs-secondary-color);
+}
+.grz-pl-head__new {
+  min-height: 44px;
+  padding: 0 20px;
+  border-radius: 10px;
+  font-weight: 700;
+}
+
+/* ── Elenco: griglia di card ──
+   Le card portano anche .pl-list-row (aggancio dello script):
+   qui si annullano le regole di layout a tabella di quella classe. */
+.grz-plgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 24px;
+}
+.grz-plgrid .grz-plcard {
+  display: flex;
+  flex-direction: column;
+  /* .pl-list-row imposta align-items: center (layout a tabella):
+     in una colonna flex restringerebbe e centrerebbe copertina e testo */
+  align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
+  border: 1px solid var(--bs-border-color);
+  border-radius: 14px;
+  background: var(--bs-body-bg);
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
+}
+html[data-bs-theme="light"] .grz-plgrid .grz-plcard {
+  box-shadow: 0 1px 2px rgba(28, 27, 25, 0.06);
+}
+.grz-plgrid .grz-plcard:hover {
+  transform: translateY(-2px);
+  border-color: var(--grz-field-border, var(--bs-border-color));
+  background: var(--bs-body-bg);
+}
+html[data-bs-theme="light"] .grz-plgrid .grz-plcard:hover {
+  box-shadow: 0 8px 24px rgba(28, 27, 25, 0.1);
+}
+.grz-plgrid .grz-plcard.is-complete {
+  padding-left: 12px;
+}
+.grz-plgrid .grz-plcard.is-player-playing,
+.grz-plgrid .grz-plcard.is-player-paused {
+  border-color: var(--grz-accent, #f5b400);
+  background: var(--bs-body-bg);
+}
+
+.grz-plcard__art {
+  position: relative;
+}
+.grz-plcard__cover {
+  display: block;
+}
+html[data-bs-theme] .grz-plcard__play {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--grz-accent, #f5b400);
+  color: var(--grz-on-accent, #1a1300);
+  font-size: 1.4rem;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+.grz-plcard:hover .grz-plcard__play,
+.grz-plcard:focus-within .grz-plcard__play,
+.grz-plcard__play.pl-btn-play--active {
+  opacity: 1;
+  transform: none;
+}
+html[data-bs-theme] .grz-plcard__play:hover,
+html[data-bs-theme] .grz-plcard__play.pl-btn-play--active {
+  background: var(--grz-accent-hover, #e0a500) !important;
+  color: var(--grz-on-accent, #1a1300) !important;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+}
+@media (hover: none) {
+  .grz-plcard__play {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.grz-plcard__body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  gap: 6px;
+  padding: 14px 4px 2px;
+  min-width: 0;
+}
+/* Nome: al massimo due righe con ellissi. Il titolo completo è nel
+   tooltip e nella pagina della playlist. Specificità alzata per
+   annullare white-space: nowrap di .pl-row-name. */
+.grz-plgrid .grz-plcard .grz-plcard__name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  white-space: normal;
+  font-family: var(--grz-font-title, inherit);
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--bs-body-color);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.grz-plcard__name:hover {
+  color: var(--bs-body-color);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.grz-plcard__meta {
+  font-size: 0.875rem;
+  color: var(--bs-secondary-color);
+}
+.grz-plcard__audio {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 4px;
+}
+.grz-plcard__bar {
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--bs-secondary-bg);
+}
+.grz-plcard__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--grz-accent, #f5b400);
+}
+.grz-plcard__fill.is-full {
+  background: var(--bs-success);
+}
+.grz-plcard__audio-label {
+  font-size: 0.75rem;
+  color: var(--bs-secondary-color);
+}
+.grz-plcard__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 8px;
+}
+.grz-plcard__date {
+  font-size: 0.75rem;
+  color: var(--bs-secondary-color);
+}
+.grz-plcard__delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--bs-secondary-color);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.grz-plcard:hover .grz-plcard__delete,
+.grz-plcard__delete:focus-visible {
+  opacity: 1;
+}
+.grz-plcard__delete:hover {
+  color: var(--bs-danger);
+  background: var(--bs-danger-bg-subtle);
+}
+@media (hover: none) {
+  .grz-plcard__delete {
+    opacity: 1;
+  }
+}
+
+/* Stato vuoto */
+.grz-pl-empty {
+  max-width: 420px;
+  margin: 48px auto;
+  text-align: center;
+}
+.grz-pl-empty__art {
+  width: 140px;
+  margin: 0 auto 20px;
+}
+.grz-pl-empty h2 {
+  font-size: 1.375rem;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.grz-pl-empty p {
+  color: var(--bs-secondary-color);
+  margin-bottom: 20px;
+}
+
+/* ── Dettaglio: pulsante indietro ── */
+.grz-pl-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--bs-secondary-color);
+  font-size: 0.9375rem;
+}
+.grz-pl-back:hover {
+  color: var(--bs-body-color);
+}
+
+/* ── Dettaglio: hero ── */
+.grz-plhero {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 32px;
+  align-items: end;
+  margin-bottom: 32px;
+}
+.grz-plhero__art {
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+.grz-plhero__body {
+  min-width: 0;
+}
+.grz-plhero__eyebrow {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color);
+}
+.grz-plhero__titlerow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+.grz-plhero__title {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 3.25rem);
+  font-weight: 800;
+  line-height: 1.02;
+  overflow-wrap: anywhere;
+}
+.grz-plhero__rename {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--bs-border-color);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--bs-secondary-color);
+}
+.grz-plhero__rename:hover {
+  color: var(--bs-body-color);
+  border-color: var(--grz-field-border, var(--bs-border-color));
+}
+.grz-plhero__stats {
+  margin-top: 10px;
+  font-size: 0.9375rem;
+  color: var(--bs-secondary-color);
+}
+.grz-plhero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 20px;
+}
+.grz-plhero__actions .btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 22px;
+  font-weight: 600;
+}
+
+/* Riproduci: lo script alterna btn-success (fermo) e btn-warning
+   (in riproduzione). Entrambi gli stati usano l'accento. */
+html[data-bs-theme] #btnPlayAll.btn-success {
+  --bs-btn-color: var(--grz-on-accent, #1a1300);
+  --bs-btn-bg: var(--grz-accent, #f5b400);
+  --bs-btn-border-color: var(--grz-accent, #f5b400);
+  --bs-btn-hover-color: var(--grz-on-accent, #1a1300);
+  --bs-btn-hover-bg: var(--grz-accent-hover, #e0a500);
+  --bs-btn-hover-border-color: var(--grz-accent-hover, #e0a500);
+  --bs-btn-active-color: var(--grz-on-accent, #1a1300);
+  --bs-btn-active-bg: var(--grz-accent-active, #cc9600);
+  --bs-btn-active-border-color: var(--grz-accent-active, #cc9600);
+  padding: 0 24px;
+  font-weight: 700;
+}
+html[data-bs-theme] #btnPlayAll.btn-warning {
+  --bs-btn-color: var(--bs-body-color);
+  --bs-btn-bg: var(--grz-accent-soft, rgba(245, 180, 0, 0.16));
+  --bs-btn-border-color: var(--grz-accent, #f5b400);
+  --bs-btn-hover-color: var(--grz-on-accent, #1a1300);
+  --bs-btn-hover-bg: var(--grz-accent, #f5b400);
+  --bs-btn-hover-border-color: var(--grz-accent, #f5b400);
+  padding: 0 24px;
+  font-weight: 700;
+}
+/* YouTube: azione secondaria neutra, il rosso resta sul logo */
+html[data-bs-theme] #btnYoutube.btn-outline-danger {
+  --bs-btn-color: var(--bs-body-color);
+  --bs-btn-border-color: var(--grz-field-border, var(--bs-border-color));
+  --bs-btn-hover-color: var(--bs-body-color);
+  --bs-btn-hover-bg: var(--bs-tertiary-bg);
+  --bs-btn-hover-border-color: var(--grz-field-border, var(--bs-border-color));
+  --bs-btn-active-color: var(--bs-body-color);
+  --bs-btn-active-bg: var(--bs-secondary-bg);
+  --bs-btn-active-border-color: var(--grz-field-border, var(--bs-border-color));
+}
+.grz-plhero__yt-logo {
+  color: #ff0000;
+}
+#ytCountBadge {
+  background: var(--bs-secondary-bg);
+  color: var(--bs-body-color);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+/* ── Dettaglio: lista tracce ── */
+.grz-pltracks {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 14px;
+  background: var(--bs-body-bg);
+  overflow: hidden;
+}
+html[data-bs-theme="light"] .grz-pltracks {
+  box-shadow: 0 1px 2px rgba(28, 27, 25, 0.06);
+}
+.grz-pltracks__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--bs-border-color);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color);
+}
+.grz-pltracks__hint {
+  font-size: 0.8125rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.grz-pltracks__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.grz-pltrack {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 64px;
+  padding: 8px 16px 8px 12px;
+  border-bottom: 1px solid var(--bs-border-color);
+  transition:
+    background 0.12s ease,
+    opacity 0.2s ease;
+}
+.grz-pltrack:last-child {
+  border-bottom: 0;
+}
+.grz-pltrack:hover {
+  background: var(--bs-tertiary-bg);
+}
+.grz-pltrack .drag-handle {
+  display: inline-flex;
+  color: var(--bs-secondary-color);
+  font-size: 1.05rem;
+  cursor: grab;
+  opacity: 0.5;
+}
+.grz-pltrack:hover .drag-handle {
+  opacity: 1;
+}
+.grz-pltrack .pl-track-num {
+  min-width: 1.6rem;
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+}
+.grz-pltrack__cover img {
+  display: block;
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+.grz-pltrack__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.grz-pltrack__title {
+  font-size: 0.9375rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Titolo cliccabile: avvia (o mette in pausa) la traccia come il
+   pulsante play della riga */
+.grz-pltrack__titlebtn {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.grz-pltrack__titlebtn:hover {
+  color: var(--grz-accent-ink, #855800);
+}
+.grz-pltrack__titlebtn:focus-visible {
+  outline: 2px solid var(--grz-accent, #f5b400);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.grz-pltrack__sub {
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grz-pltrack__sub a {
+  color: inherit;
+  text-decoration: none;
+}
+.grz-pltrack__sub a:hover {
+  color: var(--bs-body-color);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.grz-pltrack__audio {
+  flex-shrink: 0;
+  font-size: 0.875rem;
+  color: var(--grz-accent-ink, #855800);
+}
+.grz-pltrack__noaudio {
+  font-size: 0.75rem;
+  color: var(--bs-secondary-color);
+}
+.grz-pltrack__dur {
+  flex-shrink: 0;
+  min-width: 3rem;
+  text-align: right;
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+}
+.grz-pltrack__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--bs-secondary-color);
+}
+.grz-pltrack__btn.btn-play-track {
+  border-color: var(--bs-border-color);
+  color: var(--bs-body-color);
+}
+.grz-pltrack__btn.btn-play-track:hover {
+  border-color: var(--grz-accent, #f5b400);
+  background: var(--grz-accent, #f5b400);
+  color: var(--grz-on-accent, #1a1300);
+}
+.grz-pltrack__btn:disabled {
+  opacity: 0.35;
+}
+.grz-pltrack__btn--remove {
+  opacity: 0.55;
+}
+.grz-pltrack:hover .grz-pltrack__btn--remove,
+.grz-pltrack__btn--remove:focus-visible {
+  opacity: 1;
+}
+.grz-pltrack__btn--remove:hover {
+  color: var(--bs-danger);
+  background: var(--bs-danger-bg-subtle);
+}
+
+/* Traccia senza audio: testo attenuato, azioni leggibili */
+.grz-pltrack.is-noaudio .grz-pltrack__text,
+.grz-pltrack.is-noaudio .grz-pltrack__cover {
+  opacity: 0.55;
+}
+
+/* Traccia in riproduzione (classe .track-playing da app.js) */
+.grz-pltrack.track-playing {
+  /* !important: la regola globale .track-playing lo usa già */
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.16)) !important;
+  box-shadow: inset 3px 0 0 var(--grz-accent, #f5b400);
+}
+.grz-pltrack.track-playing .grz-pltrack__title {
+  color: var(--grz-accent-ink, #855800);
+}
+.grz-pltrack.track-playing .btn-play-track {
+  border-color: var(--grz-accent, #f5b400);
+  background: var(--grz-accent, #f5b400);
+  color: var(--grz-on-accent, #1a1300);
+}
+.grz-pltrack.playlist-sortable-dragging {
+  background: var(--bs-body-bg);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.2);
+}
+
+@media (max-width: 767.98px) {
+  .grz-plhero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+    align-items: start;
+  }
+  .grz-plhero__art {
+    width: min(240px, 70vw);
+  }
+  .grz-plgrid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 16px;
+  }
+  .grz-pltracks__hint {
+    display: none;
+  }
+}
+@media (max-width: 575.98px) {
+  .grz-pl-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .grz-pltrack {
+    gap: 10px;
+    padding: 8px 10px;
+  }
+  .grz-pltrack__audio,
+  .grz-pltrack__dur {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .grz-plgrid .grz-plcard,
+  .grz-plcard__play,
+  .grz-plcard__delete,
+  .grz-pltrack {
+    transition: none;
+  }
+  .grz-plgrid .grz-plcard:hover {
+    transform: none;
+  }
+}
+
+/* ============================================================
+   BRANO IN ASCOLTO IN UN ALTRO CONTESTO
+   Lo stesso brano suona da un'altra playlist o dal suo album:
+   titolo in ambra ed etichetta "in ascolto da …", senza barra,
+   equalizzatore e pausa, che restano del contesto attivo.
+   ============================================================ */
+.track-item.track-elsewhere .fw-semibold {
+  color: var(--grz-accent-ink, #855800);
+}
+.track-item.track-elsewhere .fw-semibold[data-elsewhere]::after {
+  content: attr(data-elsewhere);
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.16));
+  color: var(--grz-accent-ink, #855800);
+  font-family: var(--grz-font-ui, inherit);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  vertical-align: 0.1em;
+}
+
+/* Scheda disco: titolo traccia cliccabile (avvia la riproduzione) */
+.track-title-play {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.track-title-play:hover {
+  color: var(--grz-accent-ink, #855800);
+}
+.track-title-play:focus-visible {
+  outline: 2px solid var(--grz-accent, #f5b400);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.track-item.track-playing .track-title-play {
+  color: var(--grz-accent-ink, #855800);
+}
+
+/* ============================================================
+   HOME (dashboard) — layout basato sullo spazio reale
+   .grz-dash è il contenitore delle container query: con la coda
+   agganciata lo spazio si riduce di 360px senza che cambi la
+   finestra, e le media query non se ne accorgerebbero.
+   (Il contenitore è la sola dashboard: su #page-content farebbe
+   da riferimento anche per modali ed elementi position: fixed.)
+   ============================================================ */
+.grz-dash {
+  container-type: inline-size;
+  container-name: grzdash;
+}
+
+/* Griglia "Aggiunti di recente": colonne automatiche. Il JS delle
+   righe visibili legge grid-template-columns calcolato, quindi
+   funziona con qualsiasi numero di colonne. */
+.grz-dash .grz-album-grid {
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+/* Colonna laterale: stessa superficie delle altre card dell'app */
+.grz-dash .grz-dash-panel {
+  padding: 16px 18px;
+  border: 1px solid var(--bs-border-color);
+  border-radius: 14px;
+  background: var(--bs-body-bg);
+}
+html[data-bs-theme="light"] .grz-dash .grz-dash-panel {
+  box-shadow: 0 1px 2px rgba(28, 27, 25, 0.06);
+}
+
+/* Spazio stretto (coda agganciata su schermi medi, tablet):
+   la colonna laterale scende sotto la griglia e i due riquadri
+   si affiancano. */
+@container grzdash (max-width: 999.98px) {
+  .grz-dash-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .grz-dash-sidebar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+  }
+}
+@container grzdash (min-width: 1000px) {
+  .grz-dash-grid {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+}
+
+/* Con la coda agganciata lo stato di riproduzione è già nella coda:
+   il riquadro Playlist non ripete badge e riga evidenziata. */
+body.qp-docked .dash-playlist-row.is-player-playing .dash-pl-name::after,
+body.qp-docked .dash-playlist-row.is-player-paused .dash-pl-name::after {
+  content: none;
+  display: none;
+}
+body.qp-docked .dash-playlist-row.is-player-playing,
+body.qp-docked .dash-playlist-row.is-player-paused {
+  background: transparent;
+}
+
+/* ============================================================
+   SCHEDA DISCO — layout basato sullo spazio reale (passaggio 1)
+   .grz-album avvolge solo la riga principale (testata, colonna
+   laterale, tracklist), non i modali né la barra di selezione.
+   ============================================================ */
+.grz-album {
+  container-type: inline-size;
+  container-name: grzalbum;
+}
+
+/* Spazio medio (coda agganciata, finestre tra ~1000 e ~1450px):
+   la tracklist prende tutta la larghezza e note, descrizione e
+   consigliati scendono sotto, affiancati. Sotto 700px valgono le
+   regole mobile esistenti. */
+@container grzalbum (min-width: 700px) and (max-width: 1099.98px) {
+  .grz-album > .row > .album-detail-main {
+    flex: 0 0 100%;
+    width: 100%;
+    max-width: 100%;
+    order: 1;
+  }
+  .grz-album > .row > .album-detail-sidebar {
+    flex: 0 0 100%;
+    width: 100%;
+    max-width: 100%;
+    order: 2;
+    display: grid;
+    /* grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); */
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+  }
+  .grz-album > .row > .album-detail-sidebar > * {
+    margin-bottom: 0 !important;
+  }
+  /* Note sull'album a tutta larghezza: corpo più grande per compensare
+     le righe lunghe. Regola allo stesso livello delle altre (non
+     annidata): annidata dentro "> *" diventerebbe un selettore
+     discendente che non corrisponde a nessun elemento. */
+  .grz-album > .row > .album-detail-sidebar .album-desc-text {
+    font-size: clamp(0.98rem, 0.725rem 0.4cqi, 1rem);
+  }
+}
+
+/* Durata in colonna a destra, in mono, allineata tra le righe
+   (solo desktop: su mobile restano le regole a due righe) */
+@media (min-width: 768px) {
+  #tracklistPlayer .track-item > .d-flex > .flex-grow-1 {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    min-width: 0;
+  }
+  #tracklistPlayer .track-item > .d-flex > .flex-grow-1 > .fw-semibold {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #tracklistPlayer .track-item > .d-flex > .flex-grow-1 > .text-muted.small {
+    flex-shrink: 0;
+    margin-left: auto !important;
+    padding-right: 4px;
+    font-family: var(--grz-font-data, ui-monospace, monospace);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Pillola del genere: neutra come le pillole formato (prima era
+   chiara piena anche in dark e pesava più del formato) */
+html[data-bs-theme] .badge-genre {
+  background: var(--bs-tertiary-bg);
+  color: var(--bs-body-color);
+  border: 1px solid var(--bs-border-color);
+}
+
+/* "Riproduci album": niente bagliore, come gli altri pulsanti primari */
+html[data-bs-theme] .album-hero-play,
+html[data-bs-theme] .album-hero-play:hover {
+  box-shadow: none;
+}
+
+/* ============================================================
+   SCHEDA DISCO — righe traccia, modale playlist, testata
+   (passaggio 2). Stesso linguaggio del dettaglio playlist:
+   pulsanti circolari neutri, l'ambra solo su play e riga in
+   ascolto. YouTube resta sempre visibile, con il logo rosso.
+   ============================================================ */
+#tracklistPlayer .track-item {
+  padding-top: 10px !important;
+  padding-bottom: 10px !important;
+  transition: background 0.12s ease;
+}
+#tracklistPlayer .track-item:hover {
+  background: var(--bs-tertiary-bg);
+}
+#tracklistPlayer .track-actions {
+  gap: 6px;
+}
+#tracklistPlayer .track-audio-controls {
+  gap: 6px !important;
+}
+
+/* Pulsanti circolari della riga: play, coda, YouTube, menu */
+#tracklistPlayer .btn-track-play,
+#tracklistPlayer .btn-enqueue-track,
+#tracklistPlayer .btn-yt,
+#tracklistPlayer .track-menu-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--bs-border-color);
+  background: transparent;
+  color: var(--bs-body-color);
+  font-size: 0.95rem;
+  line-height: 1;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+/* Play: ambra al passaggio e nella riga in ascolto */
+#tracklistPlayer .btn-track-play:hover,
+#tracklistPlayer .track-item.track-playing .btn-track-play {
+  border-color: var(--grz-accent, #f5b400);
+  background: var(--grz-accent, #f5b400);
+  color: var(--grz-on-accent, #1a1300);
+}
+/* Aggiungi alla coda */
+#tracklistPlayer .btn-enqueue-track:hover {
+  border-color: var(--grz-accent, #f5b400);
+  color: var(--grz-accent-ink, #855800);
+}
+/* YouTube: punto di forza, sempre visibile; logo rosso su fondo
+   rosso tenue, pieno al passaggio */
+#tracklistPlayer .btn-yt {
+  border-color: rgba(255, 0, 0, 0.35);
+  background: rgba(255, 0, 0, 0.08);
+  color: #ff0000;
+}
+#tracklistPlayer .btn-yt:hover {
+  border-color: #ff0000;
+  background: #ff0000;
+  color: #ffffff;
+  transform: none;
+}
+/* Menu ⋮: più leggero degli altri */
+#tracklistPlayer .track-menu-toggle {
+  border-color: transparent;
+  color: var(--bs-secondary-color);
+}
+#tracklistPlayer .track-menu-toggle:hover,
+#tracklistPlayer .track-menu-toggle[aria-expanded="true"] {
+  background: var(--bs-tertiary-bg);
+  color: var(--bs-body-color);
+}
+#tracklistPlayer .track-menu-list {
+  min-width: 220px;
+  padding: 6px;
+  border-radius: 10px;
+}
+#tracklistPlayer .track-menu-list .dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 0.875rem;
+}
+#tracklistPlayer .track-menu-list .dropdown-item i {
+  width: 16px;
+  text-align: center;
+  color: var(--bs-secondary-color);
+}
+#tracklistPlayer .track-menu-list .dropdown-item.text-danger i {
+  color: inherit;
+}
+/* Feedback dei pulsanti coda con la nuova forma */
+#tracklistPlayer .btn-enqueue-track.enqueue-ok {
+  border-color: var(--bs-success);
+  color: var(--bs-success);
+}
+
+/* ── Modale "Aggiungi a playlist" ── */
+#addToPlaylistModal .modal-title i {
+  color: var(--grz-accent-ink, #855800);
+}
+.grz-atp-track {
+  margin-top: 2px;
+  font-size: 0.875rem;
+  color: var(--bs-secondary-color);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 360px;
+}
+#addToPlaylistModal .form-select,
+#addToPlaylistModal .form-control {
+  min-height: 42px;
+}
+#addToPlaylistModal .modal-footer .btn {
+  min-height: 40px;
+  padding: 0 18px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+html[data-bs-theme] #btnConfirmAddToPlaylist.btn-success {
+  --bs-btn-color: var(--grz-on-accent, #1a1300);
+  --bs-btn-bg: var(--grz-accent, #f5b400);
+  --bs-btn-border-color: var(--grz-accent, #f5b400);
+  --bs-btn-hover-color: var(--grz-on-accent, #1a1300);
+  --bs-btn-hover-bg: var(--grz-accent-hover, #e0a500);
+  --bs-btn-hover-border-color: var(--grz-accent-hover, #e0a500);
+  --bs-btn-active-bg: var(--grz-accent-active, #cc9600);
+  --bs-btn-active-border-color: var(--grz-accent-active, #cc9600);
+  --bs-btn-disabled-bg: var(--grz-accent, #f5b400);
+  --bs-btn-disabled-border-color: var(--grz-accent, #f5b400);
+  --bs-btn-disabled-color: var(--grz-on-accent, #1a1300);
+}
+html[data-bs-theme] #addToPlaylistModal .modal-footer .btn-secondary {
+  --bs-btn-color: var(--bs-body-color);
+  --bs-btn-bg: transparent;
+  --bs-btn-border-color: var(--grz-field-border, var(--bs-border-color));
+  --bs-btn-hover-color: var(--bs-body-color);
+  --bs-btn-hover-bg: var(--bs-tertiary-bg);
+  --bs-btn-hover-border-color: var(--grz-field-border, var(--bs-border-color));
+}
+
+/* ── Testata: nota personale e MBID nel menu ── */
+.album-hero-mynote {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  max-width: 60ch;
+  margin: 14px 0 0;
+  font-size: 0.9375rem;
+  font-style: italic;
+  line-height: 1.5;
+  color: var(--bs-secondary-color);
+}
+.album-hero-mynote i {
+  flex-shrink: 0;
+  font-style: normal;
+  color: var(--grz-accent-ink, #855800);
+}
+.grz-copy-mbid {
+  display: flex;
+  align-items: center;
+}
+.grz-copy-mbid__id {
+  margin-left: auto;
+  padding-left: 16px;
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-size: 0.75rem;
+  color: var(--bs-secondary-color);
+}
+
+/* ── Pannello "Carica file audio" (chiuso di default) ── */
+.grz-upload-panel {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 14px;
+  background: var(--bs-body-bg);
+}
+.grz-upload-panel__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  padding: 0 18px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.grz-upload-panel__summary::-webkit-details-marker {
+  display: none;
+}
+.grz-upload-panel__summary::after {
+  content: "\F282"; /* bi-chevron-down */
+  font-family: "bootstrap-icons";
+  font-size: 0.8rem;
+  color: var(--bs-secondary-color);
+  transition: transform 0.15s ease;
+}
+.grz-upload-panel[open] .grz-upload-panel__summary::after {
+  transform: rotate(180deg);
+}
+.grz-upload-panel__hint {
+  margin-left: auto;
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: var(--bs-secondary-color);
+}
+.grz-upload-panel[open] .grz-upload-panel__summary {
+  border-bottom: 1px solid var(--bs-border-color);
+}
+.grz-upload-panel__body {
+  padding: 16px 18px 18px;
+}
+@media (max-width: 575.98px) {
+  .grz-upload-panel__hint {
+    display: none;
+  }
+}
+@media (max-width: 767.98px) {
+  /* Mobile: bersagli di tocco più grandi */
+  #tracklistPlayer .btn-track-play,
+  #tracklistPlayer .track-menu-toggle {
+    width: 40px;
+    height: 40px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #tracklistPlayer .track-item,
+  #tracklistPlayer .btn-track-play,
+  #tracklistPlayer .btn-enqueue-track,
+  #tracklistPlayer .btn-yt,
+  #tracklistPlayer .track-menu-toggle,
+  .grz-upload-panel__summary::after {
+    transition: none;
+  }
+}
+
+/* ============================================================
+   DASHBOARD — PERFORMANCE SCROLL
+   Evita repaint costosi sui badge sopra le cover e sul player
+   fisso mentre la dashboard scorre. Nessun cambio strutturale UI.
+   ============================================================ */
+
+/* I badge formato hanno già un background opaco: il blur sottostante
+   non produce un vantaggio visivo ma crea un layer compositato per card. */
+.grz-dash .grz-tile-badges .badge-format {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Il contatore tracce è semitrasparente: compensiamo l'assenza del blur
+   con un fondo leggermente più pieno per mantenere la stessa leggibilità. */
+.grz-dash .grz-tile-tracks {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+/* Il player è fixed e attraversa tutta la viewport. Con backdrop-filter
+   il browser deve ricampionare continuamente le cover che scorrono sotto.
+   Sulla sola dashboard usiamo un fondo quasi opaco equivalente. */
+body.grz-dashboard-page .sticky-player {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(14, 14, 14, 0.985);
+}
+
+/* ============================================================
+   FORM DISCO — riquadro cover (segnaposto  caricamento)
+   Un solo quadrato: vuoto mostra il vinile dei token e le
+   istruzioni; pieno mostra la copertina con un velo "sostituisci"
+   al passaggio del mouse. Colori dai token, quindi coerenti in
+   light (superficie chiara) e in dark (blu inchiostro).
+   ============================================================ */
+.grz-cover__frame {
+  position: relative;
+  display: block;
+  margin: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  cursor: pointer;
+  background: var(--bs-tertiary-bg);
+}
+.grz-cover__frame img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+}
+.grz-cover__frame:focus-within {
+  outline: 2px solid var(--grz-accent, #f5b400);
+  outline-offset: 2px;
+}
+
+/* Stato vuoto: il placeholder PNG resta nel DOM (serve agli script)
+   ma non si vede; al suo posto il contenuto disegnato in CSS. */
+.grz-cover__empty {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 20px;
+  border: 1.5px dashed var(--grz-field-border, var(--bs-border-color));
+  border-radius: inherit;
+  background: var(--bs-tertiary-bg);
+  text-align: center;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+.grz-cover__frame.is-empty img {
+  visibility: hidden;
+}
+.grz-cover__frame.is-empty .grz-cover__empty {
+  display: flex;
+}
+.grz-cover__empty .grz-vinyl {
+  width: 44%;
+  margin-bottom: 12px;
+}
+html[data-bs-theme="light"] .grz-cover__empty .grz-vinyl {
+  box-shadow:
+    0 6px 16px rgba(28, 27, 25, 0.18),
+    inset 0 0 0 2px #0b0b0b;
+}
+.grz-cover__empty-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--bs-body-color);
+}
+.grz-cover__empty-hint {
+  max-width: 26ch;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--bs-secondary-color);
+}
+.grz-cover__empty-hint strong {
+  font-weight: 600;
+  color: var(--grz-accent-ink, #855800);
+}
+.grz-cover__frame.is-empty:hover .grz-cover__empty,
+.grz-cover__frame.is-over .grz-cover__empty {
+  border-color: var(--grz-accent, #f5b400);
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.16));
+}
+
+/* Ricerca nelle fonti in corso: velo che scorre sul riquadro vuoto */
+.grz-cover__frame.is-empty.is-loading .grz-cover__empty::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    100deg,
+    transparent 30%,
+    rgba(245, 180, 0, 0.14) 50%,
+    transparent 70%
+  );
+  background-size: 200% 100%;
+  animation: grzCoverScan 1.2s linear infinite;
+}
+@keyframes grzCoverScan {
+  from {
+    background-position: 150% 0;
+  }
+  to {
+    background-position: -50% 0;
+  }
+}
+
+/* Stato pieno: velo "sostituisci" al passaggio o al trascinamento */
+.grz-cover__overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  background: rgba(10, 14, 20, 0.62);
+  color: #ffffff;
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.grz-cover__frame:not(.is-empty):hover .grz-cover__overlay,
+.grz-cover__frame:not(.is-empty).is-over .grz-cover__overlay {
+  opacity: 1;
+}
+
+/* Sotto il riquadro: messaggio di stato e scelta file esplicita */
+.grz-cover__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+}
+.grz-cover__foot .grz-cover__msg {
+  margin: 0;
+  min-height: 0;
+}
+.grz-cover__replace {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 0 auto;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--bs-secondary-color);
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grz-cover__replace:hover {
+  color: var(--bs-body-color);
+}
+@media (prefers-reduced-motion: reduce) {
+  .grz-cover__frame.is-empty.is-loading .grz-cover__empty::after {
+    animation: none;
+    background: rgba(245, 180, 0, 0.1);
+  }
+  .grz-cover__empty,
+  .grz-cover__overlay {
+    transition: none;
   }
 }

@@ -64,6 +64,43 @@ const Player = (function () {
     document.dispatchEvent(new CustomEvent('player:changed'));
   }
 
+  // -------------------------------------------------------
+  // Contesto di riproduzione
+  // La stessa traccia può comparire in più playlist e nel suo album.
+  // "In riproduzione" (barra, equalizzatore, pausa) vale solo nella
+  // lista che corrisponde al contesto caricato; nelle altre la riga
+  // riceve solo il segnale leggero .track-elsewhere.
+  // Le liste dichiarano il proprio contesto con data-player-context
+  // ("playlist:ID" o "album:ID"); una lista senza attributo mantiene
+  // il comportamento precedente (confronto sul solo id traccia).
+  // -------------------------------------------------------
+  function currentContext() {
+    if (albumMeta.playlistId) return 'playlist:' + albumMeta.playlistId;
+    if (albumMeta.id) return 'album:' + albumMeta.id;
+    return '';
+  }
+
+  function rowInContext(li) {
+    const host = li.closest('[data-player-context]');
+    if (!host) return true;
+    return host.dataset.playerContext === currentContext();
+  }
+
+  function elsewhereLabel() {
+    if (albumMeta.playlistId) {
+      const nameEl = document.getElementById('sp-context-name');
+      const name = nameEl ? nameEl.textContent.trim() : '';
+      return name ? 'in ascolto da ' + name : 'in ascolto da una playlist';
+    }
+    return 'in ascolto dal disco';
+  }
+
+  function clearElsewhere(li) {
+    li.classList.remove('track-elsewhere');
+    const titleEl = li.querySelector('.fw-semibold');
+    if (titleEl) delete titleEl.dataset.elsewhere;
+  }
+
   function resetPlayerState(reason) {
     // reason: 'stopped' | 'completed' | 'no-playable-track'
     panel.style.display = 'none';
@@ -97,6 +134,7 @@ const Player = (function () {
 
     document.querySelectorAll('.track-item').forEach(function (li) {
       li.classList.remove('track-playing');
+      clearElsewhere(li);
 
       var playlistSlot = li.querySelector('.pl-track-playing-icon');
       if (playlistSlot) {
@@ -188,6 +226,7 @@ const Player = (function () {
     document.querySelectorAll('.track-item').forEach(li => {
       const tid = parseInt(li.dataset.trackId || 0);
       li.classList.remove('track-playing');
+      clearElsewhere(li);
 
       const slot = li.querySelector('.pl-track-playing-icon');
       if (slot) {
@@ -204,7 +243,14 @@ const Player = (function () {
 
       const btn = li.querySelector('.btn-track-play');
 
-      if (tid === t.id) {
+      if (tid === t.id && !rowInContext(li)) {
+        // Stesso brano, contesto diverso: segnale leggero, nessuna pausa.
+        // Il play della riga avvia questo contesto da questa traccia.
+        li.classList.add('track-elsewhere');
+        const titleEl = li.querySelector('.fw-semibold');
+        if (titleEl) titleEl.dataset.elsewhere = elsewhereLabel();
+        if (btn) { btn.innerHTML = '<i class="bi bi-play-fill"></i>'; btn.title = 'Riproduci da qui'; }
+      } else if (tid === t.id) {
         li.classList.add('track-playing');
         if (slot) {
           slot.innerHTML = '<span class="bar"></span><span class="bar"></span><span class="bar"></span>';
@@ -240,7 +286,7 @@ const Player = (function () {
         const btn = li.querySelector('.btn-track-play');
         if (!btn) return;
         const tid = parseInt(li.dataset.trackId || 0);
-        if (tid === t.id) {
+        if (tid === t.id && rowInContext(li)) {
           btn.innerHTML = playing ? '<i class="bi bi-pause-fill"></i>' : '<i class="bi bi-play-fill"></i>';
           btn.title = playing ? 'Pausa' : 'Ascolta';
         }
@@ -511,6 +557,8 @@ const Player = (function () {
     currentSrc: () => audio.src,
     currentIndex: () => cursor,
     currentTrackId: () => (playlist[cursor] ? playlist[cursor].id : null),
+    // Contesto caricato: "playlist:ID", "album:ID" oppure '' se fermo.
+    context: () => (cursor === -1 ? '' : currentContext()),
     // Stato play/pausa e traccia corrente: usati dal pulsante hero
     // "Riproduci album" per calcolare i suoi tre stati.
     isPlaying: () => !!(audio.src && !audio.paused),
@@ -617,8 +665,12 @@ function initTracklistPlayers() {
       if (!window.__album) return;
       const idx = window.__album.tracks.findIndex(t => t.src === src);
       const audio = document.getElementById('global-audio');
-      // Se è già la traccia corrente → toggle play/pause
-      if (audio && audio.src === src) {
+      // Toggle play/pausa solo se la traccia è già in ascolto E il
+      // contesto caricato è questo album. Se lo stesso brano suona da
+      // una playlist, il clic avvia l'album da questa traccia.
+      const sameContext = (typeof Player.context !== 'function') ||
+        Player.context() === 'album:' + window.__album.id;
+      if (audio && audio.src === src && sameContext) {
         if (audio.paused) {
           audio.play().catch(function (err) {
             console.warn('[Player] Impossibile riprendere audio:', err.message);
@@ -646,6 +698,211 @@ function initTracklistPlayers() {
     });
   });
 }
+
+// -------------------------------------------------------
+// Dashboard live refresh
+// -------------------------------------------------------
+// Il worker media modifica il DB in background. Finché la dashboard è aperta,
+// questo modulo interroga un endpoint leggero e, solo se cambia il numero/ultimo
+// album, rigenera tre blocchi: statistiche, album recenti e top artisti.
+// Sticky player, playlist e resto della pagina non vengono sostituiti.
+const DashboardLiveRefresh = (function () {
+  const POLL_MS = 10000;
+
+  let timer = null;
+  let revision = null;
+  let checking = false;
+  let generation = 0;
+  let userScrolling = false;
+  let scrollIdleTimer = null;
+
+  function isDashboard() {
+    return !!(
+      document.getElementById('dashboard-statband') &&
+      document.getElementById('dashboard-recent-panel') &&
+      document.getElementById('dashboard-top-artists')
+    );
+  }
+
+  function stop() {
+    generation += 1;
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+    if (scrollIdleTimer !== null) {
+      clearTimeout(scrollIdleTimer);
+      scrollIdleTimer = null;
+    }
+    userScrolling = false;
+    revision = null;
+    checking = false;
+    document.body.classList.remove('grz-dashboard-page');
+  }
+
+  async function fetchState() {
+    const res = await fetch(BASE_URL + '/index.php?route=dashboard/state', {
+      cache: 'no-store',
+      headers: {
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest'
+      }
+    });
+
+    if (!res.ok) {
+      throw new Error('dashboard/state HTTP ' + res.status);
+    }
+
+    const data = await res.json();
+    if (!data || !data.ok || !data.revision) {
+      throw new Error((data && data.error) || 'Stato dashboard non valido');
+    }
+
+    return data;
+  }
+
+  async function refreshFragments(expectedGeneration) {
+    const res = await fetch(BASE_URL + '/index.php?route=dashboard', {
+      cache: 'no-store',
+      headers: { 'X-SPA': '1' }
+    });
+
+    if (!res.ok) {
+      throw new Error('dashboard HTTP ' + res.status);
+    }
+
+    const html = await res.text();
+
+    // Nel frattempo l'utente potrebbe essere uscito dalla dashboard.
+    if (expectedGeneration !== generation || !isDashboard()) return false;
+
+    // Non sostituire blocchi DOM mentre l'utente sta scorrendo: il refresh
+    // può cambiare l'altezza del contenuto sopra il viewport e produrre uno
+    // scatto visibile. La firma resta invariata e verrà riprovata a scroll fermo.
+    if (userScrolling) return false;
+
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const ids = [
+      'dashboard-statband',
+      'dashboard-recent-panel',
+      'dashboard-top-artists'
+    ];
+
+    ids.forEach(function (id) {
+      const current = document.getElementById(id);
+      const fresh = doc.getElementById(id);
+      if (current && fresh) {
+        current.replaceWith(fresh);
+      }
+    });
+
+    // La griglia recente ha comportamento JS ("Mostra altri" + resize).
+    // Va riagganciato dopo la sostituzione del suo DOM.
+    if (typeof window.__initDashboardGrid === 'function') {
+      window.__initDashboardGrid();
+    }
+
+    // Il blocco playlist non viene sostituito, ma manteniamo comunque
+    // coerente l'eventuale stato visuale del player.
+    if (typeof window.__syncPlaylistListUI === 'function') {
+      window.__syncPlaylistListUI();
+    }
+
+    document.dispatchEvent(new CustomEvent('dashboard:refreshed'));
+    return true;
+  }
+
+  async function check() {
+    if (!isDashboard() || document.visibilityState === 'hidden' || checking || userScrolling) {
+      return;
+    }
+
+    checking = true;
+    const thisGeneration = generation;
+
+    try {
+      const state = await fetchState();
+
+      if (thisGeneration !== generation || !isDashboard()) return;
+
+      // Prima lettura: stabilisce il baseline senza ricaricare niente.
+      if (revision === null) {
+        revision = state.revision;
+        return;
+      }
+
+      if (state.revision !== revision) {
+        // Aggiorna la firma solo DOPO una sostituzione DOM completata.
+        // Se nel frattempo parte lo scroll, refreshFragments() restituisce
+        // false e al primo momento di inattività il cambio viene riprovato.
+        const nextRevision = state.revision;
+        const refreshed = await refreshFragments(thisGeneration);
+        if (refreshed) {
+          revision = nextRevision;
+        }
+      }
+    } catch (err) {
+      // Un errore di rete non deve mai rompere la dashboard o il player.
+      console.warn('[Dashboard live refresh]', err.message);
+    } finally {
+      if (thisGeneration === generation) {
+        checking = false;
+      }
+    }
+  }
+
+  function sync() {
+    if (!isDashboard()) {
+      stop();
+      return;
+    }
+
+    document.body.classList.add('grz-dashboard-page');
+
+    if (timer !== null) return;
+
+    generation += 1;
+    revision = null;
+    checking = false;
+
+    // Baseline immediato e poi polling leggero.
+    check();
+    timer = setInterval(check, POLL_MS);
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && isDashboard()) {
+      check();
+    }
+  });
+
+  // Su mobile la barra indirizzi può generare resize durante lo scroll; inoltre
+  // il live refresh non deve mai rimpiazzare la griglia mentre il dito/trackpad
+  // sta muovendo la pagina. Il listener è passive e fa solo da debounce.
+  window.addEventListener('scroll', function () {
+    if (!isDashboard()) return;
+
+    userScrolling = true;
+
+    if (scrollIdleTimer !== null) {
+      clearTimeout(scrollIdleTimer);
+    }
+
+    scrollIdleTimer = setTimeout(function () {
+      scrollIdleTimer = null;
+      userScrolling = false;
+      check();
+    }, 220);
+  }, { passive: true });
+
+  return {
+    sync: sync,
+    stop: stop,
+    check: check
+  };
+})();
+
+window.__syncDashboardLiveRefresh = DashboardLiveRefresh.sync;
 
 // -------------------------------------------------------
 // SPA-lite Navigation
@@ -682,6 +939,19 @@ function initTracklistPlayers() {
       const newTitle = newDoc.querySelector('title');
       if (newTitle) document.title = newTitle.textContent;
 
+      // Voce di menu corrente: la navbar è fuori da <main> e non viene
+      // sostituita, quindi si copia aria-current dalla pagina ricevuta
+      // (calcolato in header.php dalla route).
+      const newNavLinks = newDoc.querySelectorAll('#mainNav .nav-link');
+      document.querySelectorAll('#mainNav .nav-link').forEach(function (link, i) {
+        const src = newNavLinks[i];
+        if (src && src.hasAttribute('aria-current')) {
+          link.setAttribute('aria-current', src.getAttribute('aria-current'));
+        } else {
+          link.removeAttribute('aria-current');
+        }
+      });
+
       // Esegui script iniettati (window.__album incluso)
       main.querySelectorAll('script').forEach(oldScript => {
         const s = document.createElement('script');
@@ -693,6 +963,10 @@ function initTracklistPlayers() {
       // Re-inizializza componenti Bootstrap e player
       initTracklistPlayers();
       reinitBootstrap();
+
+      // Avvia/ferma il polling della dashboard in base alla pagina corrente.
+      // Se siamo usciti dalla dashboard il timer viene eliminato.
+      DashboardLiveRefresh.sync();
 
       // Estrazione colore dominante dell'hero scheda disco (se presente).
       // Va richiamata a ogni navigazione SPA perche' il contenuto e' stato
@@ -822,6 +1096,7 @@ function initTracklistPlayers() {
 
   // Init al caricamento iniziale
   initTracklistPlayers();
+  DashboardLiveRefresh.sync();
 })();
 
 // Intercetta submit del form di eliminazione disco via AJAX — player non si interrompe

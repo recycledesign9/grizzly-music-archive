@@ -253,13 +253,17 @@ class UploadController
 
     // Se esiste già un audio per questa traccia, elimina il vecchio file fisico
     // (sostituzione, non accumulo)
-    $oldStmt = $this->db->prepare("SELECT id, filename FROM audio_files WHERE track_id = ?");
+    $oldStmt = $this->db->prepare("SELECT id, filename, storage_type FROM audio_files WHERE track_id = ?");
     $oldStmt->execute([$trackId]);
     $oldFile = $oldStmt->fetch();
     if ($oldFile) {
-      $oldPath = MediaPathResolver::getAudioAbsPath($oldFile['filename']);
-      if (file_exists($oldPath)) {
-        unlink($oldPath);
+      // I file external appartengono alla libreria sorgente e NON devono
+      // mai essere eliminati fisicamente quando vengono sostituiti da un upload.
+      if (($oldFile['storage_type'] ?? 'managed') !== 'external') {
+        $oldPath = MediaPathResolver::getAudioAbsPath($oldFile['filename']);
+        if (file_exists($oldPath)) {
+          unlink($oldPath);
+        }
       }
       $this->db->prepare("DELETE FROM audio_files WHERE id = ?")->execute([$oldFile['id']]);
     }
@@ -321,10 +325,14 @@ class UploadController
       exit;
     }
 
-    // Elimina file fisico
-    $path = MediaPathResolver::getAudioAbsPath($file['filename']);
-    if (file_exists($path)) {
-      unlink($path);
+    // Managed: elimina anche la copia fisica gestita da Grizzly.
+    // External: elimina SOLO il record DB; la sorgente nella watched folder
+    // appartiene alla libreria dell'utente e non va mai toccata.
+    if (($file['storage_type'] ?? 'managed') !== 'external') {
+      $path = MediaPathResolver::getAudioAbsPath($file['filename']);
+      if (file_exists($path)) {
+        unlink($path);
+      }
     }
     $this->db->prepare("DELETE FROM audio_files WHERE id = ?")->execute([$id]);
 

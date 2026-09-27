@@ -3,6 +3,34 @@ $pageTitle = $pageTitle ?? 'Music Archive';
 $baseUrl   = BASE_URL;
 
 // ------------------------------------------------------------
+// Voce di menu corrente, ricavata dalla route. Nella navigazione
+// SPA app.js copia lo stesso attributo dalla pagina ricevuta,
+// quindi la regola vive solo qui.
+// ------------------------------------------------------------
+$navRoute = (string)($_GET['route'] ?? '');
+if ($navRoute === '' || strpos($navRoute, 'dashboard') === 0) {
+  $navCurrent = 'home';
+} elseif (strpos($navRoute, 'albums/create') === 0) {
+  $navCurrent = 'create';
+} elseif (strpos($navRoute, 'albums') === 0 || strpos($navRoute, 'artists') === 0) {
+  $navCurrent = 'albums';
+} elseif (strpos($navRoute, 'playlists') === 0) {
+  $navCurrent = 'playlists';
+} elseif (strpos($navRoute, 'search') === 0) {
+  $navCurrent = 'search';
+} elseif (strpos($navRoute, 'settings') === 0) {
+  $navCurrent = 'settings';
+} else {
+  $navCurrent = '';
+}
+if (!function_exists('navCurrentAttr')) {
+  function navCurrentAttr(string $key, string $current): string
+  {
+    return $key === $current ? ' aria-current="page"' : '';
+  }
+}
+
+// ------------------------------------------------------------
 // Cache-busting automatico degli asset locali: appende ?v=<mtime>
 // all'URL. L'header viene incluso PRIMA del footer, quindi la
 // definizione vive qui; il footer ha la stessa definizione con
@@ -32,6 +60,7 @@ if (!function_exists('asset_v')) {
     href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
   <link rel="stylesheet"
     href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="<?= asset_v('/public/css/grizzly-tokens.css') ?>">
   <link rel="stylesheet" href="<?= asset_v('/public/css/app.css') ?>">
 </head>
 
@@ -61,32 +90,32 @@ if (!function_exists('asset_v')) {
       <div class="collapse navbar-collapse" id="mainNav">
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
           <li class="nav-item">
-            <a class="nav-link" href="<?= $baseUrl ?>">
-              <i class="bi bi-speedometer2 me-1"></i>Dashboard
+            <a class="nav-link" href="<?= $baseUrl ?>"<?= navCurrentAttr('home', $navCurrent) ?>>
+              <i class="bi bi-grid-1x2 me-1"></i>Panoramica
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=albums/list">
+            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=albums/list"<?= navCurrentAttr('albums', $navCurrent) ?>>
               <i class="bi bi-collection me-1"></i>Archivio
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=albums/create">
+            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=albums/create"<?= navCurrentAttr('create', $navCurrent) ?>>
               <i class="bi bi-plus-circle me-1"></i>Aggiungi disco
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=playlists">
+            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=playlists"<?= navCurrentAttr('playlists', $navCurrent) ?>>
               <i class="bi bi-collection-play me-1"></i>Playlist
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=search/index">
+            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=search/index"<?= navCurrentAttr('search', $navCurrent) ?>>
               <i class="bi bi-search me-1"></i>Cerca
             </a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=settings">
+            <a class="nav-link" href="<?= $baseUrl ?>/index.php?route=settings"<?= navCurrentAttr('settings', $navCurrent) ?>>
               <i class="bi bi-gear me-1"></i>Impostazioni
             </a>
           </li>

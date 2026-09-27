@@ -30,6 +30,27 @@ class Artist {
         return $row ? (int)$row['id'] : null;
     }
 
+    // Aggiorna la GRAFIA del nome di un artista esistente (maiuscole,
+    // accenti, spazi). Chiamato solo da AlbumController::save() in
+    // modifica, quando il nome digitato risolve già a questo artista
+    // secondo la collation del DB: non è un cambio di identità, quindi
+    // MBID, bio, immagine e discografia restano validi e non si toccano.
+    // Il confronto in PHP è binario: se la stringa è identica non si
+    // scrive nulla.
+    public function updateNameSpelling(int $artistId, string $name): void {
+        $name = trim($name);
+        if ($name === '') return;
+
+        $stmt = $this->db->prepare("SELECT name FROM artists WHERE id = :id");
+        $stmt->execute([':id' => $artistId]);
+        $current = $stmt->fetchColumn();
+
+        if ($current === false || $current === $name) return;
+
+        $stmt = $this->db->prepare("UPDATE artists SET name = :name WHERE id = :id");
+        $stmt->execute([':name' => $name, ':id' => $artistId]);
+    }
+
     public function findOrCreate(string $name): int {
         $name = trim($name);
         $stmt = $this->db->prepare("SELECT id FROM artists WHERE name = :name LIMIT 1");
@@ -396,13 +417,33 @@ class Artist {
                 //    discografia esistente più LUNGA (es. avevo 25 album
                 //    completi, un parziale ne porta 16: tengo i 25). Un
                 //    parziale che invece AMPLIA (16 → 18) aggiorna.
-                // In sintesi: migliorare o pareggiare, mai peggiorare.
+                //
+                // FIX 2026-09 (discografia v15): la seconda condizione non
+                // controllava né lo stato né la versione, quindi scattava
+                // anche su esiti 'ok' completi. Quando una correzione della
+                // logica TOGLIE album (bootleg esclusi: Rolling Stones 41 → 28,
+                // Coldplay 11 → 10) il risultato corretto veniva scartato,
+                // le righe vecchie restavano e l'UPDATE sotto marcava
+                // comunque l'artista come aggiornato alla nuova versione,
+                // bloccandolo sul dato errato. Ora la protezione del
+                // parziale più corto vale solo se:
+                //  - l'esito è 'partial' (un 'ok' è una scansione completa
+                //    e sostituisce sempre);
+                //  - le righe in cache sono state prodotte dalla STESSA
+                //    versione di logica (righe di una logica superata non
+                //    sono una base affidabile da proteggere).
+                // La prima condizione (vuoto vs qualcosa) resta invariata.
                 $existingCount = $this->discographyCount($artistId);
                 $newCount      = count($items);
 
+                $sameVersion = $this->storedDiscographyVersion($artistId) === $version;
+
                 $keepExisting =
-                    (empty($items) && $existingCount > 0)          // vuoto vs qualcosa
-                    || ($newCount > 0 && $newCount < $existingCount); // parziale più corto
+                    (empty($items) && $existingCount > 0)           // vuoto vs qualcosa
+                    || ($status === 'partial'                        // parziale più corto,
+                        && $sameVersion                              // stessa logica
+                        && $newCount > 0
+                        && $newCount < $existingCount);
 
                 if (!$keepExisting) {
                     $del = $this->db->prepare("DELETE FROM artist_discography WHERE artist_id = :id");
@@ -442,6 +483,17 @@ class Artist {
             $this->db->rollBack();
             throw $e;
         }
+    }
+
+    // Versione della logica con cui è stata salvata la discografia in
+    // cache (artists.disco_fetch_version). Letta PRIMA dell'UPDATE in
+    // saveDiscography, quindi riflette le righe attualmente presenti.
+    private function storedDiscographyVersion(int $artistId): int {
+        $stmt = $this->db->prepare("
+            SELECT disco_fetch_version FROM artists WHERE id = :id
+        ");
+        $stmt->execute([':id' => $artistId]);
+        return (int) $stmt->fetchColumn();
     }
 
     // Conta le righe di discografia in cache per un artista. Usato dalla

@@ -104,18 +104,31 @@ class AlbumController
       'label_id'  => (int)($_GET['label_id'] ?? 0),
     ];
 
-    $allowedOrder = ['a.title', 'ar.name', 'a.year'];
+    // a.created_at: "Data di aggiunta", esposto solo nella vista griglia.
+    $allowedOrder = ['a.title', 'ar.name', 'a.year', 'a.created_at'];
     $order = in_array($_GET['order'] ?? '', $allowedOrder, true)
       ? $_GET['order']
       : 'a.title';
 
     $dir = strtoupper($_GET['dir'] ?? 'ASC') === 'DESC' ? 'DESC' : 'ASC';
 
-    $allowedPerPage = [10, 20, 50, 100];
+    $view = $this->resolveArchiveView();
+
+    // Elementi per pagina. La lista usa i valori storici; la griglia
+    // usa multipli di 24, divisibile per 2, 3, 4, 6, 8 e 12: il CSS
+    // sceglie il numero di colonne fra questi valori in base allo
+    // spazio disponibile, quindi ogni pagina forma righe complete.
+    if ($view === 'grid') {
+      $allowedPerPage = [24, 48, 96];
+      $defaultPerPage = 24;
+    } else {
+      $allowedPerPage = [10, 20, 50, 100];
+      $defaultPerPage = 20;
+    }
 
     $perPage = filter_input(INPUT_GET, 'per_page', FILTER_VALIDATE_INT);
     if (!$perPage || !in_array($perPage, $allowedPerPage, true)) {
-      $perPage = 20;
+      $perPage = $defaultPerPage;
     }
 
     $page = filter_input(INPUT_GET, 'page', FILTER_VALIDATE_INT);
@@ -151,6 +164,36 @@ class AlbumController
     ];
 
     require BASE_PATH . '/views/albums/list.php';
+  }
+
+  // ----------------------------------------------------------
+  // Vista dell'Archivio: 'list' (predefinita) o 'grid'.
+  // Il parametro GET ha la precedenza e viene ricordato in un
+  // cookie, così riaprendo l'Archivio il server disegna subito la
+  // vista scelta, senza passare da JavaScript. Paginazione, filtri
+  // e ordinamento sono gli stessi nelle due viste.
+  // ----------------------------------------------------------
+  private function resolveArchiveView(): string
+  {
+    $allowed = ['list', 'grid'];
+    $cookie  = 'grz_archive_view';
+
+    $requested = $_GET['view'] ?? '';
+    if (in_array($requested, $allowed, true)) {
+      if (($_COOKIE[$cookie] ?? '') !== $requested && !headers_sent()) {
+        $path = parse_url(BASE_URL, PHP_URL_PATH);
+        setcookie($cookie, $requested, [
+          'expires'  => time() + 365 * 24 * 3600,
+          'path'     => ($path !== null && $path !== '') ? rtrim($path, '/') . '/' : '/',
+          'samesite' => 'Lax',
+          'httponly' => true,
+        ]);
+      }
+      return $requested;
+    }
+
+    $stored = $_COOKIE[$cookie] ?? '';
+    return in_array($stored, $allowed, true) ? $stored : 'list';
   }
 
   // ----------------------------------------------------------
@@ -337,6 +380,29 @@ class AlbumController
     $artistId = $checkArtistId
       ?: $this->artistModel->findOrCreate($_POST['artist_name'] ?? '');
 
+    // CORREZIONE GRAFIA ARTISTA in modifica.
+    // La colonna artists.name usa utf8mb4_unicode_ci, che nei confronti
+    // ignora maiuscole e accenti: scrivendo "Nothing but Thieves" sulla
+    // scheda di un disco di "Nothing but thieves", findByName() trova la
+    // stessa riga e il disco resta collegato allo stesso artista, ma il
+    // nome non veniva mai aggiornato. Ora, se:
+    //  - si sta MODIFICANDO un disco esistente ($id),
+    //  - il nome è stato scritto a mano (artist_id vuoto: l'autocomplete
+    //    azzera l'id appena si digita nel campo),
+    //  - il nome digitato risolve allo STESSO artista già collegato al
+    //    disco, e differisce dal nome salvato,
+    // il nome dell'artista viene aggiornato alla grafia digitata. Vale per
+    // tutto l'archivio, perché l'artista è unico. In inserimento non si
+    // rinomina mai: scrivere "coldplay" in minuscolo su un disco nuovo non
+    // deve cambiare la grafia dell'artista esistente.
+    $typedArtistName = trim($_POST['artist_name'] ?? '');
+    if ($id && $artistId && empty($_POST['artist_id']) && $typedArtistName !== '') {
+      $currentAlbum = $this->albumModel->getById($id);
+      if ($currentAlbum && (int)$currentAlbum['artist_id'] === (int)$artistId) {
+        $this->artistModel->updateNameSpelling((int)$artistId, $typedArtistName);
+      }
+    }
+
     // Gestione label (crea se nuova)
     $labelId = $this->resolveLabel($_POST);
 
@@ -463,12 +529,21 @@ class AlbumController
     if ($album) {
       $db = Database::getInstance();
 
-      // Rimuove file audio fisici associati all'album
-      $audioStmt = $db->prepare("SELECT filename FROM audio_files WHERE album_id = ?");
+      // Se l'album usa audio external, memorizza la cartella sorgente tra
+      // quelle ignorate PRIMA della DELETE. In questo modo i file possono
+      // restare nella watched folder senza che lo scanner ricrei l'album.
+      $this->rememberIgnoredExternalSource($db, $id);
+
+      // Rimuove fisicamente SOLO gli audio managed.
+      // Gli external sono file della libreria sorgente: la DELETE dell'album
+      // deve eliminare la riga DB via CASCADE, mai il file originale.
+      $audioStmt = $db->prepare("SELECT filename, storage_type FROM audio_files WHERE album_id = ?");
       $audioStmt->execute([$id]);
-      $audioFilenames = $audioStmt->fetchAll(PDO::FETCH_COLUMN);
-      foreach ($audioFilenames as $filename) {
-        $audioPath = MediaPathResolver::getAudioAbsPath($filename);
+      foreach ($audioStmt->fetchAll(PDO::FETCH_ASSOC) as $audioFile) {
+        if (($audioFile['storage_type'] ?? 'managed') === 'external') {
+          continue;
+        }
+        $audioPath = MediaPathResolver::getAudioAbsPath((string)$audioFile['filename']);
         if (file_exists($audioPath)) {
           unlink($audioPath);
         }
@@ -496,6 +571,92 @@ class AlbumController
 
     $this->redirect('albums/list');
   }
+
+  // ----------------------------------------------------------
+  // Scanner: cartelle ignorate dopo eliminazione volontaria
+  // ----------------------------------------------------------
+
+  /**
+   * Registra la directory-album degli audio external in media_scan_ignored.
+   * Non tocca mai i file sorgente.
+   */
+  private function rememberIgnoredExternalSource(PDO $db, int $albumId): void
+  {
+    $stmt = $db->prepare("
+        SELECT source_path
+        FROM audio_files
+        WHERE album_id = :album_id
+          AND storage_type = 'external'
+          AND source_path IS NOT NULL
+          AND source_path <> ''
+        ORDER BY id ASC
+    ");
+    $stmt->execute([':album_id' => $albumId]);
+
+    $albumDirs = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $sourcePath) {
+      $sourcePath = $this->normalizeFsPath((string)$sourcePath);
+      if ($sourcePath === '') {
+        continue;
+      }
+
+      $dir = $this->normalizeFsPath(dirname($sourcePath));
+
+      // Le cartelle CD1 / Disc 2 / Disco 3 sono parti dell'album: l'albumKey
+      // usato dallo scanner è il loro genitore.
+      if (preg_match('/^(cd|disc|disco|disk)\s*[-_. ]?\s*\d{1,2}$/i', basename($dir))) {
+        $dir = $this->normalizeFsPath(dirname($dir));
+      }
+
+      if ($dir !== '') {
+        $albumDirs[$dir] = true;
+      }
+    }
+
+    // Per sicurezza non blacklistiamo mai un antenato generico (es. cartella
+    // artista) se i source_path non convergono chiaramente sulla stessa
+    // directory-album.
+    if (count($albumDirs) !== 1) {
+      return;
+    }
+
+    $albumPath = (string)array_key_first($albumDirs);
+
+    // Guardia: non inserire mai per errore l'intera watched root nella blacklist.
+    $setting = $db->prepare("SELECT `value` FROM settings WHERE `key` = 'media_scan_path' LIMIT 1");
+    $setting->execute();
+    $scanRoot = $this->normalizeFsPath((string)($setting->fetchColumn() ?: ''));
+
+    if ($albumPath === '' || ($scanRoot !== '' && rtrim($albumPath, '/') === rtrim($scanRoot, '/'))) {
+      return;
+    }
+
+    $hash = sha1($albumPath);
+
+    $ins = $db->prepare("
+        INSERT INTO media_scan_ignored (path_hash, source_path)
+        VALUES (:path_hash, :source_path)
+        ON DUPLICATE KEY UPDATE
+          source_path = VALUES(source_path),
+          created_at = CURRENT_TIMESTAMP
+    ");
+    $ins->execute([
+      ':path_hash'   => $hash,
+      ':source_path' => $albumPath,
+    ]);
+  }
+
+  private function normalizeFsPath(string $path): string
+  {
+    $path = str_replace('\\', '/', trim($path));
+    if ($path === '') {
+      return '';
+    }
+
+    // Mantieni '/' intatto, altrimenti togli slash finali.
+    return $path === '/' ? '/' : rtrim($path, '/');
+  }
+
 
   // ----------------------------------------------------------
   // Helpers
@@ -1709,10 +1870,18 @@ class AlbumController
       // serviamo l'intero risultato già montato: 2a visita = millisecondi.
       // Il debug bypassa la cache (deve sempre rieseguire per diagnosticare).
       $debugMode = (isset($_GET['debug']) && $_GET['debug'] === '1'); file_put_contents('/tmp/rec_timing.log', 'pre-cache: '.microtime(true)."\n", FILE_APPEND);
+
+      // La cache completa resta utile per non rifare l'orchestrazione lenta,
+      // ma NON può vivere indipendentemente dall'archivio locale: contiene
+      // ID/URL Grizzly e la distinzione "in collezione" / "scoperta".
+      // La firma cambia quando vengono aggiunti, eliminati, reimportati o
+      // modificati album rilevanti, oppure quando cambia la tracklist sorgente.
+      // Le sotto-cache Last.fm/MusicBrainz restano intatte.
+      $recContextSignature = $this->recommendationContextSignature((int)$album['id']);
       $recCacheKey = 'recs:v1:' . (int)$id;
 
       if (!$debugMode) {
-        $cachedRecs = $this->getRecCache($recCacheKey);
+        $cachedRecs = $this->getRecCache($recCacheKey, $recContextSignature);
         if (is_array($cachedRecs)) {
           echo json_encode($cachedRecs, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
           exit;
@@ -1873,7 +2042,12 @@ class AlbumController
       if (!$debugMode && (!empty($payload) || !empty($suggestions))) {
         $toCache = $responsePayload;
         unset($toCache['debug']);
-        $this->setRecCache($recCacheKey, $toCache, 60 * 60 * 24 * 30);
+        $this->setRecCache(
+          $recCacheKey,
+          $toCache,
+          60 * 60 * 24 * 30,
+          $recContextSignature
+        );
       }
 
       echo json_encode($responsePayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -1901,31 +2075,111 @@ class AlbumController
     return $dir . '/' . sha1($key) . '.json';
   }
 
-  private function getRecCache(string $key): ?array
+  /**
+   * Firma dello stato locale che può cambiare il risultato finale dei consigli.
+   *
+   * Non entra nelle cache delle API esterne: serve solo a stabilire se il
+   * payload completo dell'endpoint è ancora coerente con l'archivio Grizzly.
+   * La query è locale e piccola rispetto alle chiamate Last.fm/MusicBrainz.
+   */
+  private function recommendationContextSignature(int $sourceAlbumId): string
+  {
+    $db = Database::getInstance();
+
+    $albums = $db->query("
+      SELECT
+        a.id,
+        a.artist_id,
+        ar.name AS artist_name,
+        a.title,
+        a.year,
+        a.genre_id,
+        COALESCE(g.name, '') AS genre_name,
+        COALESCE(a.cover_local, '') AS cover_local,
+        COALESCE(a.cover_url, '') AS cover_url,
+        a.created_at
+      FROM albums a
+      JOIN artists ar ON ar.id = a.artist_id
+      LEFT JOIN genres g ON g.id = a.genre_id
+      ORDER BY a.id ASC
+    ")->fetchAll(PDO::FETCH_ASSOC);
+
+    $trackStmt = $db->prepare("
+      SELECT id, position, title
+      FROM tracks
+      WHERE album_id = :album_id
+      ORDER BY position ASC, id ASC
+    ");
+    $trackStmt->execute([':album_id' => $sourceAlbumId]);
+    $sourceTracks = $trackStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $context = [
+      'albums' => $albums,
+      'source_tracks' => $sourceTracks,
+    ];
+
+    $encoded = json_encode(
+      $context,
+      JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+
+    return sha1($encoded !== false ? $encoded : serialize($context));
+  }
+
+  private function getRecCache(string $key, string $contextSignature): ?array
   {
     $file = $this->recCacheFile($key);
     if (!is_file($file)) {
       return null;
     }
+
     $raw = @file_get_contents($file);
     $data = $raw ? json_decode($raw, true) : null;
+
     if (!is_array($data) || !isset($data['_expires'], $data['_payload'])) {
+      @unlink($file);
       return null;
     }
+
     if (time() > (int)$data['_expires']) {
       @unlink($file);
       return null;
     }
+
+    // Cache legacy o cache costruita con un archivio diverso:
+    // non può essere usata perché potrebbe contenere ID locali obsoleti
+    // oppure classificare come "esterno" un disco nel frattempo aggiunto.
+    $cachedSignature = isset($data['_context_signature'])
+      ? (string)$data['_context_signature']
+      : '';
+
+    if ($cachedSignature === ''
+        || !hash_equals($cachedSignature, $contextSignature)) {
+      @unlink($file);
+      return null;
+    }
+
     return is_array($data['_payload']) ? $data['_payload'] : null;
   }
 
-  private function setRecCache(string $key, array $payload, int $ttlSeconds): void
-  {
+  private function setRecCache(
+    string $key,
+    array $payload,
+    int $ttlSeconds,
+    string $contextSignature
+  ): void {
     $file = $this->recCacheFile($key);
+
     @file_put_contents(
       $file,
-      json_encode(['_expires' => time() + $ttlSeconds, '_payload' => $payload],
-                  JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+      json_encode(
+        [
+          '_expires' => time() + $ttlSeconds,
+          '_context_signature' => $contextSignature,
+          '_payload' => $payload,
+        ],
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+      ),
       LOCK_EX
     );
   }

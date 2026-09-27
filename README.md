@@ -30,6 +30,9 @@
 - **Dark mode** support
 - **Relocatable audio folder** — store audio files outside the web root via the Settings page
 - **Bulk MP3 upload** with automatic track matching (3-pass: track number + Levenshtein similarity)
+- **Automatic library scan** — watch a folder configured from Settings and import/update albums in the background
+- **Index-in-place audio** — scanned MP3/FLAC files stay in the source library instead of being copied into Grizzly
+- **Collection-aware recommendations** — suggestions distinguish albums already in your archive from external discoveries
 
 ---
 
@@ -38,7 +41,7 @@
 ### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) installed
-- Ports `8080` (or your chosen `APP_PORT`) and `3306` available
+- Port `8080` (or your chosen `APP_PORT`) available
 
 ### 1 — Clone the repository
 
@@ -93,6 +96,18 @@ ALLOWED_HOSTS=localhost,localhost:8080,127.0.0.1,127.0.0.1:8080
 > **Never edit `docker-compose.yml` for local settings.**
 > Put your installation-specific values in `.env`.
 
+### Automatic scanner and Docker
+
+The **folder to scan is configured only from Grizzly**, under **Settings → Automatic scan**. No music-library path is configured in `.env`.
+
+Enter the **real absolute path on the host**, for example:
+
+```text
+/mnt/media/music
+```
+
+Do not enter `/hostfs/...`. Docker exposes the host filesystem read-only under `/hostfs`, and Grizzly performs that internal path mapping automatically. Changing the watched folder from Settings does not require editing `.env` or restarting Docker.
+
 Example — LAN server on port `9082`:
 
 ```dotenv
@@ -129,15 +144,16 @@ When Grizzly Music Archive is behind a reverse proxy such as Nginx Proxy Manager
 ### 3 — Start
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 Docker will:
 
 1. Build the PHP + Apache image
 2. Start MySQL and wait until it is healthy
-3. Automatically import the schema (`docker/db/01_schema.sql`) and demo data (`docker/db/02_seed.sql`)
-4. Serve the app at the address configured in `BASE_URL`
+3. Start the background media scanner worker
+4. Automatically import the schema (`docker/db/01_schema.sql`) and demo data (`docker/db/02_seed.sql`)
+5. Serve the app at the address configured in `BASE_URL`
 
 > **First startup** takes ~30–60 s while MySQL initialises. The app container waits for the database health check before starting.
 
@@ -151,6 +167,18 @@ http://localhost:8080
 
 The archive starts pre-loaded with 12 demo albums (Beatles, Pink Floyd, Radiohead, Nirvana…).
 
+### Automatic scan
+
+Open **Settings → Automatic scan**, enter the absolute host path of your music library, then enable scanning. The worker re-reads the configuration automatically, so changing the watched folder does not require editing `.env` or restarting Docker.
+
+Scanned audio is indexed **in place**: Grizzly stores the source path and streams the file from the library without copying it into the managed uploads folder. Deleting a scanned album from Grizzly never deletes the original MP3/FLAC files.
+
+To follow scanner activity:
+
+```bash
+docker compose logs -f worker
+```
+
 To start **completely empty**, comment out the seed line in `docker-compose.yml`:
 
 ```yaml
@@ -161,7 +189,7 @@ Then run:
 
 ```bash
 docker compose down -v
-docker compose up -d
+docker compose up -d --build
 ```
 
 This deletes the existing database volume and rebuilds the database from scratch.
@@ -286,6 +314,14 @@ cp .env.example .env
 
 For MAMP users: set `DB_PORT=8889` and adjust `BASE_URL` to match your MAMP virtual host.
 
+To use **Automatic scan** without Docker, run the worker in a second terminal:
+
+```bash
+php media-scan-worker.php
+```
+
+The watched folder, scan interval and stability delay are still managed from **Settings → Automatic scan**.
+
 ---
 
 ## 📁 Project Structure
@@ -311,10 +347,11 @@ grizzly-music-archive/
 ├── app/
 │   ├── controllers/             < AlbumController, ArtistController, …
 │   ├── models/                  < Album, Artist, Track, …
-│   └── services/                < AlbumMetadataService, MediaPathResolver, …
+│   └── services/                < Metadata, recommendations, media import, path resolution
 ├── views/                       < PHP view templates
 ├── api/                         < YouTube track API endpoint
 ├── docs/                        < Project images and assets
+├── media-scan-worker.php        < Background watched-folder scanner
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .env.example                 < Template — copy to .env
@@ -334,16 +371,18 @@ grizzly-music-archive/
 | `genres`          | Genre taxonomy                                        |
 | `labels`          | Record labels                                         |
 | `tracks`          | Tracklists with duration and cached YouTube ID        |
-| `audio_files`     | Uploaded audio files linked to albums/tracks          |
+| `audio_files`     | Managed uploads and external audio indexed in place    |
+| `album_formats`   | Album formats with manual/scanner provenance           |
+| `media_scan_ignored` | Source folders intentionally ignored by the scanner |
 | `playlists`       | User-created playlists                                |
 | `playlist_tracks` | Many-to-many: playlists ↔ tracks (with position)      |
-| `settings`        | Key-value app settings (e.g. custom audio path)       |
+| `settings`        | Key-value app settings, including automatic scanning  |
 
 ---
 
 ## ⚙️ Configuration Reference
 
-All configuration is via environment variables. See `.env.example` for the full list.
+Infrastructure configuration is managed through environment variables. Application settings such as the watched media folder are configured from the Grizzly Settings page. See `.env.example` for the full environment list.
 
 | Variable          | Default                                             | Description                                                         |
 | ----------------- | --------------------------------------------------- | ------------------------------------------------------------------- |
@@ -367,6 +406,7 @@ All configuration is via environment variables. See `.env.example` for the full 
 - Never commit `.env` to version control
 - Set `DEBUG=false` in any non-local environment
 - The `public/uploads/` directory is served by Apache; audio files outside the web root (configurable via Settings) are streamed through PHP with strict path validation
+- Docker exposes the host filesystem to the application and scanner under `/hostfs` as a read-only view; the watched music folder is selected only from Settings
 - All database queries use PDO prepared statements
 - File uploads are validated by MIME type and extension server-side
 

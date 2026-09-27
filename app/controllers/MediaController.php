@@ -61,10 +61,13 @@ class MediaController
     private function streamFile(string $filename, bool $download): void
     {
         // Rilascia subito la sessione — lo streaming può durare minuti
-        // e la sessione bloccata impedirebbe qualsiasi altra request PHP
-        session_write_close();
+        // e la sessione bloccata impedirebbe qualsiasi altra request PHP.
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
 
-        // Sicurezza: solo il basename, niente path traversal
+        // La route pubblica continua ad accettare SOLO un basename/token.
+        // Nessun path del filesystem può arrivare direttamente dalla request.
         $filename = basename($filename);
 
         if (!preg_match('/\.(mp3|flac|ogg|wav|m4a)$/i', $filename)) {
@@ -72,17 +75,38 @@ class MediaController
             exit;
         }
 
-        $path = MediaPathResolver::getAudioAbsPath($filename);
+        $path        = null;
+        $displayName = $filename;
 
-        if (!file_exists($path) || !is_readable($path)) {
+        // Fase A: se il token appartiene a un record external, il path reale
+        // viene letto esclusivamente dal DB. I record managed continuano invece
+        // a usare MediaPathResolver come prima.
+        $audioRow = $this->findAudioFileByToken($filename);
+
+        if ($audioRow && (($audioRow['storage_type'] ?? 'managed') === 'external')) {
+            $path = $this->resolveExternalPath($audioRow);
+
+            if (!empty($audioRow['original_name'])) {
+                $displayName = basename((string)$audioRow['original_name']);
+            }
+        } else {
+            $path = MediaPathResolver::getAudioAbsPath($filename);
+        }
+
+        if ($path === null || !is_file($path) || !is_readable($path)) {
             http_response_code(404);
             header('Content-Type: application/json');
-            echo json_encode(['error' => 'File non trovato: ' . $filename]);
+            echo json_encode(['error' => 'File audio non trovato']);
             exit;
         }
 
-        $size     = filesize($path);
-        $mimeType = $this->getMime($filename);
+        $size = filesize($path);
+        if ($size === false || $size <= 0) {
+            http_response_code(404);
+            exit;
+        }
+
+        $mimeType = $this->getMime($displayName);
         $start    = 0;
         $end      = $size - 1;
 
@@ -90,10 +114,11 @@ class MediaController
         header('Accept-Ranges: bytes');
         header('Cache-Control: no-store');
 
+        $safeDownloadName = str_replace(['"', "\r", "\n"], '', basename($displayName));
         if ($download) {
-            header('Content-Disposition: attachment; filename="' . $filename . '"');
+            header('Content-Disposition: attachment; filename="' . $safeDownloadName . '"');
         } else {
-            header('Content-Disposition: inline; filename="' . $filename . '"');
+            header('Content-Disposition: inline; filename="' . $safeDownloadName . '"');
         }
 
         // Gestione Range request (seek nel player HTML5)
@@ -119,15 +144,23 @@ class MediaController
         $length = $end - $start + 1;
         header('Content-Length: ' . $length);
 
-        $fp = fopen($path, 'rb');
+        $fp = @fopen($path, 'rb');
+        if ($fp === false) {
+            http_response_code(404);
+            exit;
+        }
+
         fseek($fp, $start);
 
         $bufferSize = 8192;
         $remaining  = $length;
 
         while (!feof($fp) && $remaining > 0 && connection_status() === 0) {
-            $chunk     = min($bufferSize, $remaining);
-            $data      = fread($fp, $chunk);
+            $chunk = min($bufferSize, $remaining);
+            $data  = fread($fp, $chunk);
+            if ($data === false || $data === '') {
+                break;
+            }
             echo $data;
             $remaining -= strlen($data);
             flush();
@@ -135,6 +168,158 @@ class MediaController
 
         fclose($fp);
         exit;
+    }
+
+    /**
+     * Recupera il record audio associato al token pubblico.
+     *
+     * Finché la colonna storage_type non esiste (prima dell'ALTER della Fase A)
+     * restituisce null e lascia funzionare normalmente tutto lo storage managed.
+     */
+    private function findAudioFileByToken(string $filename): ?array
+    {
+        try {
+            $db = Database::getInstance();
+            $stmt = $db->prepare("
+                SELECT id, filename, original_name, storage_type, source_path
+                FROM audio_files
+                WHERE filename = :filename
+                ORDER BY id DESC
+                LIMIT 1
+            ");
+            $stmt->execute([':filename' => $filename]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $row ?: null;
+        } catch (PDOException $e) {
+            // Compatibilità durante la finestra pre-ALTER: tutti i file esistenti
+            // sono managed e continuano a essere risolti dal vecchio percorso.
+            return null;
+        }
+    }
+
+    /**
+     * Risolve un file external in modo sicuro.
+     *
+     * source_path contiene il path host assoluto. In Docker viene applicato
+     * MEDIA_SCAN_HOST_PREFIX (es. /hostfs) solo a runtime.
+     *
+     * Il realpath del file DEVE ricadere dentro il realpath della watched folder
+     * configurata. In questo modo anche symlink che puntano fuori dalla root
+     * vengono rifiutati.
+     */
+    private function resolveExternalPath(array $audioRow): ?string
+    {
+        $sourcePath = trim((string)($audioRow['source_path'] ?? ''));
+        if ($sourcePath === '') {
+            return null;
+        }
+
+        $scanRoot = $this->getSettingValue('media_scan_path');
+        if ($scanRoot === '') {
+            return null;
+        }
+
+        $runtimeSource = $this->hostPathToRuntime($sourcePath);
+        $runtimeRoot   = $this->hostPathToRuntime($scanRoot);
+
+        $realSource = realpath($runtimeSource);
+        $realRoot   = realpath($runtimeRoot);
+
+        if ($realSource === false || $realRoot === false) {
+            return null;
+        }
+
+        if (!is_file($realSource) || !is_readable($realSource) || !is_dir($realRoot)) {
+            return null;
+        }
+
+        $realSource = $this->normalizeFsPath($realSource);
+        $realRoot   = rtrim($this->normalizeFsPath($realRoot), '/');
+
+        if (!$this->pathIsInside($realSource, $realRoot)) {
+            error_log('[media] external source rifiutata fuori dalla watched folder: ' . $realSource);
+            return null;
+        }
+
+        // La validazione dell'estensione viene ripetuta sul vero file sorgente,
+        // non soltanto sul token pubblico.
+        if (!preg_match('/\.(mp3|flac|ogg|wav|m4a)$/i', $realSource)) {
+            return null;
+        }
+
+        return $realSource;
+    }
+
+    private function getSettingValue(string $key): string
+    {
+        try {
+            $db = Database::getInstance();
+            $stmt = $db->prepare("SELECT `value` FROM settings WHERE `key` = :key LIMIT 1");
+            $stmt->execute([':key' => $key]);
+            $value = $stmt->fetchColumn();
+            return $value === false ? '' : trim((string)$value);
+        } catch (Throwable $e) {
+            return '';
+        }
+    }
+
+    /**
+     * Traduce un path host in path runtime Docker.
+     * Esempio:
+     *   DB    /storage/music/a.flac
+     *   ENV   MEDIA_SCAN_HOST_PREFIX=/hostfs
+     *   PHP   /hostfs/storage/music/a.flac
+     *
+     * Su MAMP l'env è assente e il path rimane invariato.
+     */
+    private function hostPathToRuntime(string $hostPath): string
+    {
+        $hostPath = $this->normalizeFsPath($hostPath);
+        $prefix   = trim((string)getenv('MEDIA_SCAN_HOST_PREFIX'));
+
+        if ($prefix === '') {
+            return $hostPath;
+        }
+
+        $prefix = rtrim($this->normalizeFsPath($prefix), '/');
+
+        // Se il valore è già runtime non prefissarlo due volte.
+        if ($hostPath === $prefix || strpos($hostPath, $prefix . '/') === 0) {
+            return $hostPath;
+        }
+
+        if ($hostPath === '/') {
+            return $prefix;
+        }
+
+        return $prefix . '/' . ltrim($hostPath, '/');
+    }
+
+    private function normalizeFsPath(string $path): string
+    {
+        return str_replace('\\', '/', $path);
+    }
+
+    private function pathIsInside(string $file, string $root): bool
+    {
+        $file = $this->normalizeFsPath($file);
+        $root = rtrim($this->normalizeFsPath($root), '/');
+
+        // Su Windows il filesystem normalmente non distingue maiuscole/minuscole.
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            $file = strtolower($file);
+            $root = strtolower($root);
+        }
+
+        if ($root === '') {
+            return false;
+        }
+
+        if ($root === '/') {
+            return strpos($file, '/') === 0;
+        }
+
+        return strpos($file, $root . '/') === 0;
     }
 
     // ----------------------------------------------------------
@@ -636,5 +821,3 @@ class MediaController
         exit;
     }
 }
-
-    // Aggiunto in fondo — vedere dispatch() per la route

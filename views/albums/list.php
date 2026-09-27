@@ -10,16 +10,78 @@ $advCount = count(array_filter([
   $filters['label_id'] ?? '',
   $filters['year'] ?? '',
 ]));
+
+// Vista corrente ('list' | 'grid'), risolta dal controller.
+$view = ($view ?? 'list') === 'grid' ? 'grid' : 'list';
+
+// Parametri comuni a tutti i link della pagina: filtri, ordinamento,
+// elementi per pagina e vista.
+$listParams = array_merge($filters, [
+  'route'    => 'albums/list',
+  'order'    => $order,
+  'dir'      => $dir,
+  'per_page' => $pagination['per_page'],
+  'view'     => $view,
+]);
+// Le due viste hanno opzioni "per pagina" diverse: passando all'altra
+// vista si riparte da pagina 1 con il valore predefinito di quella vista.
+$viewUrl = function (string $v) use ($listParams, $pagination, $view): string {
+  $params = array_merge($listParams, ['view' => $v, 'page' => $pagination['page']]);
+  if ($v !== $view) {
+    unset($params['per_page']);
+    $params['page'] = 1;
+  }
+  // La lista non ha una colonna "Data di aggiunta": tornando alla lista
+  // da quell'ordinamento si usa l'ordinamento predefinito per titolo.
+  if ($v === 'list' && $params['order'] === 'a.created_at') {
+    $params['order'] = 'a.title';
+    $params['dir']   = 'ASC';
+  }
+  return BASE_URL . '/index.php?' . http_build_query($params);
+};
+// Link di ordinamento: stessa regola delle intestazioni della lista
+// (clic sulla colonna attiva inverte la direzione, si riparte da pagina 1).
+// La data di aggiunta parte dal più recente (DESC); le altre colonne
+// partono da ASC come prima.
+$sortUrl = function (string $col) use ($listParams, $order, $dir): string {
+  $firstDir = $col === 'a.created_at' ? 'DESC' : 'ASC';
+  if ($order === $col) {
+    $nextDir = $dir === 'ASC' ? 'DESC' : 'ASC';
+  } else {
+    $nextDir = $firstDir;
+  }
+  return BASE_URL . '/index.php?' . http_build_query(array_merge($listParams, [
+    'order' => $col,
+    'dir'   => $nextDir,
+    'page'  => 1,
+  ]));
+};
 ?>
 
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h4 class="mb-0"><i class="bi bi-collection me-2"></i>Archivio
     <span class="badge bg-secondary ms-1"><?= $pagination['total'] ?></span>
   </h4>
-  <a href="<?= BASE_URL ?>/index.php?route=albums/create"
-    class="btn btn-sm btn-warning">
-    <i class="bi bi-plus-lg me-1"></i>Aggiungi
-  </a>
+  <div class="d-flex align-items-center gap-2">
+    <div class="grz-view-toggle" role="group" aria-label="Visualizzazione archivio">
+      <a href="<?= htmlspecialchars($viewUrl('list')) ?>"
+        class="grz-view-toggle__btn<?= $view === 'list' ? ' is-active' : '' ?>"
+        <?= $view === 'list' ? 'aria-current="true"' : '' ?>
+        title="Vista lista" aria-label="Vista lista">
+        <i class="bi bi-list-ul" aria-hidden="true"></i>
+      </a>
+      <a href="<?= htmlspecialchars($viewUrl('grid')) ?>"
+        class="grz-view-toggle__btn<?= $view === 'grid' ? ' is-active' : '' ?>"
+        <?= $view === 'grid' ? 'aria-current="true"' : '' ?>
+        title="Vista griglia" aria-label="Vista griglia">
+        <i class="bi bi-grid-3x3-gap" aria-hidden="true"></i>
+      </a>
+    </div>
+    <a href="<?= BASE_URL ?>/index.php?route=albums/create"
+      class="btn btn-sm btn-warning">
+      <i class="bi bi-plus-lg me-1"></i>Aggiungi
+    </a>
+  </div>
 </div>
 
 <!-- Filtri -->
@@ -30,6 +92,7 @@ $advCount = count(array_filter([
   <input type="hidden" name="per_page" value="<?= $pagination['per_page'] ?>">
   <input type="hidden" name="order" value="<?= $order ?>">
   <input type="hidden" name="dir" value="<?= $dir ?>">
+  <input type="hidden" name="view" value="<?= $view ?>">
 
   <div class="row g-2 align-items-end">
     <div class="col-12 col-md-3">
@@ -105,6 +168,8 @@ $advCount = count(array_filter([
   <div class="alert alert-info">Nessun disco trovato.</div>
 <?php else: ?>
 
+  <?php if ($view === 'list'): ?>
+
   <!-- Lista mobile: card compatte, tap sulla riga → dettaglio.
        Modifica ed eliminazione restano nel dropdown della scheda. -->
   <div class="m-card-list d-md-none shadow-sm">
@@ -115,7 +180,14 @@ $advCount = count(array_filter([
                     : BASE_URL . '/public/img/placeholder.png' ?>"
           class="m-card-cover" alt="" loading="lazy">
         <div class="m-card-body">
-          <div class="m-card-title"><?= htmlspecialchars($a['title']) ?></div>
+          <div class="m-card-title">
+            <?= htmlspecialchars($a['title']) ?>
+            <?php if (!empty($a['has_external_audio'])): ?>
+              <span class="text-muted ms-1 small" title="Libreria esterna" aria-label="Libreria esterna">
+                <i class="bi bi-folder-symlink" aria-hidden="true"></i>
+              </span>
+            <?php endif; ?>
+          </div>
           <div class="m-card-sub"><?= htmlspecialchars($a['artist_name']) ?></div>
           <div class="m-card-meta">
             <?php
@@ -153,6 +225,7 @@ $advCount = count(array_filter([
       <a class="grz-col-title" href="<?= BASE_URL ?>/index.php?<?= http_build_query(array_merge($filters, [
                                             'route' => 'albums/list',
                                             'order' => 'a.title',
+                                            'view'  => $view,
                                             'dir'   => ($order === 'a.title' && $dir === 'ASC') ? 'DESC' : 'ASC',
                                             'per_page' => $pagination['per_page'],
                                             'page' => 1
@@ -160,6 +233,7 @@ $advCount = count(array_filter([
       <a class="grz-col-artist" href="<?= BASE_URL ?>/index.php?<?= http_build_query(array_merge($filters, [
                                             'route' => 'albums/list',
                                             'order' => 'ar.name',
+                                            'view'  => $view,
                                             'dir'   => ($order === 'ar.name' && $dir === 'ASC') ? 'DESC' : 'ASC',
                                             'per_page' => $pagination['per_page'],
                                             'page' => 1
@@ -169,6 +243,7 @@ $advCount = count(array_filter([
       <a class="grz-col-year" href="<?= BASE_URL ?>/index.php?<?= http_build_query(array_merge($filters, [
                                             'route' => 'albums/list',
                                             'order' => 'a.year',
+                                            'view'  => $view,
                                             'dir'   => ($order === 'a.year' && $dir === 'ASC') ? 'DESC' : 'ASC',
                                             'per_page' => $pagination['per_page'],
                                             'page' => 1
@@ -207,6 +282,11 @@ $advCount = count(array_filter([
           </a>
           <?php if ((int)($a['copies'] ?? 1) > 1): ?>
             <span class="grz-ar-copies">×<?= (int)$a['copies'] ?></span>
+          <?php endif; ?>
+          <?php if (!empty($a['has_external_audio'])): ?>
+            <span class="text-muted ms-1 small" title="Libreria esterna" aria-label="Libreria esterna">
+              <i class="bi bi-folder-symlink" aria-hidden="true"></i>
+            </span>
           <?php endif; ?>
         </div>
 
@@ -267,6 +347,141 @@ $advCount = count(array_filter([
     <?php endforeach; ?>
   </div>
 
+  <?php else: ?>
+
+  <!-- Vista griglia: stessi album, stessa paginazione e stessi filtri
+       della lista; cambia solo la resa. Senza intestazioni di colonna,
+       l'ordinamento passa dalla barra qui sotto, che usa gli stessi
+       link delle intestazioni della lista. -->
+  <?php
+  $sortOptions = [
+    'a.title' => 'Titolo',
+    'ar.name' => 'Artista',
+    'a.year'  => 'Anno',
+    'a.created_at' => 'Data di aggiunta',
+  ];
+  ?>
+  <nav class="grz-archive-sortbar" aria-label="Ordinamento">
+    <span class="grz-archive-sortbar__label">Ordina per</span>
+    <?php foreach ($sortOptions as $col => $label):
+      $isActive = $order === $col;
+    ?>
+      <a href="<?= htmlspecialchars($sortUrl($col)) ?>"
+        class="grz-archive-sortbar__link<?= $isActive ? ' is-active' : '' ?>"
+        <?= $isActive ? 'aria-current="true"' : '' ?>>
+        <?= $label ?>
+        <?php if ($isActive): ?>
+          <i class="bi <?= $dir === 'ASC' ? 'bi-arrow-up' : 'bi-arrow-down' ?>" aria-hidden="true"></i>
+          <span class="visually-hidden"><?= $dir === 'ASC' ? '(crescente)' : '(decrescente)' ?></span>
+        <?php endif; ?>
+      </a>
+    <?php endforeach; ?>
+  </nav>
+
+  <!-- Il contenitore misura la larghezza disponibile (anche con la coda
+       di riproduzione aperta): le colonne sono 2, 3, 4, 6, 8 o 12,
+       divisori di 24, 48 e 96, così le righe sono sempre piene. -->
+  <div class="grz-archive-grid-wrap">
+  <ul class="grz-archive-grid">
+    <?php foreach ($albums as $a):
+      $tileFormats = !empty($a['formats'])
+        ? $a['formats']
+        : [['name' => $a['format_name']]];
+      $detailUrl = BASE_URL . '/index.php?route=albums/detail/' . (int)$a['id'];
+      // Stato audio: stessa regola della riga della lista.
+      $tileTotalTracks = (int)($a['track_count'] ?? 0);
+      $tileTracksAudio = (int)($a['tracks_with_audio_count'] ?? 0);
+      $tileHasAudio    = $tileTotalTracks > 0 && $tileTracksAudio >= $tileTotalTracks;
+      $tileAudioTitle  = $tileHasAudio
+        ? 'Tutte le tracce hanno audio'
+        : ($tileTracksAudio > 0
+            ? $tileTracksAudio . ' di ' . $tileTotalTracks . ' tracce con audio'
+            : 'Nessun file audio caricato');
+    ?>
+      <li class="grz-archive-tile">
+        <!-- Cover con gli stessi elementi sovrapposti della scheda in
+             Panoramica: formati in alto a destra, tracce in basso a
+             sinistra, libreria esterna in basso a destra. -->
+        <div class="grz-archive-tile__media">
+          <a href="<?= $detailUrl ?>" class="grz-archive-tile__cover" tabindex="-1" aria-hidden="true">
+            <img src="<?= $a['cover_local']
+                        ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
+                        : BASE_URL . '/public/img/placeholder.png' ?>"
+              alt="" loading="lazy" decoding="async" draggable="false">
+          </a>
+
+          <div class="grz-tile-badges">
+            <?php foreach ($tileFormats as $fmt): ?>
+              <span class="badge badge-format bg-<?= formatBadge($fmt['name']) ?>">
+                <?= htmlspecialchars($fmt['name']) ?>
+              </span>
+            <?php endforeach; ?>
+          </div>
+
+          <?php if ($tileTotalTracks > 0): ?>
+            <span class="grz-tile-tracks" title="<?= htmlspecialchars($tileAudioTitle) ?>">
+              <i class="bi <?= $tileHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?>" aria-hidden="true"></i><?= $tileTotalTracks ?>
+            </span>
+          <?php endif; ?>
+
+          <?php if (!empty($a['has_external_audio'])): ?>
+            <span class="position-absolute bottom-0 end-0 m-2 d-inline-flex align-items-center justify-content-center rounded-circle bg-dark bg-opacity-75 text-light"
+              style="width:24px;height:24px;font-size:.78rem;z-index:2;"
+              title="Libreria esterna" aria-label="Libreria esterna">
+              <i class="bi bi-folder-symlink" aria-hidden="true"></i>
+            </span>
+          <?php endif; ?>
+        </div>
+
+        <div class="grz-archive-tile__info">
+          <a href="<?= $detailUrl ?>" class="grz-archive-tile__title" title="<?= htmlspecialchars($a['title']) ?>">
+            <?= htmlspecialchars($a['title']) ?>
+          </a>
+          <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= (int)$a['artist_id'] ?>"
+            class="grz-archive-tile__artist">
+            <?= htmlspecialchars($a['artist_name']) ?>
+          </a>
+          <div class="grz-archive-tile__foot">
+            <span class="grz-archive-tile__year"><?= !empty($a['year']) ? (int)$a['year'] : '' ?></span>
+            <?php if ((int)($a['copies'] ?? 1) > 1): ?>
+              <span class="grz-ar-copies">×<?= (int)$a['copies'] ?></span>
+            <?php endif; ?>
+
+            <div class="grz-archive-tile__actions dropdown">
+              <button type="button" class="btn btn-xs grz-archive-tile__menu-btn"
+                data-bs-toggle="dropdown" aria-expanded="false"
+                title="Azioni" aria-label="Azioni per <?= htmlspecialchars($a['title']) ?>">
+                <i class="bi bi-three-dots-vertical" aria-hidden="true"></i>
+              </button>
+              <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+                <li>
+                  <a class="dropdown-item small" href="<?= $detailUrl ?>">
+                    <i class="bi bi-eye me-2 text-muted"></i>Dettaglio
+                  </a>
+                </li>
+                <li>
+                  <a class="dropdown-item small" href="<?= BASE_URL ?>/index.php?route=albums/edit/<?= (int)$a['id'] ?>">
+                    <i class="bi bi-pencil me-2 text-muted"></i>Modifica
+                  </a>
+                </li>
+                <li>
+                  <button type="button" class="dropdown-item small text-danger"
+                    data-bs-toggle="modal" data-bs-target="#deleteModal"
+                    data-id="<?= (int)$a['id'] ?>" data-title="<?= htmlspecialchars($a['title']) ?>">
+                    <i class="bi bi-trash me-2"></i>Elimina
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </li>
+    <?php endforeach; ?>
+  </ul>
+  </div>
+
+  <?php endif; ?>
+
   <!-- BARRA INFERIORE — sempre visibile -->
   <?php
   $currentPage = $pagination['page'];
@@ -276,6 +491,7 @@ $advCount = count(array_filter([
     'order'    => $order,
     'dir'      => $dir,
     'per_page' => $pagination['per_page'],
+    'view'     => $view,
   ]);
   ?>
   <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3 mt-3">
@@ -336,6 +552,7 @@ $advCount = count(array_filter([
       <input type="hidden" name="order" value="<?= $order ?>">
       <input type="hidden" name="dir" value="<?= $dir ?>">
       <input type="hidden" name="page" value="1">
+      <input type="hidden" name="view" value="<?= $view ?>">
 
       <label class="small text-muted mb-0">Mostra</label>
       <select name="per_page" class="form-select form-select-sm" style="width:auto" onchange="this.form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))">

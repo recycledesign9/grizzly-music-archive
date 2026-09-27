@@ -72,20 +72,52 @@ class PlaylistController
     // ----------------------------------------------------------
     private function index(): void
     {
+        // playable_sec: stessa regola della pagina di dettaglio, cioè
+        // somma delle durate delle sole tracce con file audio.
         $stmt = $this->db->query("
             SELECT
                 p.id,
                 p.name,
                 p.created_at,
                 COUNT(pt.id)                                        AS total_tracks,
-                SUM(CASE WHEN af.id IS NOT NULL THEN 1 ELSE 0 END) AS playable_tracks
+                SUM(CASE WHEN af.id IS NOT NULL THEN 1 ELSE 0 END) AS playable_tracks,
+                SUM(CASE WHEN af.id IS NOT NULL THEN COALESCE(t.duration_sec, 0) ELSE 0 END) AS playable_sec
             FROM playlists p
             LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+            LEFT JOIN tracks t           ON t.id          = pt.track_id
             LEFT JOIN audio_files af     ON af.track_id    = pt.track_id
             GROUP BY p.id, p.name, p.created_at
             ORDER BY p.created_at DESC
         ");
         $playlists = $stmt->fetchAll();
+
+        // Copertine per il mosaico: primi 4 album distinti di ogni
+        // playlist, nell'ordine in cui compaiono le tracce.
+        $coverRows = $this->db->query("
+            SELECT
+                pt.playlist_id,
+                al.id          AS album_id,
+                al.cover_local,
+                al.cover_url,
+                MIN(pt.position) AS first_pos
+            FROM playlist_tracks pt
+            JOIN tracks t  ON t.id  = pt.track_id
+            JOIN albums al ON al.id = t.album_id
+            GROUP BY pt.playlist_id, al.id, al.cover_local, al.cover_url
+            ORDER BY pt.playlist_id, first_pos
+        ")->fetchAll();
+
+        $playlistCovers = [];
+        foreach ($coverRows as $c) {
+            $pid = (int)$c['playlist_id'];
+            if (isset($playlistCovers[$pid]) && count($playlistCovers[$pid]) >= 4) {
+                continue;
+            }
+            $src = $this->coverSrc($c['cover_local'], $c['cover_url']);
+            if ($src !== null) {
+                $playlistCovers[$pid][] = $src;
+            }
+        }
 
         $pageTitle = 'Playlist';
         require BASE_PATH . '/views/playlists/list.php';
@@ -436,6 +468,21 @@ class PlaylistController
     // ----------------------------------------------------------
     // Helpers privati
     // ----------------------------------------------------------
+
+    /**
+     * URL della copertina di un album: locale > remota > nessuna.
+     * Stessa priorità usata nella view di dettaglio.
+     */
+    private function coverSrc(?string $local, ?string $url): ?string
+    {
+        if (!empty($local)) {
+            return BASE_URL . '/public/uploads/' . $local;
+        }
+        if (!empty($url)) {
+            return strpos($url, 'http') === 0 ? $url : BASE_URL . '/public/uploads/' . $url;
+        }
+        return null;
+    }
 
     /**
      * Recupera le tracce di una playlist con tutti i dati

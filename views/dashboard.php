@@ -11,7 +11,7 @@ $stats       = $albumModel->getStats();
 // 'formats' di ogni scheda, ordinata per aggiunta più recente.
 $recent      = $albumModel->getAll([], 'a.created_at', 'DESC', 24, 0);
 $topArtists  = $artistModel->getTopArtists(5);
-$pageTitle   = 'Dashboard';
+$pageTitle   = 'Panoramica';
 
 $db = Database::getInstance();
 $stmtPl = $db->query("
@@ -49,7 +49,12 @@ foreach ($fmtSegments as $s) {
   $fmtTotal += $s['count'];
 }
 ?>
-<div class="grz-statband">
+<!-- Involucro della dashboard: è il contenitore delle container query,
+     così il layout segue lo spazio reale (con o senza coda agganciata)
+     e non la larghezza della finestra. -->
+<div class="grz-dash">
+
+<div class="grz-statband" id="dashboard-statband">
   <div class="grz-statband__top">
     <div>
       <div class="grz-dash-hero__eyebrow">
@@ -96,7 +101,7 @@ foreach ($fmtSegments as $s) {
 
 <!-- MAIN GRID -->
 <div class="grz-dash-grid">
-  <div class="grz-dash-main">
+  <div class="grz-dash-main" id="dashboard-recent-panel">
     <div class="grz-section-header">
       <span class="grz-section-header__label">
         <i class="bi bi-clock-history"></i>Aggiunti di recente
@@ -136,10 +141,20 @@ foreach ($fmtSegments as $s) {
                           ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
                           : ($a['cover_url'] ? htmlspecialchars($a['cover_url']) : BASE_URL . '/public/img/placeholder.png') ?>"
                    alt="<?= htmlspecialchars($a['title']) ?>"
-                   loading="lazy">
+                   loading="lazy"
+                   decoding="async">
               <?php if ($tileTotalTracks > 0): ?>
                 <span class="grz-tile-tracks" title="<?= htmlspecialchars($tileAudioTitle) ?>">
                   <i class="bi <?= $tileHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?>"></i><?= $tileTotalTracks ?>
+                </span>
+              <?php endif; ?>
+
+              <?php if (!empty($a['has_external_audio'])): ?>
+                <span class="position-absolute bottom-0 end-0 m-2 d-inline-flex align-items-center justify-content-center rounded-circle bg-dark bg-opacity-75 text-light"
+                      style="width:24px;height:24px;font-size:.78rem;z-index:2;"
+                      title="Libreria esterna"
+                      aria-label="Libreria esterna">
+                  <i class="bi bi-folder-symlink" aria-hidden="true"></i>
                 </span>
               <?php endif; ?>
             </div>
@@ -174,7 +189,7 @@ foreach ($fmtSegments as $s) {
 
   <!-- SIDEBAR -->
   <div class="grz-dash-sidebar">
-    <div class="grz-dash-panel">
+    <div class="grz-dash-panel" id="dashboard-top-artists">
       <div class="grz-section-header grz-section-header--panel">
         <span class="grz-section-header__label">
           <i class="bi bi-bar-chart-fill"></i>Top artisti
@@ -253,6 +268,8 @@ foreach ($fmtSegments as $s) {
   </div>
 </div>
 
+</div><!-- /.grz-dash -->
+
 
 <script>
 (function () {
@@ -261,8 +278,15 @@ foreach ($fmtSegments as $s) {
 
   function syncDashboardPlaylistUI() {
     var audio    = getAudio();
-    var activeId = (typeof PlaylistPlayer !== 'undefined' && typeof PlaylistPlayer.activeId === 'function')
-      ? parseInt(PlaylistPlayer.activeId(), 10) : null;
+    // Playlist attiva: il contesto del Player è la fonte di verità;
+    // activeId() resta come ripiego per versioni senza context().
+    var activeId = null;
+    if (typeof Player !== 'undefined' && typeof Player.context === 'function') {
+      var ctx = Player.context();
+      activeId = ctx.indexOf('playlist:') === 0 ? parseInt(ctx.slice(9), 10) : null;
+    } else if (typeof PlaylistPlayer !== 'undefined' && typeof PlaylistPlayer.activeId === 'function') {
+      activeId = parseInt(PlaylistPlayer.activeId(), 10);
+    }
     var hasSource = !!(audio && audio.src);
     var isPlaying = !!(audio && audio.src && !audio.paused);
 
@@ -302,11 +326,9 @@ foreach ($fmtSegments as $s) {
   syncDashboardPlaylistUI();
   window.__syncPlaylistListUI = syncDashboardPlaylistUI;
 
-  /* ── Album grid: "Mostra altri" aggiunge una riga per volta.
-     Le colonne sono fisse via CSS (4 desktop, 3 tablet, 2 mobile).
-     Il JS mostra solo multipli esatti di 4/3/2 in base al breakpoint CSS corrente,
-     così le righe sono sempre complete senza misurare nulla. ── */
-  (function () {
+  /* ── Album grid: inizializzatore idempotente.
+     Viene richiamato anche dopo il refresh parziale della dashboard. ── */
+  window.__initDashboardGrid = function () {
     var grid     = document.getElementById('recent-albums-grid');
     var btn      = document.getElementById('btn-show-more-albums');
     var wrapMore = btn ? btn.closest('.grz-show-more') : null;
@@ -314,57 +336,111 @@ foreach ($fmtSegments as $s) {
 
     var cells = Array.prototype.slice.call(grid.querySelectorAll('.grz-album-cell'));
     var total = cells.length;
-
-    /* Persistenza dell'espansione "Mostra altri" tra le pagine:
-       tornando in dashboard la griglia resta espansa come lasciata. */
     var STORE_KEY = 'grzDashVisRows';
+
     function readStored() {
       try {
         var v = parseInt(sessionStorage.getItem(STORE_KEY), 10);
         return (v && v >= 2) ? v : 2;
       } catch (e) { return 2; }
     }
+
     function writeStored(v) {
       try { sessionStorage.setItem(STORE_KEY, String(v)); } catch (e) {}
     }
 
-    /* Legge le colonne CSS attuali dal computed style della griglia —
-       nessuna misura manuale, usa direttamente ciò che ha già calcolato il browser */
     function getCols() {
       var style = window.getComputedStyle(grid);
       var tpl   = style.getPropertyValue('grid-template-columns');
-      /* conta i valori separati da spazio: "Xpx Xpx Xpx" → 3 colonne */
       var parts = tpl.trim().split(/\s+/);
       return Math.max(1, parts.length);
     }
 
     var visRows = readStored();
+    var lastCols = 0;
+    var lastVisible = -1;
 
-    function render() {
+    function render(force) {
       var n       = getCols();
-      var visible = Math.min(visRows * n, total);
+      // Solo righe complete: con 24 album e 5 colonne l'ultima riga
+      // conterrebbe 4 schede e lascerebbe un buco. Il massimo mostrabile
+      // è quindi il multiplo di n più vicino per difetto (20); gli album
+      // restanti si raggiungono da "Tutto l'archivio". Se le colonne sono
+      // più degli album, si mostrano tutti.
+      var maxFull = total >= n ? Math.floor(total / n) * n : total;
+      var visible = Math.min(visRows * n, maxFull);
+
+      // Nessuna modifica DOM se la larghezza ha prodotto lo stesso numero
+      // di colonne e il numero di card visibili non è cambiato.
+      if (!force && n === lastCols && visible === lastVisible) {
+        return;
+      }
+
+      lastCols = n;
+      lastVisible = visible;
 
       cells.forEach(function (c, i) {
-        c.classList.toggle('d-none', i >= visible);
+        var shouldHide = i >= visible;
+        if (c.classList.contains('d-none') !== shouldHide) {
+          c.classList.toggle('d-none', shouldHide);
+        }
       });
 
       if (wrapMore) {
-        wrapMore.style.display = visible >= total ? 'none' : '';
+        var nextDisplay = visible >= maxFull ? 'none' : '';
+        if (wrapMore.style.display !== nextDisplay) {
+          wrapMore.style.display = nextDisplay;
+        }
       }
     }
 
     if (btn) {
-      btn.addEventListener('click', function () {
+      // onclick sostituisce un eventuale handler precedente: niente duplicati
+      // quando il pannello viene rigenerato dal live refresh.
+      btn.onclick = function () {
         visRows += 1;
         writeStored(visRows);
         render();
+      };
+    }
+
+    // Il vecchio window.resize poteva scattare ripetutamente durante lo
+    // scroll mobile (comparsa/scomparsa barra indirizzi), forzando ogni volta
+    // getComputedStyle + toggle su tutte le card. Osserviamo invece la sola
+    // larghezza reale della griglia e raggruppiamo gli aggiornamenti in rAF.
+    if (window.__grzDashResizeHandler) {
+      window.removeEventListener('resize', window.__grzDashResizeHandler);
+      window.__grzDashResizeHandler = null;
+    }
+    if (window.__grzDashResizeObserver) {
+      window.__grzDashResizeObserver.disconnect();
+      window.__grzDashResizeObserver = null;
+    }
+    if (window.__grzDashResizeRaf) {
+      cancelAnimationFrame(window.__grzDashResizeRaf);
+      window.__grzDashResizeRaf = 0;
+    }
+
+    function scheduleRender() {
+      if (window.__grzDashResizeRaf) return;
+      window.__grzDashResizeRaf = requestAnimationFrame(function () {
+        window.__grzDashResizeRaf = 0;
+        render(false);
       });
     }
 
-    window.addEventListener('resize', render);
+    if ('ResizeObserver' in window) {
+      window.__grzDashResizeObserver = new ResizeObserver(scheduleRender);
+      window.__grzDashResizeObserver.observe(grid);
+    } else {
+      window.__grzDashResizeHandler = scheduleRender;
+      window.addEventListener('resize', window.__grzDashResizeHandler);
+    }
 
-    render();
-  })();
+    render(true);
+  };
+
+  window.__initDashboardGrid();
 })();
 </script>
 

@@ -1,152 +1,122 @@
 <?php
 $pageTitle = 'Playlist';
 require BASE_PATH . '/views/layout/header.php';
+require_once BASE_PATH . '/views/playlists/_mosaic.php';
+
+/** @var array $playlists */
+/** @var array $playlistCovers  copertine per playlist (id => [url, ...]) */
+$playlistCovers = $playlistCovers ?? [];
+
+$plCount     = count($playlists);
+$trackCount  = 0;
+foreach ($playlists as $p) {
+  $trackCount += (int)$p['total_tracks'];
+}
 ?>
 
-<div class="d-flex justify-content-between align-items-center mb-4">
-  <div>
-    <h4 class="mb-0 fw-bold">
-      <i class="bi bi-collection-play me-2 text-warning"></i>Playlist
-    </h4>
-    <p class="text-muted small mb-0 mt-1">
-      <?= count($playlists) ?> <?= count($playlists) === 1 ? 'playlist' : 'playlist' ?> nel tuo archivio
-    </p>
-  </div>
-  <button class="btn btn-warning btn-sm px-3"
-    data-bs-toggle="modal" data-bs-target="#createPlaylistModal">
-    <i class="bi bi-plus-lg me-1"></i>Nuova playlist
-  </button>
-</div>
+<div class="grz-pl-page">
 
-<?php if (empty($playlists)): ?>
-  <div class="text-center py-5">
-    <div class="playlist-empty-icon mx-auto mb-4">
-      <i class="bi bi-collection-play"></i>
+  <div class="grz-pl-head">
+    <div>
+      <h1 class="grz-pl-head__title">Playlist</h1>
+      <p class="grz-pl-head__sub">
+        <?= $plCount ?> <?= $plCount === 1 ? 'playlist' : 'playlist' ?>
+        <?php if ($trackCount > 0): ?> · <?= $trackCount ?> <?= $trackCount === 1 ? 'traccia' : 'tracce' ?><?php endif; ?>
+      </p>
     </div>
-    <h5 class="fw-semibold mb-2">Nessuna playlist ancora</h5>
-    <p class="text-muted small mb-4">Crea la prima playlist e inizia a organizzare la tua musica.</p>
-    <button class="btn btn-warning px-4"
+    <button class="btn btn-warning grz-pl-head__new"
       data-bs-toggle="modal" data-bs-target="#createPlaylistModal">
-      <i class="bi bi-plus-lg me-1"></i>Crea la prima playlist
+      <i class="bi bi-plus-lg me-1" aria-hidden="true"></i>Nuova playlist
     </button>
   </div>
-<?php else: ?>
 
-  <div class="pl-list">
+  <?php if (empty($playlists)): ?>
+    <div class="grz-pl-empty">
+      <?= grzPlaylistMosaic([], 'grz-pl-empty__art') ?>
+      <h2>Nessuna playlist ancora</h2>
+      <p>Crea la prima playlist, poi aggiungi tracce o album interi dalla scheda di un disco.</p>
+      <button class="btn btn-warning"
+        data-bs-toggle="modal" data-bs-target="#createPlaylistModal">
+        <i class="bi bi-plus-lg me-1" aria-hidden="true"></i>Crea la prima playlist
+      </button>
+    </div>
+  <?php else: ?>
 
-    <!-- Intestazione colonne -->
-    <div class="pl-list-header">
-      <span class="pl-col-name">Nome</span>
-      <span class="pl-col-tracks d-none d-md-block">Tracce</span>
-      <span class="pl-col-audio d-none d-lg-block">Audio</span>
-      <span class="pl-col-date d-none d-lg-block">Creata</span>
-      <span class="pl-col-actions">Azioni</span>
+    <div class="grz-plgrid">
+      <?php foreach ($playlists as $pl):
+        $pid      = (int)$pl['id'];
+        $total    = (int)$pl['total_tracks'];
+        $playable = (int)$pl['playable_tracks'];
+        $pct      = $total > 0 ? (int)round(($playable / $total) * 100) : 0;
+        $isEmpty  = $total === 0;
+        $isFull   = $total > 0 && $playable === $total;
+        $durLabel = grzPlaylistDuration((int)($pl['playable_sec'] ?? 0));
+        $url      = BASE_URL . '/index.php?route=playlists/detail/' . $pid;
+      ?>
+        <!-- .pl-list-row / .pl-btn-play / .pl-row-name restano come
+             agganci dello script di sincronizzazione con il player -->
+        <article class="grz-plcard pl-list-row<?= $isFull ? ' is-complete' : '' ?><?= $isEmpty ? ' is-empty' : '' ?>" data-playlist-id="<?= $pid ?>">
+
+          <div class="grz-plcard__art">
+            <a href="<?= $url ?>" class="grz-plcard__cover" tabindex="-1" aria-hidden="true">
+              <?= grzPlaylistMosaic($playlistCovers[$pid] ?? []) ?>
+            </a>
+            <?php if ($playable > 0): ?>
+              <button class="pl-btn-play grz-plcard__play"
+                data-playlist-id="<?= $pid ?>"
+                onclick="PlaylistPlayer.load(<?= $pid ?>)"
+                title="Riproduci"
+                aria-label="Riproduci <?= htmlspecialchars($pl['name'], ENT_QUOTES) ?>">
+                <i class="bi bi-play-fill" aria-hidden="true"></i>
+              </button>
+            <?php endif; ?>
+          </div>
+
+          <div class="grz-plcard__body">
+            <a href="<?= $url ?>" class="pl-row-name grz-plcard__name" title="<?= htmlspecialchars($pl['name'], ENT_QUOTES) ?>"><?= htmlspecialchars($pl['name']) ?></a>
+
+            <div class="grz-plcard__meta">
+              <?php if ($isEmpty): ?>
+                Vuota
+              <?php else: ?>
+                <?= $total ?> <?= $total === 1 ? 'traccia' : 'tracce' ?><?php if ($durLabel): ?> · <?= $durLabel ?><?php endif; ?>
+              <?php endif; ?>
+            </div>
+
+            <?php if ($isEmpty): ?>
+              <p class="grz-plcard__hint mb-0">Aggiungi tracce o album interi dalla scheda di un disco.</p>
+            <?php endif; ?>
+
+            <?php if (!$isEmpty): ?>
+              <div class="grz-plcard__audio" title="<?= $playable ?> di <?= $total ?> tracce con file audio">
+                <div class="grz-plcard__bar">
+                  <div class="grz-plcard__fill<?= $isFull ? ' is-full' : '' ?>" style="width:<?= $pct ?>%"></div>
+                </div>
+                <span class="grz-plcard__audio-label">
+                  <?= $isFull ? 'Tutte con audio' : ($playable . ' di ' . $total . ' con audio') ?>
+                </span>
+              </div>
+            <?php endif; ?>
+
+            <div class="grz-plcard__foot">
+              <span class="grz-plcard__date">Creata il <?= date('d/m/Y', strtotime($pl['created_at'])) ?></span>
+              <button class="grz-plcard__delete btn-delete-playlist"
+                data-id="<?= $pid ?>"
+                data-name="<?= htmlspecialchars($pl['name'], ENT_QUOTES) ?>"
+                title="Elimina playlist"
+                aria-label="Elimina <?= htmlspecialchars($pl['name'], ENT_QUOTES) ?>">
+                <i class="bi bi-trash" aria-hidden="true"></i>
+              </button>
+            </div>
+          </div>
+
+        </article>
+      <?php endforeach; ?>
     </div>
 
-    <?php foreach ($playlists as $pl):
-      $total    = (int)$pl['total_tracks'];
-      $playable = (int)$pl['playable_tracks'];
-      $pct      = $total > 0 ? round(($playable / $total) * 100) : 0;
-      $isEmpty  = $total === 0;
-      $isFull   = $total > 0 && $playable === $total;
-      $isPartial = $total > 0 && $playable < $total;
-    ?>
-      <div class="pl-list-row<?= $isFull ? ' is-complete' : '' ?>" data-playlist-id="<?= (int)$pl['id'] ?>">
+  <?php endif; ?>
 
-        <!-- Icona stato + Nome -->
-        <div class="pl-col-name">
-          <span class="pl-row-icon <?= $isFull ? 'icon-full' : ($isPartial ? 'icon-partial' : 'icon-empty') ?>"
-            data-playlist-id="<?= (int)$pl['id'] ?>">
-            <i class="bi bi-collection-play-fill"></i>
-          </span>
-          <div class="pl-row-meta">
-            <a href="<?= BASE_URL ?>/index.php?route=playlists/detail/<?= $pl['id'] ?>"
-              class="pl-row-name">
-              <?= htmlspecialchars($pl['name']) ?>
-            </a>
-            <!-- Info compatta su mobile -->
-            <span class="pl-row-sub d-md-none">
-              <?php if ($isEmpty): ?>
-                <span class="text-muted">Vuota</span>
-              <?php elseif ($isFull): ?>
-                <span class="text-success"><?= $total ?> tracce</span>
-              <?php else: ?>
-                <span class="text-warning"><?= $playable ?>/<?= $total ?> con audio</span>
-              <?php endif; ?>
-            </span>
-          </div>
-        </div>
-
-        <!-- Tracce totali -->
-        <div class="pl-col-tracks d-none d-md-flex">
-          <?php if ($isEmpty): ?>
-            <span class="text-muted small">—</span>
-          <?php else: ?>
-            <span class="pl-badge-tracks"><?= $total ?></span>
-          <?php endif; ?>
-        </div>
-
-        <!-- Audio disponibile + barra -->
-        <div class="pl-col-audio d-none d-lg-flex">
-          <?php if ($isEmpty): ?>
-            <span class="text-muted small">—</span>
-          <?php elseif ($isFull): ?>
-            <div class="pl-audio-wrap">
-              <div class="pl-audio-bar">
-                <div class="pl-audio-fill fill-full" style="width:100%"></div>
-              </div>
-              <span class="pl-audio-label text-success">Tutte</span>
-            </div>
-          <?php else: ?>
-            <div class="pl-audio-wrap">
-              <div class="pl-audio-bar">
-                <div class="pl-audio-fill fill-partial" style="width:<?= $pct ?>%"></div>
-              </div>
-              <span class="pl-audio-label text-warning"><?= $pct ?>%</span>
-            </div>
-          <?php endif; ?>
-        </div>
-
-        <!-- Data creazione -->
-        <div class="pl-col-date d-none d-lg-flex">
-          <span class="text-muted small"><?= date('d/m/Y', strtotime($pl['created_at'])) ?></span>
-        </div>
-
-        <!-- Azioni -->
-        <div class="pl-col-actions">
-          <?php if ($playable > 0): ?>
-            <button class="pl-btn-play"
-              data-playlist-id="<?= (int)$pl['id'] ?>"
-              onclick="PlaylistPlayer.load(<?= $pl['id'] ?>)"
-              title="Riproduci">
-              <i class="bi bi-play-fill"></i>
-            </button>
-          <?php else: ?>
-            <button class="pl-btn-play" disabled title="Nessun audio disponibile">
-              <i class="bi bi-play-fill"></i>
-            </button>
-          <?php endif; ?>
-
-          <a href="<?= BASE_URL ?>/index.php?route=playlists/detail/<?= $pl['id'] ?>"
-            class="pl-btn-open" title="Apri playlist">
-            <i class="bi bi-arrow-right"></i>
-          </a>
-
-          <button class="pl-btn-delete btn-delete-playlist"
-            data-id="<?= $pl['id'] ?>"
-            data-name="<?= htmlspecialchars($pl['name'], ENT_QUOTES) ?>"
-            title="Elimina playlist">
-            <i class="bi bi-trash"></i>
-          </button>
-        </div>
-
-      </div>
-    <?php endforeach; ?>
-
-  </div>
-
-<?php endif; ?>
-
+</div>
 
 <!-- ===== Modal: Crea nuova playlist ===== -->
 <div class="modal fade" id="createPlaylistModal" tabindex="-1" aria-labelledby="createPlaylistLabel">
