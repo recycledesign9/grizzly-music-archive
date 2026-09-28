@@ -147,6 +147,8 @@ When Grizzly Music Archive is behind a reverse proxy such as Nginx Proxy Manager
 docker compose up -d --build
 ```
 
+Use `--build` for the first installation so the local Grizzly image is built before the worker starts. For normal restarts after the image already exists, `docker compose up -d` is enough.
+
 Docker will:
 
 1. Build the PHP + Apache image
@@ -155,7 +157,7 @@ Docker will:
 4. Automatically import the schema (`docker/db/01_schema.sql`) and demo data (`docker/db/02_seed.sql`)
 5. Serve the app at the address configured in `BASE_URL`
 
-> **First startup** takes ~30–60 s while MySQL initialises. The app container waits for the database health check before starting.
+> **First startup** can take several minutes because Docker must download the base images and build the Grizzly application image. On lower-power ARM systems such as a Raspberry Pi, the first build can take around 10 minutes or more. MySQL initialisation then adds its own startup time. Subsequent starts reuse the existing image and are much faster.
 
 ### 4 — Open the app
 
