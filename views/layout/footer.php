@@ -5,7 +5,7 @@
 <div id="sticky-player" class="sticky-player" style="display:none" aria-label="Player audio">
   <div class="sp-cover">
     <a id="sp-cover-link" href="#" title="Vai al disco">
-      <img id="sp-cover-img" src="" alt="Cover">
+      <img id="sp-cover-img" src="<?= BASE_URL ?>/public/img/placeholder.png" alt="Cover" onerror="this.onerror=null;this.src='<?= BASE_URL ?>/public/img/placeholder.png'">
     </a>
   </div>
   <div class="sp-meta">

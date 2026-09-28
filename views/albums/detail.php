@@ -31,7 +31,7 @@ foreach ($tracks as $t) {
 }
 $coverUrl = $album['cover_local']
   ? BASE_URL . '/public/uploads/' . $album['cover_local']
-  : BASE_URL . '/public/img/placeholder.png';
+  : ($album['cover_url'] ?: BASE_URL . '/public/img/placeholder.png');
 
 // Tracklist JSON per il bulk matcher (id, position, title, has_audio)
 $tracksJson = [];
@@ -206,7 +206,8 @@ $audioTitle = $albumHasAudio
         <div class="album-hero-cover-wrap">
           <img src="<?= htmlspecialchars($coverSrc) ?>"
             class="album-hero-cover"
-            alt="Cover <?= htmlspecialchars($album['title']) ?>">
+            alt="Cover <?= htmlspecialchars($album['title']) ?>"
+            onerror="this.onerror=null;this.src='<?= BASE_URL ?>/public/img/placeholder.png'">
         </div>
         <div class="album-hero-body">
 
@@ -999,9 +1000,20 @@ $audioTitle = $albumHasAudio
           ? data.suggestions
           : [];
 
-        // Nessuna delle due sezioni ha contenuto → nascondi il blocco.
+        // Nessuna delle due sezioni ha contenuto: il box resta visibile
+        // e spiega il motivo, senza allentare i criteri di raccomandazione.
         if (!items.length && !suggestions.length) {
-          block.style.display = 'none';
+          loading.style.display = 'none';
+          list.innerHTML = '';
+
+          var emptyMsg = document.createElement('div');
+          emptyMsg.className = 'small text-muted fst-italic py-1';
+          emptyMsg.textContent = (data && data.recommendations_status === 'lastfm_not_configured')
+            ? 'Nessun album affine trovato nell’archivio. Per ampliare i suggerimenti configura una chiave Last.fm nel file .env.'
+            : 'Nessun suggerimento sufficientemente coerente trovato per questo album.';
+
+          list.appendChild(emptyMsg);
+          list.style.display = '';
           return;
         }
 
@@ -1017,9 +1029,13 @@ $audioTitle = $albumHasAudio
 
           var img = document.createElement('img');
           img.className = 'album-rec-cover';
-          img.src = item.cover || '';
+          img.src = item.cover || '<?= BASE_URL ?>/public/img/placeholder.png';
           img.alt = '';
           img.loading = 'lazy';
+          img.onerror = function() {
+            this.onerror = null;
+            this.src = '<?= BASE_URL ?>/public/img/placeholder.png';
+          };
 
           var meta = document.createElement('span');
           meta.className = 'album-rec-meta';

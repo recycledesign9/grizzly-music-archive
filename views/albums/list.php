@@ -175,10 +175,13 @@ $sortUrl = function (string $col) use ($listParams, $order, $dir): string {
   <div class="m-card-list d-md-none shadow-sm">
     <?php foreach ($albums as $a): ?>
       <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>" class="m-card">
-        <img src="<?= $a['cover_local']
-                    ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
-                    : BASE_URL . '/public/img/placeholder.png' ?>"
-          class="m-card-cover" alt="" loading="lazy">
+        <img src="<?= !empty($a['cover_local'])
+                    ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'], ENT_QUOTES, 'UTF-8')
+                    : (!empty($a['cover_url'])
+                        ? htmlspecialchars($a['cover_url'], ENT_QUOTES, 'UTF-8')
+                        : BASE_URL . '/public/img/placeholder.png') ?>"
+          class="m-card-cover" alt="" loading="lazy"
+          onerror="this.onerror=null;this.src='<?= BASE_URL ?>/public/img/placeholder.png'">
         <div class="m-card-body">
           <div class="m-card-title">
             <?= htmlspecialchars($a['title']) ?>
@@ -270,10 +273,13 @@ $sortUrl = function (string $col) use ($listParams, $order, $dir): string {
       ?>
       <div class="grz-archive-row">
         <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $a['id'] ?>" class="grz-col-cover">
-          <img src="<?= $a['cover_local']
-                      ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
-                      : BASE_URL . '/public/img/placeholder.png' ?>"
-            alt="" loading="lazy" draggable="false">
+          <img src="<?= !empty($a['cover_local'])
+                      ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'], ENT_QUOTES, 'UTF-8')
+                      : (!empty($a['cover_url'])
+                          ? htmlspecialchars($a['cover_url'], ENT_QUOTES, 'UTF-8')
+                          : BASE_URL . '/public/img/placeholder.png') ?>"
+            alt="" loading="lazy" draggable="false"
+            onerror="this.onerror=null;this.src='<?= BASE_URL ?>/public/img/placeholder.png'">
         </a>
 
         <div class="grz-col-title">
@@ -404,10 +410,13 @@ $sortUrl = function (string $col) use ($listParams, $order, $dir): string {
              sinistra, libreria esterna in basso a destra. -->
         <div class="grz-archive-tile__media">
           <a href="<?= $detailUrl ?>" class="grz-archive-tile__cover" tabindex="-1" aria-hidden="true">
-            <img src="<?= $a['cover_local']
-                        ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'])
-                        : BASE_URL . '/public/img/placeholder.png' ?>"
-              alt="" loading="lazy" decoding="async" draggable="false">
+            <img src="<?= !empty($a['cover_local'])
+                        ? BASE_URL . '/public/uploads/' . htmlspecialchars($a['cover_local'], ENT_QUOTES, 'UTF-8')
+                        : (!empty($a['cover_url'])
+                            ? htmlspecialchars($a['cover_url'], ENT_QUOTES, 'UTF-8')
+                            : BASE_URL . '/public/img/placeholder.png') ?>"
+              alt="" loading="lazy" decoding="async" draggable="false"
+              onerror="this.onerror=null;this.src='<?= BASE_URL ?>/public/img/placeholder.png'">
           </a>
 
           <div class="grz-tile-badges">

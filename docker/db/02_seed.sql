@@ -63,18 +63,18 @@ INSERT INTO `artists` (`id`, `name`, `slug`, `bio`) VALUES
 
 -- ── Albums ───────────────────────────────────────────────────────────────────
 INSERT INTO `albums` (`id`, `artist_id`, `genre_id`, `label_id`, `format_id`, `title`, `slug`, `year`, `condition`, `copies`, `notes`, `cover_url`, `cover_local`, `mbid`) VALUES
-(1,  1, 1,  1, 1, 'Abbey Road',                  'abbey-road-1',                  1969, 'Very Good', 1, NULL, NULL, NULL, '1b022e01-4da6-387b-8658-8678046e4cef'),
-(2,  1, 1,  1, 1, 'Sgt. Pepper''s',              'sgt-peppers-2',                 1967, 'Very Good', 1, NULL, NULL, NULL, '3a6f54c4-2d3b-473a-85b4-f8d0b77f8a4e'),
-(3,  2, 12, 8, 1, 'The Rise and Fall of Ziggy Stardust', 'ziggy-stardust-3',      1972, 'Very Good', 1, NULL, NULL, NULL, 'b1572da5-e2c0-4e3a-85b4-e1d8b16e7f2a'),
-(4,  3, 2,  NULL, 1, 'The Dark Side of the Moon', 'dark-side-of-the-moon-4',      1973, 'Near Mint', 1, NULL, NULL, NULL, 'b4e8a4f2-1578-4ab6-b4c3-7f4b3d9b8c5a'),
-(5,  3, 2,  NULL, 1, 'Wish You Were Here',        'wish-you-were-here-5',         1975, 'Very Good', 1, NULL, NULL, NULL, 'a1c9a681-d2ac-4f46-8df0-4e8d9b1e5c3a'),
-(6,  4, 5,  3,  2, 'OK Computer',                 'ok-computer-6',                1997, 'Very Good', 1, NULL, NULL, NULL, 'b3b7a6a4-1e3b-4b5c-8d9e-2f1a6b4c8d7e'),
-(7,  4, 5,  3,  4, 'Kid A',                       'kid-a-7',                      2000, 'Very Good', 1, NULL, NULL, NULL, 'b2975dc4-db07-4b18-b928-1e34d5b9f3c2'),
-(8,  5, 17, 7,  1, 'Nevermind',                   'nevermind-8',                  1991, 'Very Good', 1, NULL, NULL, NULL, 'b52a8d00-f8d2-3e3e-9e3b-4c2d5b8a7f1c'),
-(9,  5, 17, 7,  2, 'In Utero',                    'in-utero-9',                   1993, 'Very Good', 1, NULL, NULL, NULL, 'a3b4c5d6-e7f8-9a0b-c1d2-e3f4a5b6c7d8'),
-(10, 6, 5,  6,  2, 'Daydream Nation',             'daydream-nation-10',           1988, 'Very Good', 1, NULL, NULL, NULL, '7c1e1ac4-3239-39d6-9986-55ca1bdeb1bf'),
-(11, 7, 5,  5,  2, 'Ten',                          'ten-11',                       1991, 'Very Good', 1, NULL, NULL, NULL, '9154cfe5-ef58-458f-b5d4-eb6ca3e404c4'),
-(12, 8, 7,  2,  1, 'AM',                           'am-12',                        2013, 'Mint',      1, NULL, NULL, NULL, '700950cf-5491-4349-87f8-5b85b40f0340');
+(1,  1, 1,  1, 1, 'Abbey Road',                  'abbey-road-1',                  1969, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/9162580e-5df4-32de-80cc-f45a8d8a9b1d/front-500', NULL, NULL),
+(2,  1, 1,  1, 1, 'Sgt. Pepper''s',              'sgt-peppers-2',                 1967, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/9f7a4c28-8fa2-3113-929c-c47a9f7982c3/front-500', NULL, NULL),
+(3,  2, 12, 8, 1, 'The Rise and Fall of Ziggy Stardust', 'ziggy-stardust-3',      1972, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/6c9ae3dd-32ad-472c-96be-69d0a3536261/front-500', NULL, NULL),
+(4,  3, 2,  NULL, 1, 'The Dark Side of the Moon', 'dark-side-of-the-moon-4',      1973, 'Near Mint', 1, NULL, 'https://coverartarchive.org/release-group/f5093c06-23e3-404f-aeaa-40f72885ee3a/front-500', NULL, NULL),
+(5,  3, 2,  NULL, 1, 'Wish You Were Here',        'wish-you-were-here-5',         1975, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/1a272023-10d3-38ee-bab3-317b55fcc21d/front-500', NULL, NULL),
+(6,  4, 5,  3,  2, 'OK Computer',                 'ok-computer-6',                1997, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/b1392450-e666-3926-a536-22c65f834433/front-500', NULL, NULL),
+(7,  4, 5,  3,  4, 'Kid A',                       'kid-a-7',                      2000, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/e75c0549-ad55-39e3-8025-c72c5d4a3c5d/front-500', NULL, NULL),
+(8,  5, 17, 7,  1, 'Nevermind',                   'nevermind-8',                  1991, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/1b022e01-4da6-387b-8658-8678046e4cef/front-500', NULL, NULL),
+(9,  5, 17, 7,  2, 'In Utero',                    'in-utero-9',                   1993, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/2a0981fb-9593-3019-864b-ce934d97a16e/front-500', NULL, NULL),
+(10, 6, 5,  6,  2, 'Daydream Nation',             'daydream-nation-10',           1988, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/24769a99-8189-3d8c-947e-dbc8574dad5c/front-500', NULL, NULL),
+(11, 7, 5,  5,  2, 'Ten',                          'ten-11',                       1991, 'Very Good', 1, NULL, 'https://coverartarchive.org/release-group/cea5d18a-1924-3cda-bebc-38933834b25d/front-500', NULL, NULL),
+(12, 8, 7,  2,  1, 'AM',                           'am-12',                        2013, 'Mint',      1, NULL, 'https://coverartarchive.org/release-group/a348ba2f-f8b3-4686-b928-e63d8d94d543/front-500', NULL, NULL);
 
 -- ── Album formats (bridge) ──────────────────────────────────────────────────
 -- One row per owned format; derived from the demo albums' primary format.

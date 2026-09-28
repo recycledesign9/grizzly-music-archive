@@ -1976,7 +1976,7 @@ class AlbumController
       // superano il timeout JS e fanno "sparire/ricaricare" il box. Qui
       // serviamo l'intero risultato già montato: 2a visita = millisecondi.
       // Il debug bypassa la cache (deve sempre rieseguire per diagnosticare).
-      $debugMode = (isset($_GET['debug']) && $_GET['debug'] === '1'); file_put_contents('/tmp/rec_timing.log', 'pre-cache: '.microtime(true)."\n", FILE_APPEND);
+      $debugMode = (isset($_GET['debug']) && $_GET['debug'] === '1');
 
       // La cache completa resta utile per non rifare l'orchestrazione lenta,
       // ma NON può vivere indipendentemente dall'archivio locale: contiene
@@ -2134,10 +2134,21 @@ class AlbumController
         ];
       }
 
+      // Stato esplicito solo per distinguere i risultati vuoti.
+      // La logica di ranking NON cambia: Album::getRecommendations() resta
+      // restrittiva e continua a usare il fallback locale solo sullo stesso genere.
+      $recommendationsStatus = 'ok';
+      if (empty($payload) && empty($suggestions)) {
+        $recommendationsStatus = (!defined('LASTFM_API_KEY') || trim((string)LASTFM_API_KEY) === '')
+          ? 'lastfm_not_configured'
+          : 'no_coherent_results';
+      }
+
       $responsePayload = array_filter([
-        'recommendations' => $payload,
-        'suggestions'     => $suggestions,
-        'debug'           => $debugPayload,
+        'recommendations'        => $payload,
+        'suggestions'            => $suggestions,
+        'recommendations_status' => $recommendationsStatus,
+        'debug'                  => $debugPayload,
       ], function ($value, $key) {
         return $key !== 'debug' || $value !== null;
       }, ARRAY_FILTER_USE_BOTH);

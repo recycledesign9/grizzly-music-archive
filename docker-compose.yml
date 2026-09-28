@@ -50,6 +50,7 @@ services:
   # Uses exactly the same application image as the web container.
   worker:
     image: grizzly-music-archive:latest
+    pull_policy: never
     command: ["php", "/var/www/html/media-scan-worker.php"]
     user: "www-data"
     init: true

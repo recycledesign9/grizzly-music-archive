@@ -45,9 +45,26 @@ if (!function_exists('asset_v')) {
 }
 ?>
 <!DOCTYPE html>
-<html lang="it" data-bs-theme="auto">
+<html lang="it" data-bs-theme="dark">
 
 <head>
+  <script>
+    // Tema effettivo PRIMA dei fogli di stile. I design token sono definiti
+    // solo per data-bs-theme="dark" e "light": un valore diverso (come il
+    // vecchio "auto") non attiva nessuno dei due blocchi e lascia navbar e
+    // sfondo senza colori. Scelta salvata dall'utente, altrimenti tema del
+    // sistema; non viene salvata, così il sistema resta seguito finché
+    // l'utente non sceglie. Senza JavaScript vale il "dark" dell'HTML.
+    (function() {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'dark' && t !== 'light') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches)
+          ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-bs-theme', t);
+    })();
+  </script>
   <meta http-equiv="Cache-Control" content="no-store">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -177,8 +194,14 @@ if (!function_exists('asset_v')) {
       // Imposta il tema, lo persiste e aggiorna le icone (usata dal click)
       function applyTheme(theme) {
         document.documentElement.setAttribute('data-bs-theme', theme);
-        localStorage.setItem('theme', theme);
+        try { localStorage.setItem('theme', theme); } catch (e) {}
         syncIcons(theme);
+      }
+
+      function storedThemeValue() {
+        var t = null;
+        try { t = localStorage.getItem('theme'); } catch (e) {}
+        return (t === 'dark' || t === 'light') ? t : null;
       }
 
       // Sincronizzazione all'avvio: applica il tema salvato in localStorage
@@ -187,11 +210,22 @@ if (!function_exists('asset_v')) {
       // refresh o una navigazione a pagina piena, l'attributo data-bs-theme
       // veniva ripristinato correttamente (da app.js) ma l'icona restava
       // quella di default nell'HTML, disallineata dal tema reale.
-      var storedTheme = localStorage.getItem('theme');
-      if (storedTheme) {
-        document.documentElement.setAttribute('data-bs-theme', storedTheme);
+      // L'attributo è già stato risolto dallo script nel <head>: qui si
+      // allineano solo le icone al tema effettivo.
+      syncIcons(document.documentElement.getAttribute('data-bs-theme'));
+
+      // Nessuna scelta salvata: se cambia il tema del sistema, Grizzly lo segue.
+      if (window.matchMedia) {
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var onSystemChange = function() {
+          if (storedThemeValue()) return;
+          var t = mq.matches ? 'dark' : 'light';
+          document.documentElement.setAttribute('data-bs-theme', t);
+          syncIcons(t);
+        };
+        if (mq.addEventListener) mq.addEventListener('change', onSystemChange);
+        else if (mq.addListener) mq.addListener(onSystemChange);
       }
-      syncIcons(storedTheme || document.documentElement.getAttribute('data-bs-theme'));
 
       ['darkToggle', 'darkToggleMobile'].forEach(function(id) {
         var btn = document.getElementById(id);
