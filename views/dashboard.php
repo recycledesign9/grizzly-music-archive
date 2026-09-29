@@ -112,7 +112,8 @@ foreach ($fmtSegments as $s) {
     </div>
 
     <!-- Tutte le celle presenti nell'HTML, visibilità gestita da JS -->
-    <div class="grz-album-grid" id="recent-albums-grid">
+    <div class="grz-album-grid" id="recent-albums-grid"
+      data-archive-total="<?= (int)($stats['total'] ?? 0) ?>">
       <?php foreach ($recent as $i => $a):
         // Tutti i formati posseduti della scheda (badge informativi:
         // la scheda è una sola), sovrapposti alla cover via CSS.
@@ -336,6 +337,10 @@ foreach ($fmtSegments as $s) {
 
     var cells = Array.prototype.slice.call(grid.querySelectorAll('.grz-album-cell'));
     var total = cells.length;
+    // Album nell'intero archivio: dice se le card caricate (massimo 24)
+    // sono TUTTI i dischi o solo i più recenti.
+    var archiveTotal = parseInt(grid.getAttribute('data-archive-total'), 10);
+    if (!archiveTotal || archiveTotal < total) archiveTotal = total;
     var STORE_KEY = 'grzDashVisRows';
 
     function readStored() {
@@ -362,12 +367,19 @@ foreach ($fmtSegments as $s) {
 
     function render(force) {
       var n       = getCols();
-      // Solo righe complete: con 24 album e 5 colonne l'ultima riga
-      // conterrebbe 4 schede e lascerebbe un buco. Il massimo mostrabile
-      // è quindi il multiplo di n più vicino per difetto (20); gli album
-      // restanti si raggiungono da "Tutto l'archivio". Se le colonne sono
-      // più degli album, si mostrano tutti.
-      var maxFull = total >= n ? Math.floor(total / n) * n : total;
+      // Tetto di card mostrabili.
+      //  - L'archivio contiene solo gli album caricati (fino a 24): si
+      //    possono mostrare tutti, e l'ultima riga può restare incompleta.
+      //    Nascondere uno di questi album lo renderebbe irraggiungibile
+      //    dalla dashboard (caso segnalato: 15 album, 6 colonne, ne
+      //    comparivano 12 senza "Mostra altri").
+      //  - L'archivio ha più album di quelli caricati: la sezione mostra
+      //    solo una parte degli arrivi recenti, quindi ci si ferma
+      //    all'ultima riga completa (con 24 album e 5 colonne, 20); il
+      //    resto si raggiunge da "Tutto l'archivio".
+      var maxFull = (archiveTotal > total && total >= n)
+        ? Math.floor(total / n) * n
+        : total;
       var visible = Math.min(visRows * n, maxFull);
 
       // Nessuna modifica DOM se la larghezza ha prodotto lo stesso numero
