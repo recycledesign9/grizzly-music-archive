@@ -483,14 +483,16 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
                 <?= htmlspecialchars($serviceUi['field_label'], ENT_QUOTES, 'UTF-8') ?>
               </label>
               <div class="input-group">
-                <input type="password"
+                <input type="text"
                   id="apiCredential-<?= htmlspecialchars($serviceKey, ENT_QUOTES, 'UTF-8') ?>"
                   class="form-control font-monospace api-credential-input"
                   placeholder="<?= htmlspecialchars($serviceUi['placeholder'], ENT_QUOTES, 'UTF-8') ?>"
-                  autocomplete="new-password"
+                  autocomplete="off"
+                  autocapitalize="none"
+                  autocorrect="off"
                   spellcheck="false">
-                <button type="button" class="btn btn-warning btn-save-api-credential">
-                  <i class="bi bi-floppy me-1" aria-hidden="true"></i>Salva
+                <button type="button" class="btn btn-outline-warning btn-save-api-credential">
+                  Salva
                 </button>
               </div>
 
