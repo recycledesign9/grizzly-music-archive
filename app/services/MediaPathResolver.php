@@ -148,9 +148,9 @@ class MediaPathResolver
 
         if ($count === 0) {
             return [
-                'ok'      => false,
+                'ok'      => true,
                 'path'    => $dir,
-                'message' => 'Nessun file audio trovato in: ' . $dir,
+                'message' => 'Cartella raggiungibile, nessun file audio presente.',
                 'count'   => 0,
             ];
         }

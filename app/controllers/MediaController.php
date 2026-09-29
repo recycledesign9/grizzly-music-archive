@@ -376,9 +376,9 @@ class MediaController
         $count = count($files);
         if ($count === 0) {
             echo json_encode([
-                'ok'      => false,
+                'ok'      => true,
                 'path'    => $path,
-                'message' => 'Nessun file audio trovato in: ' . $path,
+                'message' => 'OK — cartella raggiungibile, nessun file audio presente.',
                 'count'   => 0,
             ]);
             exit;
