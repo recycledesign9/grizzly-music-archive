@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/ExternalApiConfig.php';
+
 /**
  * YouTubeSearchService
  * ------------------------------------------------------------
@@ -82,7 +84,7 @@ class YouTubeSearchService
             'videoCategoryId' => '10',
             'maxResults'      => 5,
             'safeSearch'      => 'none',
-            'key'             => YOUTUBE_API_KEY,
+            'key'             => ExternalApiConfig::getYouTubeKey(),
         ]);
 
         $ctx = stream_context_create([

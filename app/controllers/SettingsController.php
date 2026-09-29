@@ -32,6 +32,12 @@ class SettingsController
             case 'toggle-media-scan':
                 $this->toggleMediaScan();
                 break;
+            case 'save-api-credential':
+                $this->saveApiCredential();
+                break;
+            case 'remove-api-credential':
+                $this->removeApiCredential();
+                break;
             case 'scanner-status':
                 $this->scannerStatus();
                 break;
@@ -113,6 +119,11 @@ class SettingsController
         $ignoredMediaSourcesCount = (int)$db
             ->query("SELECT COUNT(*) FROM media_scan_ignored")
             ->fetchColumn();
+
+        // Servizi esterni: stato effettivo con precedenza Settings DB ->
+        // configurazione server (.env/config.php) -> non configurato.
+        // Il resolver non espone mai le credenziali complete alla view.
+        $externalApiServices = ExternalApiConfig::getStatusAll();
 
         require BASE_PATH . '/views/settings.php';
     }
@@ -630,6 +641,155 @@ class SettingsController
             echo json_encode([
                 'ok' => false,
                 'message' => 'Errore durante il ripristino delle cartelle.'
+                    . (defined('DEBUG') && DEBUG ? ' ' . $e->getMessage() : '')
+            ]);
+            exit;
+        }
+    }
+
+    // ----------------------------------------------------------
+    // SERVIZI ESTERNI: salva/sostituisce una credenziale API.
+    // POST /index.php?route=settings/save-api-credential
+    //
+    // La credenziale viene salvata nella tabella settings e diventa
+    // immediatamente l'override prioritario rispetto a .env/config.php.
+    // ----------------------------------------------------------
+    private function saveApiCredential(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['ok' => false, 'message' => 'Metodo non consentito.']);
+            exit;
+        }
+
+        $sessionToken = (string)($_SESSION['csrf_token'] ?? '');
+        $postedToken  = (string)($_POST['csrf_token'] ?? '');
+
+        if ($sessionToken === '' || $postedToken === '' || !hash_equals($sessionToken, $postedToken)) {
+            http_response_code(403);
+            echo json_encode(['ok' => false, 'message' => 'Token CSRF non valido. Ricarica la pagina e riprova.']);
+            exit;
+        }
+
+        $service = strtolower(trim((string)($_POST['service'] ?? '')));
+        $value   = trim((string)($_POST['value'] ?? ''));
+
+        if (!ExternalApiConfig::isSupported($service)) {
+            http_response_code(422);
+            echo json_encode(['ok' => false, 'message' => 'Servizio esterno non valido.']);
+            exit;
+        }
+
+        if ($value === '') {
+            http_response_code(422);
+            echo json_encode(['ok' => false, 'message' => 'Inserisci una credenziale prima di salvarla.']);
+            exit;
+        }
+
+        // Le API key/token usate da Grizzly non contengono spazi o caratteri
+        // di controllo. Il limite evita anche input accidentalmente enormi.
+        if (strlen($value) > 1024 || preg_match('/\s/', $value)) {
+            http_response_code(422);
+            echo json_encode(['ok' => false, 'message' => 'La credenziale contiene caratteri non validi.']);
+            exit;
+        }
+
+        try {
+            $db = Database::getInstance();
+            $stmt = $db->prepare(
+                "INSERT INTO settings (`key`, `value`, `label`)
+                 VALUES (:key, :value, :label)
+                 ON DUPLICATE KEY UPDATE
+                    `value` = VALUES(`value`),
+                    `label` = VALUES(`label`)"
+            );
+            $stmt->execute([
+                ':key'   => ExternalApiConfig::getSettingKey($service),
+                ':value' => $value,
+                ':label' => ExternalApiConfig::getLabel($service),
+            ]);
+
+            ExternalApiConfig::clearRuntimeCache();
+            $status = ExternalApiConfig::getStatus($service);
+
+            echo json_encode([
+                'ok' => true,
+                'message' => 'Credenziale salvata. La nuova configurazione è attiva.',
+                'status' => $status,
+            ]);
+            exit;
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode([
+                'ok' => false,
+                'message' => 'Errore durante il salvataggio della credenziale.'
+                    . (defined('DEBUG') && DEBUG ? ' ' . $e->getMessage() : '')
+            ]);
+            exit;
+        }
+    }
+
+    // ----------------------------------------------------------
+    // SERVIZI ESTERNI: rimuove soltanto l'override salvato nel DB.
+    // POST /index.php?route=settings/remove-api-credential
+    //
+    // Se esiste una credenziale in .env/config.php, dopo la rimozione
+    // quella configurazione torna automaticamente ad essere effettiva.
+    // ----------------------------------------------------------
+    private function removeApiCredential(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['ok' => false, 'message' => 'Metodo non consentito.']);
+            exit;
+        }
+
+        $sessionToken = (string)($_SESSION['csrf_token'] ?? '');
+        $postedToken  = (string)($_POST['csrf_token'] ?? '');
+
+        if ($sessionToken === '' || $postedToken === '' || !hash_equals($sessionToken, $postedToken)) {
+            http_response_code(403);
+            echo json_encode(['ok' => false, 'message' => 'Token CSRF non valido. Ricarica la pagina e riprova.']);
+            exit;
+        }
+
+        $service = strtolower(trim((string)($_POST['service'] ?? '')));
+
+        if (!ExternalApiConfig::isSupported($service)) {
+            http_response_code(422);
+            echo json_encode(['ok' => false, 'message' => 'Servizio esterno non valido.']);
+            exit;
+        }
+
+        try {
+            $db = Database::getInstance();
+            $stmt = $db->prepare("DELETE FROM settings WHERE `key` = :key");
+            $stmt->execute([
+                ':key' => ExternalApiConfig::getSettingKey($service),
+            ]);
+
+            ExternalApiConfig::clearRuntimeCache();
+            $status = ExternalApiConfig::getStatus($service);
+
+            $message = $status['source'] === 'server'
+                ? 'Override rimosso. Resta attiva la credenziale configurata sul server.'
+                : 'Credenziale rimossa. Il servizio ora risulta non configurato.';
+
+            echo json_encode([
+                'ok' => true,
+                'message' => $message,
+                'status' => $status,
+            ]);
+            exit;
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode([
+                'ok' => false,
+                'message' => 'Errore durante la rimozione della credenziale.'
                     . (defined('DEBUG') && DEBUG ? ' ' . $e->getMessage() : '')
             ]);
             exit;

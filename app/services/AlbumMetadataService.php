@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/ExternalApiConfig.php';
+
 class AlbumMetadataService
 {
     private const MAX_TRACKS = 40;
@@ -758,7 +760,7 @@ class AlbumMetadataService
 
     private function searchDiscogs(string $artist, string $album, int $year = 0): array
     {
-        if (!defined('DISCOGS_TOKEN') || DISCOGS_TOKEN === '') return [];
+        if (ExternalApiConfig::getDiscogsToken() === '') return [];
 
         $url = 'https://api.discogs.com/database/search?type=release'
             . '&artist='        . urlencode($artist)
@@ -766,7 +768,7 @@ class AlbumMetadataService
             . ($year > 0 ? '&year=' . $year : '')
             . '&per_page=15';
 
-        $headers = ['Authorization: Discogs token=' . DISCOGS_TOKEN];
+        $headers = ['Authorization: Discogs token=' . ExternalApiConfig::getDiscogsToken()];
 
         $data = $this->httpGetJson($url, $headers);
 
@@ -943,10 +945,10 @@ class AlbumMetadataService
 
     private function getLastFmAlbumInfo(string $artist, string $album): array
     {
-        if (!defined('LASTFM_API_KEY') || LASTFM_API_KEY === '') return [];
+        if (ExternalApiConfig::getLastFmKey() === '') return [];
 
         $url = 'https://ws.audioscrobbler.com/2.0/?method=album.getinfo'
-            . '&api_key=' . LASTFM_API_KEY
+            . '&api_key=' . ExternalApiConfig::getLastFmKey()
             . '&artist=' . urlencode($artist)
             . '&album=' . urlencode($album)
             . '&format=json';

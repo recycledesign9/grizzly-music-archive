@@ -25,6 +25,7 @@ declare(strict_types=1);
 // — Bootstrap —————————————————————————————————————————————
 require_once dirname(__DIR__) . '/config/config.php';
 require_once dirname(__DIR__) . '/config/database.php';
+require_once dirname(__DIR__) . '/app/services/ExternalApiConfig.php';
 require_once dirname(__DIR__) . '/app/services/YouTubeSearchService.php';
 
 // Silenzia output sporco e setta header JSON
@@ -35,7 +36,7 @@ ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
 
 // — Valida API Key ————————————————————————————————————————
-if (!defined('YOUTUBE_API_KEY') || YOUTUBE_API_KEY === '') {
+if (ExternalApiConfig::getYouTubeKey() === '') {
     http_response_code(503);
     echo json_encode(['error' => 'YouTube API key non configurata.']);
     exit;

@@ -44,6 +44,7 @@ declare(strict_types=1);
 // — Bootstrap —————————————————————————————————————————————
 require_once dirname(__DIR__) . '/config/config.php';
 require_once dirname(__DIR__) . '/config/database.php';
+require_once dirname(__DIR__) . '/app/services/ExternalApiConfig.php';
 require_once dirname(__DIR__) . '/app/services/YouTubeSearchService.php';
 
 while (ob_get_level()) {
@@ -81,7 +82,7 @@ if (
     exit;
 }
 
-if (!defined('YOUTUBE_API_KEY') || YOUTUBE_API_KEY === '') {
+if (ExternalApiConfig::getYouTubeKey() === '') {
     http_response_code(503);
     echo json_encode(['success' => false, 'error' => 'YouTube API key non configurata.']);
     exit;

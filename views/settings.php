@@ -16,6 +16,32 @@ require BASE_PATH . '/views/layout/header.php';
 $defaultAudioPath = defined('AUDIO_PATH') ? AUDIO_PATH : BASE_PATH . '/public/uploads/audio';
 $ignoredCount     = (int)($ignoredMediaSourcesCount ?? 0);
 
+/** @var array $externalApiServices */
+$externalApiServices = is_array($externalApiServices ?? null) ? $externalApiServices : [];
+$externalApiUi = [
+  'lastfm' => [
+    'title' => 'Last.fm',
+    'description' => 'Metadati aggiuntivi e suggerimenti musicali quando le fonti principali non bastano.',
+    'field_label' => 'API key',
+    'placeholder' => 'Inserisci una nuova API key',
+    'help_url' => 'https://www.last.fm/api/account/create',
+  ],
+  'discogs' => [
+    'title' => 'Discogs',
+    'description' => 'Fallback per metadati, release e copertine.',
+    'field_label' => 'Personal access token',
+    'placeholder' => 'Inserisci un nuovo token',
+    'help_url' => 'https://www.discogs.com/settings/developers',
+  ],
+  'youtube' => [
+    'title' => 'YouTube Data API',
+    'description' => 'Ricerca e associazione dei video alle tracce. Le ricerche già risolte restano nella cache del database.',
+    'field_label' => 'API key',
+    'placeholder' => 'Inserisci una nuova API key',
+    'help_url' => 'https://console.cloud.google.com/apis/credentials',
+  ],
+];
+
 // Versione dell'applicazione: unica fonte è il file VERSION nella root del
 // repository, aggiornato a ogni release insieme al tag git.
 $appVersionFile = BASE_PATH . '/VERSION';
@@ -52,6 +78,7 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       <a href="#set-libreria" class="grz-settings__navlink is-active"><i class="bi bi-folder2-open" aria-hidden="true"></i>Libreria audio</a>
       <a href="#set-scansione" class="grz-settings__navlink"><i class="bi bi-radar" aria-hidden="true"></i>Scansione automatica</a>
       <a href="#set-manutenzione" class="grz-settings__navlink"><i class="bi bi-tools" aria-hidden="true"></i>Manutenzione</a>
+      <a href="#set-servizi-esterni" class="grz-settings__navlink"><i class="bi bi-key" aria-hidden="true"></i>Servizi esterni</a>
       <a href="#set-backup" class="grz-settings__navlink"><i class="bi bi-box-seam" aria-hidden="true"></i>Backup e ripristino</a>
       <a href="#set-info" class="grz-settings__navlink"><i class="bi bi-info-circle" aria-hidden="true"></i>Informazioni</a>
     </nav>
@@ -408,6 +435,83 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       </section>
 
       <!-- ============================================================
+           Servizi esterni
+      ============================================================ -->
+      <section class="grz-set" id="set-servizi-esterni" aria-labelledby="set-servizi-esterni-h">
+        <header class="grz-set__head">
+          <h2 id="set-servizi-esterni-h">Servizi esterni</h2>
+          <p>Configura le credenziali opzionali senza modificare <code>.env</code>. Le chiavi salvate qui hanno priorità sulla configurazione del server e diventano attive senza riavviare Grizzly.</p>
+        </header>
+
+        <?php foreach ($externalApiUi as $serviceKey => $serviceUi): ?>
+          <?php
+            $serviceStatus = $externalApiServices[$serviceKey] ?? [
+              'configured' => false,
+              'source' => 'none',
+              'masked' => '',
+            ];
+            $serviceSource = (string)($serviceStatus['source'] ?? 'none');
+            $serviceMasked = (string)($serviceStatus['masked'] ?? '');
+
+            if ($serviceSource === 'database') {
+              $badgeClass = 'bg-success';
+              $badgeText  = 'Configurato in Grizzly';
+            } elseif ($serviceSource === 'server') {
+              $badgeClass = 'bg-info text-dark';
+              $badgeText  = 'Configurato dal server';
+            } else {
+              $badgeClass = 'bg-secondary';
+              $badgeText  = 'Non configurato';
+            }
+          ?>
+          <div class="grz-set__row api-service-row" data-service="<?= htmlspecialchars($serviceKey, ENT_QUOTES, 'UTF-8') ?>">
+            <div class="grz-set__label">
+              <h3><?= htmlspecialchars($serviceUi['title'], ENT_QUOTES, 'UTF-8') ?></h3>
+              <p><?= htmlspecialchars($serviceUi['description'], ENT_QUOTES, 'UTF-8') ?></p>
+            </div>
+            <div class="grz-set__control">
+              <div class="grz-set__status api-credential-status mb-3">
+                <span class="badge <?= $badgeClass ?> api-credential-badge"><?= htmlspecialchars($badgeText, ENT_QUOTES, 'UTF-8') ?></span>
+                <?php if ($serviceSource === 'database' && $serviceMasked !== ''): ?>
+                  <span class="font-monospace small text-muted ms-2 api-credential-masked"><?= htmlspecialchars($serviceMasked, ENT_QUOTES, 'UTF-8') ?></span>
+                <?php else: ?>
+                  <span class="font-monospace small text-muted ms-2 api-credential-masked"></span>
+                <?php endif; ?>
+              </div>
+
+              <label class="form-label" for="apiCredential-<?= htmlspecialchars($serviceKey, ENT_QUOTES, 'UTF-8') ?>">
+                <?= htmlspecialchars($serviceUi['field_label'], ENT_QUOTES, 'UTF-8') ?>
+              </label>
+              <div class="input-group">
+                <input type="password"
+                  id="apiCredential-<?= htmlspecialchars($serviceKey, ENT_QUOTES, 'UTF-8') ?>"
+                  class="form-control font-monospace api-credential-input"
+                  placeholder="<?= htmlspecialchars($serviceUi['placeholder'], ENT_QUOTES, 'UTF-8') ?>"
+                  autocomplete="new-password"
+                  spellcheck="false">
+                <button type="button" class="btn btn-warning btn-save-api-credential">
+                  <i class="bi bi-floppy me-1" aria-hidden="true"></i>Salva
+                </button>
+              </div>
+
+              <div class="form-text">
+                Il valore completo non viene mai mostrato nella pagina.
+                <a href="<?= htmlspecialchars($serviceUi['help_url'], ENT_QUOTES, 'UTF-8') ?>" target="_blank" rel="noopener noreferrer">Ottieni la credenziale</a>
+              </div>
+
+              <div class="grz-set__actions">
+                <button type="button"
+                  class="btn btn-outline-danger btn-remove-api-credential <?= $serviceSource === 'database' ? '' : 'd-none' ?>">
+                  <i class="bi bi-trash3 me-1" aria-hidden="true"></i>Rimuovi override
+                </button>
+                <span class="small api-credential-result"></span>
+              </div>
+            </div>
+          </div>
+        <?php endforeach; ?>
+      </section>
+
+      <!-- ============================================================
            Backup e ripristino
       ============================================================ -->
       <section class="grz-set" id="set-backup" aria-labelledby="set-backup-h">
@@ -691,6 +795,128 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
             message: e.message
           });
         });
+    }
+
+    // ── Credenziali servizi esterni ───────────────────────────
+    function renderApiCredentialStatus(row, status) {
+      if (!row || !status) return;
+
+      var badge = row.querySelector('.api-credential-badge');
+      var masked = row.querySelector('.api-credential-masked');
+      var removeBtn = row.querySelector('.btn-remove-api-credential');
+      var source = status.source || 'none';
+
+      if (badge) {
+        badge.className = 'badge api-credential-badge ';
+        if (source === 'database') {
+          badge.className += 'bg-success';
+          badge.textContent = 'Configurato in Grizzly';
+        } else if (source === 'server') {
+          badge.className += 'bg-info text-dark';
+          badge.textContent = 'Configurato dal server';
+        } else {
+          badge.className += 'bg-secondary';
+          badge.textContent = 'Non configurato';
+        }
+      }
+
+      if (masked) {
+        masked.textContent = source === 'database' ? (status.masked || '') : '';
+      }
+
+      if (removeBtn) {
+        removeBtn.classList.toggle('d-none', source !== 'database');
+      }
+    }
+
+    var apiRows = document.querySelectorAll('.api-service-row');
+    for (var apiIndex = 0; apiIndex < apiRows.length; apiIndex++) {
+      (function(row) {
+        var service = row.getAttribute('data-service') || '';
+        var input = row.querySelector('.api-credential-input');
+        var saveBtn = row.querySelector('.btn-save-api-credential');
+        var removeBtn = row.querySelector('.btn-remove-api-credential');
+        var result = row.querySelector('.api-credential-result');
+
+        if (saveBtn) {
+          saveBtn.addEventListener('click', function() {
+            var value = input ? input.value.trim() : '';
+            if (!value) {
+              if (result) {
+                result.className = 'small api-credential-result text-danger';
+                result.textContent = 'Inserisci una credenziale prima di salvarla.';
+              }
+              return;
+            }
+
+            var originalHtml = saveBtn.innerHTML;
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Salvataggio…';
+            if (result) result.textContent = '';
+
+            postJSON(
+              BASE_URL + '/index.php?route=settings/save-api-credential',
+              { service: service, value: value },
+              function(data) {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = originalHtml;
+
+                if (!data.ok) {
+                  if (result) {
+                    result.className = 'small api-credential-result text-danger';
+                    result.textContent = data.message || 'Errore nel salvataggio.';
+                  }
+                  return;
+                }
+
+                if (input) input.value = '';
+                renderApiCredentialStatus(row, data.status || {});
+                if (result) {
+                  result.className = 'small api-credential-result text-success';
+                  result.textContent = data.message || 'Credenziale salvata.';
+                }
+              }
+            );
+          });
+        }
+
+        if (removeBtn) {
+          removeBtn.addEventListener('click', function() {
+            if (!confirm('Rimuovere la credenziale salvata in Grizzly? Se il server ne contiene già una, tornerà automaticamente attiva.')) {
+              return;
+            }
+
+            var originalHtml = removeBtn.innerHTML;
+            removeBtn.disabled = true;
+            removeBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Rimozione…';
+            if (result) result.textContent = '';
+
+            postJSON(
+              BASE_URL + '/index.php?route=settings/remove-api-credential',
+              { service: service },
+              function(data) {
+                removeBtn.disabled = false;
+                removeBtn.innerHTML = originalHtml;
+
+                if (!data.ok) {
+                  if (result) {
+                    result.className = 'small api-credential-result text-danger';
+                    result.textContent = data.message || 'Errore nella rimozione.';
+                  }
+                  return;
+                }
+
+                if (input) input.value = '';
+                renderApiCredentialStatus(row, data.status || {});
+                if (result) {
+                  result.className = 'small api-credential-result text-success';
+                  result.textContent = data.message || 'Credenziale rimossa.';
+                }
+              }
+            );
+          });
+        }
+      })(apiRows[apiIndex]);
     }
 
     // ── Scanner automatico libreria ─────────────────────────────

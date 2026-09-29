@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/ExternalApiConfig.php';
+
 /**
  * AlbumRecommendationService
  * ------------------------------------------------------------
@@ -24,7 +26,7 @@ class AlbumRecommendationService
     {
         $artistName = trim($artistName);
 
-        if ($artistName === '' || !defined('LASTFM_API_KEY') || LASTFM_API_KEY === '') {
+        if ($artistName === '' || ExternalApiConfig::getLastFmKey() === '') {
             return [];
         }
 
@@ -38,7 +40,7 @@ class AlbumRecommendationService
         $url = 'https://ws.audioscrobbler.com/2.0/'
             . '?method=artist.getsimilar'
             . '&artist=' . rawurlencode($artistName)
-            . '&api_key=' . rawurlencode(LASTFM_API_KEY)
+            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
             . '&format=json'
             . '&autocorrect=1'
             . '&limit=' . self::LASTFM_LIMIT;
@@ -113,7 +115,7 @@ class AlbumRecommendationService
         $albumTitle = trim($albumTitle);
 
         if ($artistName === '' || $albumTitle === ''
-            || !defined('LASTFM_API_KEY') || LASTFM_API_KEY === '') {
+            || ExternalApiConfig::getLastFmKey() === '') {
             return [];
         }
 
@@ -129,7 +131,7 @@ class AlbumRecommendationService
             . '?method=album.getinfo'
             . '&artist=' . rawurlencode($artistName)
             . '&album=' . rawurlencode($albumTitle)
-            . '&api_key=' . rawurlencode(LASTFM_API_KEY)
+            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
             . '&format=json&autocorrect=1';
 
         $resp = $this->httpGetJson($url);
@@ -182,7 +184,7 @@ class AlbumRecommendationService
     ): array {
         $artistName = trim($artistName);
         if ($artistName === '' || empty($trackTitles)
-            || !defined('LASTFM_API_KEY') || LASTFM_API_KEY === '') {
+            || ExternalApiConfig::getLastFmKey() === '') {
             return [];
         }
         $sampledTracks = $this->sampleSourceTracks($trackTitles, $sampleSize);
@@ -267,7 +269,7 @@ class AlbumRecommendationService
             . '?method=track.getsimilar'
             . '&artist=' . rawurlencode($artistName)
             . '&track=' . rawurlencode($trackTitle)
-            . '&api_key=' . rawurlencode(LASTFM_API_KEY)
+            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
             . '&format=json'
             . '&autocorrect=1'
             . '&limit=' . $limit;
@@ -517,7 +519,7 @@ class AlbumRecommendationService
             foreach ($pending as $key=>$row) {
                 $url='https://ws.audioscrobbler.com/2.0/?method=track.getinfo'
                     .'&artist='.rawurlencode($row['artist']).'&track='.rawurlencode($row['track'])
-                    .'&api_key='.rawurlencode(LASTFM_API_KEY).'&format=json&autocorrect=1';
+                    .'&api_key='.rawurlencode(ExternalApiConfig::getLastFmKey()).'&format=json&autocorrect=1';
                 $ch=curl_init($url);
                 curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_CONNECTTIMEOUT=>3,CURLOPT_TIMEOUT=>6,CURLOPT_USERAGENT=>$ua,CURLOPT_HTTPHEADER=>['Accept: application/json']]);
                 curl_multi_add_handle($mh,$ch); $handles[$key]=$ch;
@@ -550,7 +552,7 @@ class AlbumRecommendationService
         foreach ($pending as $key=>$row) {
             $url='https://ws.audioscrobbler.com/2.0/?method=track.getinfo'
                 .'&artist='.rawurlencode($row['artist']).'&track='.rawurlencode($row['track'])
-                .'&api_key='.rawurlencode(LASTFM_API_KEY).'&format=json&autocorrect=1';
+                .'&api_key='.rawurlencode(ExternalApiConfig::getLastFmKey()).'&format=json&autocorrect=1';
             $resp=$this->httpGetJson($url); $info=['album'=>'','cover'=>''];
             if ($resp['ok'] && empty($resp['data']['error'])) $info=$this->extractAlbumFromTrackInfo($resp['data']);
             // Fallback Deezer: album noto ma cover mancante.
@@ -730,7 +732,7 @@ class AlbumRecommendationService
         $tag = $this->normalizeArtistName($tag);
         $limit = max(10, min(100, $limit));
 
-        if ($tag === '' || !defined('LASTFM_API_KEY') || LASTFM_API_KEY === '') {
+        if ($tag === '' || ExternalApiConfig::getLastFmKey() === '') {
             return [];
         }
 
@@ -744,7 +746,7 @@ class AlbumRecommendationService
         $url = 'https://ws.audioscrobbler.com/2.0/'
             . '?method=tag.gettopalbums'
             . '&tag=' . rawurlencode($tag)
-            . '&api_key=' . rawurlencode(LASTFM_API_KEY)
+            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
             . '&format=json'
             . '&limit=' . $limit;
 
@@ -1245,7 +1247,7 @@ class AlbumRecommendationService
         string $sourceAlbum = '',
         int $limit = 5
     ): array {
-        if (empty($similar) || !defined('LASTFM_API_KEY') || LASTFM_API_KEY === '') {
+        if (empty($similar) || ExternalApiConfig::getLastFmKey() === '') {
             return [];
         }
 
@@ -1327,14 +1329,14 @@ class AlbumRecommendationService
     {
         $out = ['album' => '', 'cover' => ''];
 
-        if (!defined('LASTFM_API_KEY') || LASTFM_API_KEY === '') {
+        if (ExternalApiConfig::getLastFmKey() === '') {
             return $out;
         }
 
         $url = 'https://ws.audioscrobbler.com/2.0/'
             . '?method=artist.gettopalbums'
             . '&artist=' . rawurlencode($artistName)
-            . '&api_key=' . rawurlencode(LASTFM_API_KEY)
+            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
             . '&format=json&autocorrect=1&limit=1';
 
         $resp = $this->httpGetJson($url);

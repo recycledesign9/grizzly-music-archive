@@ -2139,7 +2139,7 @@ class AlbumController
       // restrittiva e continua a usare il fallback locale solo sullo stesso genere.
       $recommendationsStatus = 'ok';
       if (empty($payload) && empty($suggestions)) {
-        $recommendationsStatus = (!defined('LASTFM_API_KEY') || trim((string)LASTFM_API_KEY) === '')
+        $recommendationsStatus = ExternalApiConfig::getLastFmKey() === ''
           ? 'lastfm_not_configured'
           : 'no_coherent_results';
       }

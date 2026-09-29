@@ -72,7 +72,21 @@ class ArchiveTransfer
      * Non vengono esportate e, durante l'import, vengono preservate dalla
      * macchina di destinazione. media_scan_enabled viene sempre forzata a 0.
      */
-    private const SETTINGS_SKIP = ['audio_path', 'media_scan_path', 'media_scan_enabled'];
+    private const SETTINGS_SKIP = [
+        'audio_path',
+        'media_scan_path',
+        'media_scan_enabled',
+        'api_lastfm_key',
+        'api_discogs_token',
+        'api_youtube_key',
+    ];
+
+    /** Credenziali che non devono finire nemmeno nel backup JSON locale. */
+    private const SECRET_SETTINGS = [
+        'api_lastfm_key',
+        'api_discogs_token',
+        'api_youtube_key',
+    ];
 
     private PDO $db;
 
@@ -335,8 +349,11 @@ class ArchiveTransfer
     private function readLocalServerSettings(): array
     {
         $out = [
-            'audio_path'      => null,
-            'media_scan_path' => null,
+            'audio_path'        => null,
+            'media_scan_path'   => null,
+            'api_lastfm_key'    => null,
+            'api_discogs_token' => null,
+            'api_youtube_key'   => null,
         ];
 
         if (!$this->tableExists('settings')) {
@@ -346,7 +363,13 @@ class ArchiveTransfer
         $stmt = $this->db->prepare(
             "SELECT `key`, `value`
              FROM settings
-             WHERE `key` IN ('audio_path', 'media_scan_path')"
+             WHERE `key` IN (
+                 'audio_path',
+                 'media_scan_path',
+                 'api_lastfm_key',
+                 'api_discogs_token',
+                 'api_youtube_key'
+             )"
         );
         $stmt->execute();
 
@@ -623,6 +646,30 @@ class ArchiveTransfer
                 );
             }
 
+            if ($localServerSettings['api_lastfm_key'] !== null) {
+                $this->upsertSetting(
+                    'api_lastfm_key',
+                    (string)$localServerSettings['api_lastfm_key'],
+                    'Last.fm API key'
+                );
+            }
+
+            if ($localServerSettings['api_discogs_token'] !== null) {
+                $this->upsertSetting(
+                    'api_discogs_token',
+                    (string)$localServerSettings['api_discogs_token'],
+                    'Discogs personal access token'
+                );
+            }
+
+            if ($localServerSettings['api_youtube_key'] !== null) {
+                $this->upsertSetting(
+                    'api_youtube_key',
+                    (string)$localServerSettings['api_youtube_key'],
+                    'YouTube Data API key'
+                );
+            }
+
             // Dopo un import lo scanner resta SEMPRE spento. I riferimenti
             // @library/... vengono rimappati solo quando l'utente conferma
             // esplicitamente la nuova root salvando la configurazione scanner.
@@ -737,15 +784,25 @@ class ArchiveTransfer
     }
 
     /**
-     * Dump grezzo di una tabella per il backup pre-import
-     * (senza il filtro settings di dumpTable). Tabella assente → [].
+     * Dump grezzo di una tabella per il backup pre-import.
+     * Le credenziali API vengono escluse anche da questo backup locale
+     * di sicurezza; le altre settings mantengono il comportamento storico.
      */
     private function dumpTableRaw(string $table): array
     {
         if (!in_array($table, self::TABLES, true) || !$this->tableExists($table)) {
             return [];
         }
-        return $this->db->query("SELECT * FROM `$table`")->fetchAll(PDO::FETCH_ASSOC);
+
+        $rows = $this->db->query("SELECT * FROM `$table`")->fetchAll(PDO::FETCH_ASSOC);
+
+        if ($table === 'settings') {
+            $rows = array_values(array_filter($rows, function ($row) {
+                return !in_array((string)($row['key'] ?? ''), self::SECRET_SETTINGS, true);
+            }));
+        }
+
+        return $rows;
     }
 
     /**

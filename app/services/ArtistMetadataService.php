@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/ExternalApiConfig.php';
+
 /**
  * ArtistMetadataService
  * ------------------------------------------------------------
@@ -752,12 +754,14 @@ class ArtistMetadataService
 
     private function fetchLastFmBio(string $name, string $mbid = ''): array
     {
-        if (!defined('LASTFM_API_KEY') || LASTFM_API_KEY === '') {
+        $apiKey = ExternalApiConfig::getLastFmKey();
+
+        if ($apiKey === '') {
             return ['bio' => '', 'url' => ''];
         }
 
         $url = 'https://ws.audioscrobbler.com/2.0/?method=artist.getinfo'
-            . '&api_key=' . LASTFM_API_KEY
+            . '&api_key=' . $apiKey
             . '&format=json&lang=en';
 
         if ($mbid !== '') {
