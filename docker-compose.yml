@@ -27,6 +27,7 @@ services:
     ports:
       - "${APP_PORT:-8080}:80"
     environment: *app-env
+
     volumes:
       # Managed covers/audio uploaded by Grizzly.
       - uploads_data:/var/www/html/public/uploads
@@ -44,6 +45,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
     restart: unless-stopped
 
   # ── Watched-folder scanner worker ─────────────────────────────────────────
@@ -54,6 +56,7 @@ services:
     command: ["php", "/var/www/html/media-scan-worker.php"]
     user: "www-data"
     init: true
+
     environment:
       <<: *app-env
 
@@ -81,11 +84,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
     restart: unless-stopped
 
   # ── MySQL 8.0 database ────────────────────────────────────────────────────
   db:
     image: mysql:8.0
+
     environment:
       MYSQL_DATABASE:      ${DB_NAME:-grizzly_db}
       MYSQL_USER:          ${DB_USER:-grizzly}
@@ -101,11 +106,15 @@ services:
       - ./docker/db/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
 
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASS:-root_secret_change_me}"]
+      test:
+        [
+          "CMD-SHELL",
+          "mysql -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" -e 'SELECT 1' >/dev/null 2>&1"
+        ]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 12
+      start_period: 300s
 
     restart: unless-stopped
 
