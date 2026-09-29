@@ -8593,3 +8593,744 @@ html[data-bs-theme="light"] .grz-cover__empty .grz-vinyl {
     transition: none;
   }
 }
+
+/* ============================================================
+   PANORAMICA v2 — bande orizzontali (0.5.0)
+   Sostituisce griglia "Aggiunti di recente" e colonna laterale.
+   Le bande poggiano sul fondo pagina, senza riquadri: le card
+   restano solo per gli oggetti (dischi, playlist). Il contenitore
+   delle container query è .grz-dash (vedi sopra), quindi le misure
+   seguono lo spazio reale anche con la coda agganciata.
+   ============================================================ */
+.grz-dash--v2 .grz-band {
+  margin-top: 40px;
+}
+.grz-dash--v2 .grz-band__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.grz-dash--v2 .grz-band__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--grz-text-1);
+}
+.grz-dash--v2 .grz-band__title i {
+  font-size: 1rem;
+  color: var(--grz-amber);
+}
+.grz-dash--v2 .grz-band__tools {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.grz-dash--v2 .grz-band__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--grz-text-2);
+  text-decoration: none;
+}
+.grz-dash--v2 .grz-band__link:hover {
+  color: var(--grz-amber-dim);
+}
+.grz-dash--v2 .grz-band__note {
+  font-size: 0.82rem;
+  color: var(--grz-text-2);
+}
+.grz-dash--v2 .grz-band__empty {
+  padding: 28px 0;
+  color: var(--grz-text-2);
+}
+
+/* ── Testata: legenda formati e crescita sulla stessa riga ── */
+.grz-dash--v2 .grz-statband {
+  margin-bottom: 0;
+}
+.grz-dash--v2 .grz-statband__bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 24px;
+  flex-wrap: wrap;
+}
+.grz-growth {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+.grz-growth__text {
+  font-size: 0.82rem;
+  color: var(--grz-text-2);
+  white-space: nowrap;
+}
+.grz-growth__text strong {
+  color: var(--grz-text-1);
+  font-weight: 700;
+}
+.grz-growth__bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 28px;
+}
+.grz-growth__bar {
+  display: block;
+  width: 7px;
+  border-radius: 2px 2px 0 0;
+  background: var(--grz-text-2);
+  opacity: 0.35;
+}
+.grz-growth__bar.is-current {
+  background: var(--grz-accent);
+  opacity: 1;
+}
+
+/* ── File orizzontali ── */
+.grz-rail {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: thin;
+  /* spazio per il sollevamento delle schede al passaggio del mouse */
+  padding: 6px 2px 10px;
+  margin: -6px -2px 0;
+}
+.grz-rail__track {
+  display: flex;
+  gap: 14px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.grz-rail__item {
+  flex: 0 0 auto;
+  width: 172px;
+  scroll-snap-align: start;
+}
+@container grzdash (max-width: 599.98px) {
+  /* due schede e mezza: si capisce che la fila si scorre */
+  .grz-rail__item {
+    width: 40cqi;
+  }
+  .grz-rail__track {
+    gap: 10px;
+  }
+}
+@container grzdash (min-width: 1400px) {
+  .grz-rail__item {
+    width: 190px;
+  }
+}
+.grz-rail__nav {
+  display: flex;
+  gap: 6px;
+}
+.grz-rail__nav[hidden] {
+  display: none;
+}
+.grz-rail__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--grz-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--grz-text-1);
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+.grz-rail__btn:hover:not(:disabled) {
+  border-color: var(--grz-amber);
+  color: var(--grz-amber-dim);
+}
+.grz-rail__btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+/* Su schermi touch si scorre con il dito */
+@media (hover: none) {
+  .grz-rail__nav {
+    display: none;
+  }
+}
+
+/* Data di arrivo al posto dell'anno: è l'informazione della sezione */
+.grz-arrival {
+  margin-top: 2px;
+  font-family: var(--grz-font-data);
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--grz-amber-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Schede playlist ── */
+.grz-dpl {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--grz-text-1);
+  text-decoration: none;
+}
+.grz-dpl__art {
+  display: block;
+  border-radius: 10px;
+}
+.grz-dpl__art .grz-mosaic {
+  transition: box-shadow 0.15s ease;
+}
+.grz-dpl__art:hover .grz-mosaic {
+  box-shadow: var(--grz-shadow-hover);
+}
+.grz-dpl__media {
+  position: relative;
+}
+.grz-dpl__play {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--grz-accent);
+  color: var(--grz-on-accent);
+  font-size: 1.1rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.grz-dpl__play:hover {
+  background: var(--grz-accent-hover);
+}
+.grz-dpl__info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.grz-dpl__name {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--grz-text-1);
+  text-decoration: none;
+  word-break: break-word;
+}
+.grz-dpl__name:hover {
+  color: var(--grz-amber-dim);
+}
+.grz-dpl__meta {
+  font-size: 0.72rem;
+  color: var(--grz-text-2);
+}
+.grz-dpl__partial {
+  color: var(--grz-amber-dim);
+}
+.grz-dpl-item.is-player-playing .grz-mosaic,
+.grz-dpl-item.is-player-paused .grz-mosaic {
+  box-shadow: 0 0 0 2px var(--grz-accent);
+}
+.grz-dpl--new {
+  align-items: stretch;
+}
+.grz-dpl__newicon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1 / 1;
+  border: 1px dashed var(--grz-field-border, var(--grz-border));
+  border-radius: 10px;
+  font-size: 1.6rem;
+  color: var(--grz-text-2);
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+.grz-dpl--new:hover .grz-dpl__newicon {
+  border-color: var(--grz-amber);
+  color: var(--grz-amber-dim);
+}
+
+/* ── Generi ── */
+.grz-genres {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.grz-genre {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--grz-border);
+  border-radius: 999px;
+  background: var(--bs-body-bg);
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--grz-text-1);
+  text-decoration: none;
+  transition: border-color 0.15s ease;
+}
+.grz-genre:hover {
+  border-color: var(--grz-amber);
+  color: var(--grz-text-1);
+}
+.grz-genre__count {
+  font-family: var(--grz-font-data);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--grz-text-2);
+}
+
+/* ── Composizione: tre colonne separate da un filo, senza riquadri ── */
+.grz-comp {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 28px;
+}
+@container grzdash (max-width: 899.98px) {
+  .grz-comp {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .grz-comp__panel:first-child {
+    grid-column: 1 / -1;
+  }
+}
+@container grzdash (max-width: 559.98px) {
+  .grz-comp {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.grz-comp__panel {
+  padding-top: 12px;
+  border-top: 1px solid var(--grz-border);
+  min-width: 0;
+}
+.grz-comp__title {
+  margin: 0 0 12px;
+  font-family: var(--grz-font-ui);
+  font-size: 0.86rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--grz-text-2);
+}
+
+/* Decenni */
+.grz-decades {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  height: 140px;
+}
+.grz-decades__col {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: stretch;
+  min-width: 0;
+}
+.grz-decades__num {
+  font-family: var(--grz-font-data);
+  font-size: 0.68rem;
+  color: var(--grz-text-2);
+  text-align: center;
+  margin-bottom: 4px;
+}
+.grz-decades__bar {
+  display: block;
+  min-height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.14));
+  border-top: 2px solid var(--grz-accent);
+}
+.grz-decades__lbl {
+  margin-top: 6px;
+  font-family: var(--grz-font-data);
+  font-size: 0.68rem;
+  color: var(--grz-text-2);
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* Elenchi ordinati: artisti ed etichette */
+.grz-ranklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.grz-ranklist__row {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0 8px;
+  border-bottom: 1px solid var(--grz-border);
+  color: var(--grz-text-1);
+  text-decoration: none;
+}
+.grz-ranklist li:last-child .grz-ranklist__row {
+  border-bottom: none;
+}
+.grz-ranklist__row:hover .grz-ranklist__name {
+  color: var(--grz-amber-dim);
+}
+.grz-ranklist__name {
+  font-size: 0.88rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.grz-ranklist__count {
+  font-family: var(--grz-font-data);
+  font-size: 0.78rem;
+  color: var(--grz-text-2);
+  flex-shrink: 0;
+}
+.grz-ranklist__bar {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--grz-accent);
+  opacity: 0.55;
+}
+
+/* Archivio vuoto: due modi per cominciare */
+.grz-welcome__lead {
+  margin-bottom: 14px;
+  color: var(--grz-text-1);
+  font-weight: 600;
+}
+.grz-welcome__ways {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.grz-welcome__ways li {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 16px 18px;
+  border: 1px solid var(--grz-border);
+  border-radius: var(--grz-radius-lg);
+  background: var(--bs-body-bg);
+  font-size: 0.88rem;
+  color: var(--grz-text-2);
+}
+.grz-welcome__ways strong {
+  color: var(--grz-text-1);
+}
+
+/* ── Se ti piace: tre schede editoriali ── */
+.grz-likes__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+@container grzdash (max-width: 859.98px) {
+  .grz-likes__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.grz-band__title cite {
+  font-style: italic;
+}
+.grz-like {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 100%;
+  padding: 14px;
+  border: 1px solid var(--grz-border);
+  border-radius: var(--grz-radius-lg);
+  background: var(--bs-body-bg);
+  color: var(--grz-text-1);
+  text-decoration: none;
+  transition: border-color 0.15s ease;
+}
+.grz-like:hover {
+  border-color: var(--grz-amber);
+  color: var(--grz-text-1);
+}
+.grz-like__cover {
+  flex: 0 0 auto;
+  width: 96px;
+  height: 96px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--grz-surface-3);
+}
+.grz-like__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.grz-like__kicker {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--grz-amber-dim);
+}
+.grz-like__title {
+  font-family: var(--grz-font-title);
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.2;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.grz-like__artist {
+  font-size: 0.84rem;
+  color: var(--grz-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grz-like__year {
+  font-family: var(--grz-font-data);
+  font-size: 0.72rem;
+  color: var(--grz-text-2);
+}
+
+/* ── Dal tuo scaffale: disco del giorno e anniversari ── */
+.grz-shelf {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: 28px;
+  align-items: start;
+}
+.grz-shelf--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+@container grzdash (max-width: 899.98px) {
+  .grz-shelf {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+/* Disco del giorno: copertina grande, fondo ricavato dalla copertina
+   stessa (sfocata e scurita), come l'intestazione del profilo artista. */
+.grz-daypick {
+  position: relative;
+  display: flex;
+  gap: 24px;
+  padding: 22px;
+  border: 1px solid var(--grz-border);
+  border-radius: var(--grz-radius-lg);
+  overflow: hidden;
+  isolation: isolate;
+  background: var(--bs-body-bg);
+}
+.grz-daypick__bg {
+  position: absolute;
+  inset: -40px;
+  z-index: -1;
+  background-size: cover;
+  background-position: center;
+  filter: blur(40px) saturate(1.2);
+  opacity: 0.35;
+}
+.grz-daypick::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0) 0%, var(--bs-body-bg) 75%);
+  opacity: 0.85;
+}
+.grz-daypick__cover {
+  flex: 0 0 auto;
+  width: 200px;
+  aspect-ratio: 1 / 1;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.grz-daypick__cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.grz-daypick__body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+.grz-daypick__kicker {
+  margin: 0 0 4px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--grz-amber-dim);
+}
+.grz-daypick__title {
+  margin: 0;
+  font-size: 1.6rem;
+  font-weight: 800;
+  line-height: 1.15;
+}
+.grz-daypick__title a {
+  color: var(--grz-text-1);
+  text-decoration: none;
+}
+.grz-daypick__title a:hover {
+  color: var(--grz-amber-dim);
+}
+.grz-daypick__artist {
+  margin-top: 2px;
+  font-size: 0.95rem;
+  color: var(--grz-text-2);
+  text-decoration: none;
+}
+.grz-daypick__artist:hover {
+  color: var(--grz-text-1);
+  text-decoration: underline;
+}
+.grz-daypick__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+  margin: 16px 0 0;
+}
+.grz-daypick__facts div {
+  display: flex;
+  flex-direction: column;
+}
+.grz-daypick__facts dt {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--grz-text-2);
+}
+.grz-daypick__facts dd {
+  margin: 0;
+  font-family: var(--grz-font-data);
+  font-size: 0.86rem;
+  color: var(--grz-text-1);
+}
+.grz-daypick__notes {
+  margin: 14px 0 0;
+  max-width: 60ch;
+  font-size: 0.86rem;
+  font-style: italic;
+  color: var(--grz-text-2);
+}
+.grz-daypick__cta {
+  margin-top: 18px;
+}
+@container grzdash (max-width: 559.98px) {
+  .grz-daypick {
+    flex-direction: column;
+    gap: 16px;
+    padding: 16px;
+  }
+  .grz-daypick__cover {
+    width: 100%;
+  }
+  .grz-daypick::after {
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0) 0%, var(--bs-body-bg) 60%);
+  }
+}
+
+/* Anniversari */
+.grz-anniv {
+  padding-top: 12px;
+  border-top: 1px solid var(--grz-border);
+}
+.grz-anniv__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.grz-anniv__row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--grz-border);
+  color: var(--grz-text-1);
+  text-decoration: none;
+}
+.grz-anniv__list li:last-child .grz-anniv__row {
+  border-bottom: none;
+}
+.grz-anniv__row:hover .grz-anniv__title {
+  color: var(--grz-amber-dim);
+}
+.grz-anniv__age {
+  flex: 0 0 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: var(--grz-font-title);
+  font-size: 1.35rem;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--grz-amber-dim);
+}
+.grz-anniv__age small {
+  margin-top: 2px;
+  font-family: var(--grz-font-ui);
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--grz-text-2);
+}
+.grz-anniv__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.grz-anniv__title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grz-anniv__meta {
+  font-size: 0.78rem;
+  color: var(--grz-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
