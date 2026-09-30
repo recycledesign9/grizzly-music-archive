@@ -35,7 +35,7 @@ $hasComposition = !empty($decades) || !empty($topArtists) || !empty($labels);
 
 // Sezioni editoriali: disco del giorno e anniversari di uscita.
 $dayPick     = $isEmptyArchive ? null : $dash->albumOfTheDay();
-$anniv       = $isEmptyArchive ? [] : $dash->anniversaries(6);
+$anniv       = $isEmptyArchive ? [] : $dash->anniversaries(40);
 $latest      = $arrivals[0] ?? null;
 
 $fmtSegments = [
@@ -49,7 +49,6 @@ foreach ($fmtSegments as $s) {
   $fmtTotal += $s['count'];
 }
 
-$growthMax      = max(1, max(array_column($growth, 'count') ?: [0]));
 $growthThisMonth = (int)($growth[count($growth) - 1]['count'] ?? 0);
 $decadeMax      = max(1, max(array_column($decades, 'count') ?: [0]));
 $labelMax       = max(1, (int)($labels[0]['count'] ?? 0));
@@ -119,24 +118,16 @@ require BASE_PATH . '/views/layout/header.php';
     <?php endif; ?>
 
     <?php if (!$isEmptyArchive): ?>
-    <!-- Crescita: dischi arrivati mese per mese negli ultimi 12 mesi. -->
-    <div class="grz-growth" role="img"
-      aria-label="Arrivi negli ultimi 12 mesi: <?= htmlspecialchars(implode(', ', array_map(function ($m) { return $m['label'] . ' ' . $m['count']; }, $growth))) ?>">
+    <!-- Crescita: solo il dato del mese corrente, in forma testuale.
+         Il grafico mensile è stato tolto: accanto ad "Aggiungi" competeva
+         con il pulsante principale della testata. -->
+    <div class="grz-growth">
       <span class="grz-growth__text">
         <?php if ($growthThisMonth > 0): ?>
           <strong>+<?= $growthThisMonth ?></strong> <?= $growthThisMonth === 1 ? 'disco' : 'dischi' ?> questo mese
         <?php else: ?>
           Nessun arrivo questo mese
         <?php endif; ?>
-      </span>
-      <span class="grz-growth__bars" aria-hidden="true">
-        <?php foreach ($growth as $i => $m):
-          $h = $m['count'] > 0 ? max(12, (int)round($m['count'] / $growthMax * 100)) : 4;
-        ?>
-          <span class="grz-growth__bar<?= $i === count($growth) - 1 ? ' is-current' : '' ?>"
-            style="height: <?= $h ?>%"
-            title="<?= htmlspecialchars($m['label']) ?>: <?= $m['count'] ?>"></span>
-        <?php endforeach; ?>
       </span>
     </div>
     <?php endif; ?>
@@ -372,7 +363,7 @@ require BASE_PATH . '/views/layout/header.php';
           <?php if ((int)($dayPick['track_count'] ?? 0) > 0): ?>
             <div><dt>Tracce</dt><dd><?= (int)$dayPick['track_count'] ?></dd></div>
           <?php endif; ?>
-          <div><dt>Arrivato</dt><dd><?= htmlspecialchars(grzArrivalLabel((string)$dayPick['created_at'])) ?></dd></div>
+          <div><dt>Caricato</dt><dd><?= htmlspecialchars(grzArrivalLabel((string)$dayPick['created_at'])) ?></dd></div>
         </dl>
         <?php if (!empty($dayPick['notes'])): ?>
           <p class="grz-daypick__notes"><?= htmlspecialchars(mb_strimwidth((string)$dayPick['notes'], 0, 180, '…', 'UTF-8')) ?></p>
@@ -384,9 +375,20 @@ require BASE_PATH . '/views/layout/header.php';
     </article>
 
     <?php if (!empty($anniv)): ?>
+    <!-- Alto quanto la card del Disco del giorno: se i dischi sono di
+         più, l'elenco si scorre all'interno (rotella, dito o frecce). -->
     <div class="grz-anniv" aria-labelledby="dash-anniv-title">
-      <h3 class="grz-comp__title" id="dash-anniv-title">Compiono gli anni nel <?= date('Y') ?></h3>
-      <ol class="grz-anniv__list">
+      <div class="grz-anniv__head">
+        <h3 class="grz-comp__title" id="dash-anniv-title">
+          Compiono gli anni nel <?= date('Y') ?>
+          <span class="grz-anniv__count"><?= count($anniv) ?></span>
+        </h3>
+        <div class="grz-rail__nav" data-anniv-nav hidden>
+          <button type="button" class="grz-rail__btn" data-dir="-1" aria-label="Anniversari: scorri su"><i class="bi bi-chevron-up" aria-hidden="true"></i></button>
+          <button type="button" class="grz-rail__btn" data-dir="1" aria-label="Anniversari: scorri giù"><i class="bi bi-chevron-down" aria-hidden="true"></i></button>
+        </div>
+      </div>
+      <ol class="grz-anniv__list" data-anniv-list tabindex="0" aria-label="Elenco degli anniversari">
         <?php foreach ($anniv as $an): ?>
           <li>
             <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= $an['id'] ?>" class="grz-anniv__row">
@@ -435,7 +437,7 @@ require BASE_PATH . '/views/layout/header.php';
 <section class="grz-band" aria-labelledby="dash-comp-title">
   <header class="grz-band__head">
     <h2 class="grz-band__title" id="dash-comp-title">
-      <i class="bi bi-bar-chart" aria-hidden="true"></i>Composizione
+      <i class="bi bi-bar-chart" aria-hidden="true"></i>Statistiche
     </h2>
   </header>
 
@@ -663,9 +665,51 @@ require BASE_PATH . '/views/layout/header.php';
 
   var BASE_URL_DASH = <?= json_encode(BASE_URL, JSON_HEX_TAG | JSON_UNESCAPED_SLASHES) ?>;
 
+  /* ── Anniversari: scorrimento verticale dentro la colonna ──
+     Frecce su/giù visibili solo se l'elenco trabocca; la dissolvenza in
+     basso segnala che ci sono altri dischi. Idempotente. */
+  function initAnniv() {
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    document.querySelectorAll('[data-anniv-list]').forEach(function (list) {
+      if (list.dataset.annivBound === '1') return;
+      list.dataset.annivBound = '1';
+      var box  = list.closest('.grz-anniv');
+      var nav  = box ? box.querySelector('[data-anniv-nav]') : null;
+      var up   = nav ? nav.querySelector('[data-dir="-1"]') : null;
+      var down = nav ? nav.querySelector('[data-dir="1"]') : null;
+
+      function update() {
+        var max = list.scrollHeight - list.clientHeight;
+        var overflow = max > 2;
+        if (nav) nav.hidden = !overflow;
+        if (up) up.disabled = list.scrollTop <= 2;
+        if (down) down.disabled = list.scrollTop >= max - 2;
+        list.classList.toggle('has-more', overflow && list.scrollTop < max - 2);
+      }
+
+      [up, down].forEach(function (btn) {
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+          var dir = parseInt(btn.dataset.dir, 10);
+          list.scrollBy({ top: dir * list.clientHeight * 0.8, behavior: reduce ? 'auto' : 'smooth' });
+        });
+      });
+      list.addEventListener('scroll', function () {
+        if (list.__raf) return;
+        list.__raf = requestAnimationFrame(function () { list.__raf = 0; update(); });
+      }, { passive: true });
+      if ('ResizeObserver' in window) {
+        new ResizeObserver(update).observe(list);
+      } else {
+        window.addEventListener('resize', update);
+      }
+      update();
+    });
+  }
+
   // app.js richiama __initDashboardGrid dopo il refresh live: riaggancia
   // le frecce delle file e ricarica i suggerimenti del nuovo blocco.
-  window.__initDashboardGrid = function () { initRails(); initLikes(); };
+  window.__initDashboardGrid = function () { initRails(); initLikes(); initAnniv(); };
   window.__initDashboardGrid();
 })();
 </script>

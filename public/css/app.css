@@ -9334,3 +9334,68 @@ html[data-bs-theme="light"] .grz-cover__empty .grz-vinyl {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── Revisione Panoramica: testata e anniversari ──
+   - Crescita solo testuale (niente barre accanto ad "Aggiungi").
+   - La colonna "Compiono gli anni" è alta quanto la card del Disco del
+     giorno: l'elenco ha base 0 e non contribuisce all'altezza della riga,
+     quindi riempie lo spazio lasciato dalla card e scorre al suo interno. */
+.grz-dash--v2 .grz-growth__text strong {
+  color: var(--grz-amber-dim);
+}
+.grz-shelf {
+  align-items: stretch;
+}
+.grz-anniv {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.grz-anniv__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.grz-anniv__head .grz-comp__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.grz-anniv__count {
+  font-family: var(--grz-font-data);
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 1px 7px;
+  border: 1px solid var(--grz-border);
+  border-radius: 999px;
+  color: var(--grz-text-2);
+}
+.grz-anniv__list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-snap-type: y proximity;
+  scrollbar-width: thin;
+}
+.grz-anniv__list:focus-visible {
+  outline: 2px solid var(--grz-accent);
+  outline-offset: 2px;
+}
+.grz-anniv__list li {
+  scroll-snap-align: start;
+}
+.grz-anniv__list.has-more {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent);
+}
+/* Una colonna sola: la card non è più accanto, altezza fissa. */
+@container grzdash (max-width: 899.98px) {
+  .grz-anniv__list {
+    flex: none;
+    max-height: 340px;
+  }
+}
