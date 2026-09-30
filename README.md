@@ -26,13 +26,14 @@
 - **Playlists** — create playlists, drag-and-drop reorder (SortableJS)
 - **Advanced search** — by artist, title, format, genre, year, label
 - **Artist page** — all albums linked to a single artist
-- **Dashboard** — collection statistics (total by format, recent additions)
+- **Collection overview** — redesigned dashboard with recent arrivals, collection-aware suggestions, playlists, shelf picks, genre breakdown and format composition
 - **Dark mode** support
 - **Relocatable audio folder** — store audio files outside the web root via the Settings page
 - **Bulk MP3 upload** with automatic track matching (3-pass: track number + Levenshtein similarity)
 - **Automatic library scan** — watch a folder configured from Settings and import/update albums in the background
 - **Index-in-place audio** — scanned MP3/FLAC files stay in the source library instead of being copied into Grizzly
 - **Collection-aware recommendations** — suggestions distinguish albums already in your archive from external discoveries
+- **External API settings** — configure Last.fm, Discogs and YouTube credentials from Settings, with server/environment values available as fallback
 
 ---
 
@@ -221,7 +222,9 @@ Last.fm and Discogs are used as **additional fallback sources** when MusicBrainz
 | Cover art             | Discogs             | `DISCOGS_TOKEN`   | Optional fallback — [get token](https://www.discogs.com/settings/developers) |
 | YouTube integration   | YouTube Data API v3 | `YOUTUBE_API_KEY` | Required for YouTube preview — [get key](https://console.cloud.google.com)   |
 
-To enable optional services, add keys to your `.env` file:
+Optional API credentials can be configured directly from **Settings → External services**.
+
+Credentials saved in Grizzly take precedence over server-side configuration. If no credential is stored in the application, Grizzly falls back to the corresponding environment variable when available:
 
 ```dotenv
 LASTFM_API_KEY=your_key_here
@@ -229,10 +232,14 @@ DISCOGS_TOKEN=your_token_here
 YOUTUBE_API_KEY=your_key_here
 ```
 
-Then restart the app container:
+This makes it possible to manage credentials from the web interface while still keeping deployment-level defaults in `.env`.
+
+For security, saved credentials are never shown back in full. Settings only reports whether a service is configured and, when applicable, shows a masked suffix. Removing a credential from Grizzly removes only the application-level override; an environment fallback remains available automatically.
+
+If you change only a credential from **Settings → External services**, no container restart is required. If you edit `.env` directly, recreate or restart the application containers so the new environment values are loaded:
 
 ```bash
-docker compose restart app
+docker compose up -d --no-deps app worker
 ```
 
 ### YouTube embed on LAN servers
@@ -349,9 +356,9 @@ grizzly-music-archive/
 ├── app/
 │   ├── controllers/             < AlbumController, ArtistController, …
 │   ├── models/                  < Album, Artist, Track, …
-│   └── services/                < Metadata, recommendations, media import, path resolution
+│   └── services/                < Metadata, recommendations, dashboard, external API config, media import, path resolution
 ├── views/                       < PHP view templates
-├── api/                         < YouTube track API endpoint
+├── api/                         < Lightweight application API endpoints
 ├── docs/                        < Project images and assets
 ├── media-scan-worker.php        < Background watched-folder scanner
 ├── Dockerfile
@@ -378,13 +385,13 @@ grizzly-music-archive/
 | `media_scan_ignored` | Source folders intentionally ignored by the scanner |
 | `playlists`       | User-created playlists                                |
 | `playlist_tracks` | Many-to-many: playlists ↔ tracks (with position)      |
-| `settings`        | Key-value app settings, including automatic scanning  |
+| `settings`        | Key-value app settings, including scanning and optional API credential overrides |
 
 ---
 
 ## ⚙️ Configuration Reference
 
-Infrastructure configuration is managed through environment variables. Application settings such as the watched media folder are configured from the Grizzly Settings page. See `.env.example` for the full environment list.
+Infrastructure configuration is managed through environment variables. Application settings such as the watched media folder and optional external-service credentials can be configured from the Grizzly Settings page. Credentials saved in Settings override the corresponding environment variables. See `.env.example` for the full environment list.
 
 | Variable          | Default                                             | Description                                                         |
 | ----------------- | --------------------------------------------------- | ------------------------------------------------------------------- |
@@ -396,9 +403,9 @@ Infrastructure configuration is managed through environment variables. Applicati
 | `DB_PASS`         | `grizzly_secret`                                    | Database password                                                   |
 | `DB_ROOT_PASS`    | `root_secret_change_me`                             | MySQL root password                                                 |
 | `DEBUG`           | `false`                                             | Show PHP errors (`true` only for development)                       |
-| `LASTFM_API_KEY`  | *(empty)*                                           | Last.fm API key                                                     |
-| `DISCOGS_TOKEN`   | *(empty)*                                           | Discogs personal access token                                       |
-| `YOUTUBE_API_KEY` | *(empty)*                                           | YouTube Data API v3 key                                             |
+| `LASTFM_API_KEY`  | *(empty)*                                           | Optional Last.fm API key fallback when no Settings override exists  |
+| `DISCOGS_TOKEN`   | *(empty)*                                           | Optional Discogs token fallback when no Settings override exists    |
+| `YOUTUBE_API_KEY` | *(empty)*                                           | Optional YouTube API key fallback when no Settings override exists  |
 
 ---
 
@@ -406,6 +413,7 @@ Infrastructure configuration is managed through environment variables. Applicati
 
 - **No built-in authentication** — the app is intended for personal, self-hosted use inside a trusted network. If it is reachable from outside your LAN, restrict access at the reverse proxy or network level (Basic Auth / Access Lists, IP allow-list, VPN). See the *Access control notice* in the installation section.
 - Never commit `.env` to version control
+- External-service credentials saved through Settings are stored as application overrides and are not exported with archive backups
 - Set `DEBUG=false` in any non-local environment
 - The `public/uploads/` directory is served by Apache; audio files outside the web root (configurable via Settings) are streamed through PHP with strict path validation
 - Docker exposes the host filesystem to the application and scanner under `/hostfs` as a read-only view; the watched music folder is selected only from Settings
@@ -428,7 +436,7 @@ Pull requests are welcome. For major changes please open an issue first.
 
 ## 📸 Screenshots
 
-Grizzly Music Archive is designed to work as a clean desktop archive and as a responsive mobile catalogue. The interface includes dashboard statistics, album browsing, artist profiles, discography lookup, track playback and dark mode support.
+Grizzly Music Archive is designed to work as a clean desktop archive and as a responsive mobile catalogue. The interface includes the collection overview, album browsing, artist profiles, discography lookup, playlists, track playback and dark mode support.
 
 ### Desktop interface
 
@@ -437,8 +445,8 @@ Grizzly Music Archive is designed to work as a clean desktop archive and as a re
 </p>
 
 <p align="center">
-  <strong>Dashboard</strong><br>
-  Collection statistics, recently added albums, top artists and playlist overview.
+  <strong>Collection overview</strong><br>
+  Recent arrivals, collection-aware suggestions, playlists, shelf picks, genre breakdown and format composition.
 </p>
 
 ---
@@ -464,7 +472,7 @@ Grizzly Music Archive is designed to work as a clean desktop archive and as a re
 | Mobile dashboard                                                                                                                                   | Mobile artist page                                                                                                                         |
 | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | <img src=".github/assets/screenshots/05-mobile-dashboard-player.jpg" alt="Grizzly Music Archive mobile dashboard with sticky player" width="100%"> | <img src=".github/assets/screenshots/06-mobile-artist-discography.jpg" alt="Grizzly Music Archive mobile artist discography" width="100%"> |
-| Responsive dashboard with compact cards, recent albums and sticky player.                                                                          | Mobile artist archive with official discography and cover thumbnails.                                                                      |
+| Responsive collection overview with recent arrivals, playlists and sticky player.                                                                          | Mobile artist archive with official discography and cover thumbnails.                                                                      |
 
 ---
 
