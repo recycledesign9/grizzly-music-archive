@@ -304,14 +304,6 @@ $audioTitle = $albumHasAudio
             <?php endif; ?>
           </div>
 
-          <?php if ($album['notes']): ?>
-            <!-- Note personali: descrivono la copia posseduta, accanto
-                 ai dati del disco (stessa logica del form) -->
-            <p class="album-hero-mynote">
-              <i class="bi bi-pencil" aria-hidden="true"></i>
-              <span><?= nl2br(htmlspecialchars($album['notes'])) ?></span>
-            </p>
-          <?php endif; ?>
         </div>
       </div>
     </div>
@@ -322,8 +314,25 @@ $audioTitle = $albumHasAudio
        ============================================================ -->
   <div class="col-12 col-md-4 col-lg-3 album-detail-sidebar">
 
-    <!-- Note personali -->
-    <?php /* Note personali spostate nella testata, sotto le pillole */ ?>
+    <!-- Note personali sulla copia posseduta: prima scheda della colonna,
+         con la stessa struttura di "Note sull'album" (classi esistenti,
+         nessuno stile nuovo). Compare solo se le note sono compilate. -->
+    <?php if (!empty($album['notes'])): ?>
+      <div class="album-desc-block album-desc-block-sidebar mb-4" id="albumMyNotes">
+        <div class="album-desc-header d-flex align-items-center justify-content-between">
+          <span>
+            <i class="bi bi-pencil album-desc-icon" aria-hidden="true"></i>
+            <span class="album-desc-label">Le tue note</span>
+          </span>
+          <a href="<?= BASE_URL ?>/index.php?route=albums/edit/<?= (int)$album['id'] ?>"
+            class="btn btn-sm btn-outline-secondary py-0 px-1"
+            title="Modifica le note nella scheda del disco" aria-label="Modifica le note">
+            <i class="bi bi-pencil-square" aria-hidden="true"></i>
+          </a>
+        </div>
+        <p class="album-desc-text mb-0"><?= nl2br(htmlspecialchars($album['notes'])) ?></p>
+      </div>
+    <?php endif; ?>
 
     <!-- Descrizione automatica / Note sull'album -->
     <div class="album-desc-block album-desc-block-sidebar mb-4" id="albumDescBlock"
