@@ -16,6 +16,7 @@ x-app-env: &app-env
   # exclusively from Grizzly: Settings -> Automatic scan.
   MEDIA_SCAN_HOST_PREFIX: /hostfs
 
+
 services:
 
   # ── PHP 8.1 + Apache application ──────────────────────────────────────────
@@ -23,16 +24,25 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+
     image: grizzly-music-archive:latest
+
     ports:
       - "${APP_PORT:-8080}:80"
+
     environment: *app-env
 
     volumes:
       # Managed covers/audio uploaded by Grizzly.
+      #
+      # The app container is the single initializer of this shared volume
+      # during a fresh installation.
       - uploads_data:/var/www/html/public/uploads
 
-      # Shared runtime area. The web app reads the worker heartbeat from here.
+      # Shared runtime area.
+      # The web app reads the worker heartbeat and runtime information here.
+      #
+      # The app container is also the single initializer of this volume.
       - runtime_data:/var/www/html/storage
 
       # Read-only view of the host filesystem.
@@ -48,13 +58,29 @@ services:
 
     restart: unless-stopped
 
+
   # ── Watched-folder scanner worker ─────────────────────────────────────────
   # Uses exactly the same application image as the web container.
+  #
+  # The worker starts only after:
+  #   1. MySQL is healthy
+  #   2. the app container has started
+  #
+  # This makes the app the single initializer of the shared named volumes.
+  # The worker mounts those volumes with nocopy=true so Docker does not try
+  # to copy image contents into the same fresh volume concurrently.
   worker:
     image: grizzly-music-archive:latest
+
+    # The image is built locally by the app service.
     pull_policy: never
-    command: ["php", "/var/www/html/media-scan-worker.php"]
+
+    command:
+      - php
+      - /var/www/html/media-scan-worker.php
+
     user: "www-data"
+
     init: true
 
     environment:
@@ -66,16 +92,35 @@ services:
       TMPDIR: /var/lib/grizzly-worker
 
     volumes:
-      # Scanner may create/update local cover files.
-      - uploads_data:/var/www/html/public/uploads
+      # Shared uploads volume.
+      #
+      # app initializes it; worker must only mount and use it.
+      - type: volume
+        source: uploads_data
+        target: /var/www/html/public/uploads
+        volume:
+          nocopy: true
 
-      # Shared heartbeat/runtime status.
-      - runtime_data:/var/www/html/storage
+      # Shared runtime volume containing heartbeat/log/runtime state.
+      #
+      # nocopy avoids the fresh-install race where app and worker could
+      # simultaneously try to initialize /var/www/html/storage/logs.
+      - type: volume
+        source: runtime_data
+        target: /var/www/html/storage
+        volume:
+          nocopy: true
 
       # Persistent scanner state and lock.
-      - worker_state:/var/lib/grizzly-worker
+      # No files from the Docker image need to be copied into this volume.
+      - type: volume
+        source: worker_state
+        target: /var/lib/grizzly-worker
+        volume:
+          nocopy: true
 
-      # Same read-only host view used by the web application for external audio.
+      # Same read-only host view used by the web application
+      # for external audio files.
       - type: bind
         source: /
         target: /hostfs
@@ -85,7 +130,12 @@ services:
       db:
         condition: service_healthy
 
+      # app initializes uploads_data and runtime_data before worker starts.
+      app:
+        condition: service_started
+
     restart: unless-stopped
+
 
   # ── MySQL 8.0 database ────────────────────────────────────────────────────
   db:
@@ -100,8 +150,10 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
 
-      # These scripts run only when the database volume is created for
-      # the first time. Upgrade migrations, when provided, are applied manually.
+      # These scripts run only when the database volume is created
+      # for the first time.
+      #
+      # Upgrade migrations, when provided, are applied manually.
       - ./docker/db/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
       - ./docker/db/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
 
@@ -118,6 +170,8 @@ services:
 
     restart: unless-stopped
 
+
+# ── Persistent volumes ──────────────────────────────────────────────────────
 volumes:
   mysql_data:
   uploads_data:
