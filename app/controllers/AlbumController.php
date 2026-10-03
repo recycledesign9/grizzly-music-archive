@@ -623,25 +623,13 @@ class AlbumController
       }
     }
 
-    // Per sicurezza non blacklistiamo mai un antenato generico (es. cartella
-    // artista) se i source_path non convergono chiaramente sulla stessa
-    // directory-album.
-    if (count($albumDirs) !== 1) {
+    if (empty($albumDirs)) {
       return;
     }
 
-    $albumPath = (string)array_key_first($albumDirs);
-
-    // Guardia: non inserire mai per errore l'intera watched root nella blacklist.
     $setting = $db->prepare("SELECT `value` FROM settings WHERE `key` = 'media_scan_path' LIMIT 1");
     $setting->execute();
     $scanRoot = $this->normalizeFsPath((string)($setting->fetchColumn() ?: ''));
-
-    if ($albumPath === '' || ($scanRoot !== '' && rtrim($albumPath, '/') === rtrim($scanRoot, '/'))) {
-      return;
-    }
-
-    $hash = sha1($albumPath);
 
     $ins = $db->prepare("
         INSERT INTO media_scan_ignored (path_hash, source_path)
@@ -650,10 +638,40 @@ class AlbumController
           source_path = VALUES(source_path),
           created_at = CURRENT_TIMESTAMP
     ");
-    $ins->execute([
-      ':path_hash'   => $hash,
-      ':source_path' => $albumPath,
-    ]);
+
+    foreach (array_keys($albumDirs) as $albumPath) {
+      $albumPath = $this->normalizeFsPath((string)$albumPath);
+      if ($albumPath === '') {
+        continue;
+      }
+
+      // Non blacklistare mai l'intera watched root e, quando la root e'
+      // configurata, accetta solo directory realmente discendenti da essa.
+      if ($scanRoot !== '') {
+        $root = $scanRoot === '/' ? '/' : rtrim($scanRoot, '/');
+        $path = $albumPath === '/' ? '/' : rtrim($albumPath, '/');
+
+        if ($path === $root) {
+          continue;
+        }
+
+        $cmpRoot = $root;
+        $cmpPath = $path;
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+          $cmpRoot = strtolower($cmpRoot);
+          $cmpPath = strtolower($cmpPath);
+        }
+
+        if ($cmpRoot !== '/' && strpos($cmpPath, $cmpRoot . '/') !== 0) {
+          continue;
+        }
+      }
+
+      $ins->execute([
+        ':path_hash'   => sha1($albumPath),
+        ':source_path' => $albumPath,
+      ]);
+    }
   }
 
   private function normalizeFsPath(string $path): string
@@ -2139,7 +2157,7 @@ class AlbumController
       // restrittiva e continua a usare il fallback locale solo sullo stesso genere.
       $recommendationsStatus = 'ok';
       if (empty($payload) && empty($suggestions)) {
-        $recommendationsStatus = ExternalApiConfig::getLastFmKey() === ''
+        $recommendationsStatus = (!defined('LASTFM_API_KEY') || trim((string)LASTFM_API_KEY) === '')
           ? 'lastfm_not_configured'
           : 'no_coherent_results';
       }

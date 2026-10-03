@@ -22,13 +22,12 @@
  * inserimento. Gli album creati qui sono marcati needs_review = 1; quelli
  * inseriti a mano restano 0. review_note indica perche' un album e' incerto.
  *
- * Idempotenza: source_path identifica il file visto nella watched folder;
- * i nuovi import vengono indicizzati sul posto (storage_type=external), senza copia audio;
- * source_mtime + filesize permettono lo skip veloce senza rileggere il file.
- * source_hash = SHA-1 del contenuto resta un fingerprint diagnostico, NON una
- * chiave globale di unicita': lo stesso audio puo' comparire in album diversi.
- * Se un file cambia mantenendo lo stesso source_path, il record audio esistente
- * viene aggiornato invece di crearne un duplicato.
+ * Idempotenza: source_path identifica la posizione corrente del file visto nella
+ * watched folder; i nuovi import vengono indicizzati sul posto
+ * (storage_type=external), senza copia audio. source_mtime + filesize permettono
+ * lo skip veloce. source_hash = SHA-1 resta un fingerprint diagnostico, NON una
+ * chiave globale di unicita'. Se una traccia external si sposta e il vecchio path
+ * scompare, il record viene riallineato sul nuovo path mantenendo lo stesso token.
  *
  * Dipendenze runtime gia' caricate dal bootstrap dell'app: Database,
  * MediaPathResolver, Artist, Album, Track e le costanti di config
@@ -98,6 +97,7 @@ class MediaImportService
                 'albums_existing' => 0,
                 'audio_imported'  => 0,
                 'audio_skipped'   => 0,
+                'audio_deferred'  => 0,
                 'errors'          => 0,
             ],
             'error' => null,
@@ -163,6 +163,8 @@ class MediaImportService
                     'tracks'         => 0,
                     'audio_imported' => 0,
                     'audio_skipped'  => 0,
+                    'audio_deferred' => 0,
+                    'deferred_sources' => [],
                     'cover'          => false,
                     'review_note'    => '',
                     'errors'         => ['Eccezione: ' . $e->getMessage()],
@@ -179,6 +181,7 @@ class MediaImportService
             }
             $report['totals']['audio_imported'] += $entry['audio_imported'];
             $report['totals']['audio_skipped']  += $entry['audio_skipped'];
+            $report['totals']['audio_deferred'] += $entry['audio_deferred'];
             $report['totals']['errors']         += count($entry['errors']);
         }
 
@@ -524,6 +527,8 @@ class MediaImportService
             'tracks'         => count($tracks),
             'audio_imported' => 0,
             'audio_skipped'  => 0,
+            'audio_deferred' => 0,
+            'deferred_sources' => [],
             'cover'          => $coverSource['type'] !== 'none' || $externalCoverLocal !== null || $externalCoverUrl !== null,
             'review_note'    => $reviewNote,
             'errors'         => [],
@@ -643,6 +648,7 @@ class MediaImportService
             }
 
             $unmatched = 0;
+            $deferredSources = [];
 
             foreach ($tracks as $idx => $t) {
                 $trackId = isset($trackMap[$idx]) ? $trackMap[$idx] : null;
@@ -652,33 +658,40 @@ class MediaImportService
                 }
 
                 // Se il path e' invariato, importAudioFile gestisce skip/aggiornamento.
-                // Se invece la traccia ha gia' audio ma il path e' nuovo, prima
-                // tentiamo di riconoscere uno SPOSTAMENTO dello stesso external:
-                // stesso album + stessa traccia + vecchio file non piu' presente +
-                // stesso SHA-1. Solo in quel caso aggiorniamo source_path.
+                // Se il path e' nuovo, la decisione non dipende piu' dal semplice
+                // "trackHasAudio": distinguiamo managed, external ancora vivo e
+                // external morto. Un external morto viene riallineato sul posto
+                // riusando LO STESSO record e LO STESSO token pubblico.
                 $sourceKnown = $this->audioSourcePathExists($importDir, $t['abs']);
 
-                if (!$sourceKnown && $this->trackHasAudio($trackId)) {
-                    $moved = $this->reconcileMovedExternalAudio(
+                if (!$sourceKnown) {
+                    $reconciled = $this->reconcileExistingTrackAudio(
                         $albumId,
                         $trackId,
                         $t['abs'],
-                        $t['ext']
+                        $t['ext'],
+                        $deferredSources
                     );
 
-                    if ($moved !== null) {
-                        $this->tallyAudio($entry, $moved);
-                    } else {
-                        // Audio manuale o external diverso ancora valido:
-                        // priorita' al record gia' associato alla traccia.
-                        $entry['audio_skipped']++;
+                    if ($reconciled === 'deferred') {
+                        // Esiste ancora un external valido su un altro path. Non lo
+                        // sostituiamo mentre e' raggiungibile: il worker manterra'
+                        // questo album in riconciliazione e riprovera' dopo.
+                        $entry['audio_deferred']++;
+                        continue;
                     }
-                    continue;
+
+                    if ($reconciled !== null) {
+                        $this->tallyAudio($entry, $reconciled);
+                        continue;
+                    }
                 }
 
                 $res = $this->importAudioFile($importDir, $albumId, $trackId, $t['abs'], $t['ext']);
                 $this->tallyAudio($entry, $res);
             }
+
+            $entry['deferred_sources'] = array_values(array_unique($deferredSources));
 
             if ($unmatched > 0) {
                 $note = $unmatched . ' tracce non associate automaticamente alla tracklist esistente';
@@ -1253,102 +1266,196 @@ class MediaImportService
         return $stmt->fetchColumn() !== false;
     }
 
+
     /**
-     * Riconosce lo spostamento di un file external senza usare l'hash come
-     * deduplica globale.
+     * Gestisce un nuovo candidato audio per una traccia gia' esistente.
      *
-     * Vincoli necessari:
-     *   - stesso album
-     *   - stessa traccia
-     *   - vecchio source_path non più presente
-     *   - stesso SHA-1
+     * Regole:
+     *   - un audio managed ha sempre priorita' e non viene toccato;
+     *   - se esiste un external ancora raggiungibile su un altro path, la
+     *     decisione viene rinviata: il worker riprovera' finche' la situazione
+     *     non si stabilizza;
+     *   - se gli external precedenti non esistono piu', il candidato viene
+     *     associato allo stesso record audio, anche quando l'hash e' cambiato
+     *     (caso tipico: file indicizzato mentre era ancora in download);
+     *   - dopo un rebind riuscito, eventuali altri external morti della stessa
+     *     traccia vengono rimossi dal DB, lasciando un solo riferimento attivo.
      *
-     * Ritorna 'imported' se ha aggiornato il record, null se non è uno
-     * spostamento sicuro.
+     * Il token pubblico filename resta invariato durante il rebind: identifica
+     * il record audio, non la sua posizione sul filesystem.
+     *
+     * @return string|null 'imported' | 'skipped' | 'deferred' | null
      */
-    private function reconcileMovedExternalAudio(
+    private function reconcileExistingTrackAudio(
         int $albumId,
         int $trackId,
         string $srcAbs,
-        string $ext
+        string $ext,
+        array &$deferredSources
     ): ?string {
-        $newSourcePath = $this->sourcePathForDb($srcAbs);
-        $newHash = @sha1_file($srcAbs);
-        if ($newHash === false || $newHash === '') {
+        $stmt = $this->db->prepare("
+            SELECT id, album_id, track_id, filename, original_name, filesize,
+                   source_hash, source_path, source_mtime, storage_type
+            FROM audio_files
+            WHERE track_id = :track_id
+            ORDER BY id DESC
+        ");
+        $stmt->execute([':track_id' => $trackId]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        if (!$rows) {
             return null;
         }
 
-        $stmt = $this->db->prepare("
-            SELECT id, filename, source_hash, source_path
-            FROM audio_files
-            WHERE album_id = :album_id
-              AND track_id = :track_id
-              AND storage_type = 'external'
-              AND source_path IS NOT NULL
-              AND source_hash IS NOT NULL
-            ORDER BY id DESC
-        ");
-        $stmt->execute([
-            ':album_id' => $albumId,
-            ':track_id' => $trackId,
-        ]);
+        $hasManaged   = false;
+        $externalRows = [];
+        $liveRows     = [];
+        $deadRows     = [];
 
-        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        foreach ($rows as $row) {
+            if (($row['storage_type'] ?? 'managed') !== 'external') {
+                $hasManaged = true;
+                continue;
+            }
+
+            // Non toccare record external appartenenti ad altri album: un track_id
+            // coerente dovrebbe gia' implicare lo stesso album, ma manteniamo una
+            // guardia esplicita contro dati storici incoerenti.
+            if ((int)($row['album_id'] ?? 0) !== $albumId) {
+                continue;
+            }
+
+            $externalRows[] = $row;
+
             $oldDbPath = trim((string)($row['source_path'] ?? ''));
-            $oldHash   = trim((string)($row['source_hash'] ?? ''));
+            $runtime   = $oldDbPath !== '' ? $this->sourcePathForRuntime($oldDbPath) : '';
 
-            if ($oldDbPath === '' || $oldHash === '') {
-                continue;
+            if ($runtime !== '' && is_file($runtime) && is_readable($runtime)) {
+                $liveRows[] = $row;
+            } else {
+                $deadRows[] = $row;
             }
+        }
 
-            // Se il vecchio file esiste ancora non è uno spostamento: potrebbe
-            // essere una seconda copia identica e non va deduplicata.
-            $oldRuntimePath = $this->sourcePathForRuntime($oldDbPath);
-            if ($oldRuntimePath !== '' && is_file($oldRuntimePath)) {
-                continue;
+        // Upload/manuale managed: priorita' assoluta. Non modifichiamo ne'
+        // eliminiamo nessun record audio esistente: comportamento originale.
+        if ($hasManaged) {
+            return 'skipped';
+        }
+
+        if (empty($externalRows)) {
+            return null;
+        }
+
+        // Finche' un external precedente e' realmente disponibile non assumiamo
+        // che il nuovo path sia un move: potrebbe essere una seconda copia valida.
+        // Il worker manterra' il nuovo candidato in stato deferred e riprovera'.
+        if (!empty($liveRows)) {
+            foreach ($liveRows as $row) {
+                $waitPath = trim((string)($row['source_path'] ?? ''));
+                if ($waitPath !== '') {
+                    $deferredSources[] = $waitPath;
+                }
             }
+            return 'deferred';
+        }
 
-            if (!hash_equals($oldHash, (string)$newHash)) {
-                continue;
+        if (empty($deadRows)) {
+            return null;
+        }
+
+        $newSourcePath = $this->sourcePathForDb($srcAbs);
+        $newHash       = @sha1_file($srcAbs);
+        $newHash       = ($newHash === false) ? null : $newHash;
+
+        // Se tra i record morti esiste un fingerprint identico lo preferiamo.
+        // Altrimenti, dato che tutti i record appartengono alla stessa track_id,
+        // sono external e nessuno e' piu' raggiungibile, riusiamo il piu' recente.
+        $chosen = null;
+        if ($newHash !== null && $newHash !== '') {
+            foreach ($deadRows as $row) {
+                $oldHash = trim((string)($row['source_hash'] ?? ''));
+                if ($oldHash !== '' && hash_equals($oldHash, $newHash)) {
+                    $chosen = $row;
+                    break;
+                }
             }
+        }
+        if ($chosen === null) {
+            $chosen = $deadRows[0]; // ORDER BY id DESC
+        }
 
-            $size  = @filesize($srcAbs);
-            $size  = ($size === false) ? null : (int)$size;
-            $mtime = @filemtime($srcAbs);
-            $mtime = ($mtime === false) ? null : (int)$mtime;
+        $size  = @filesize($srcAbs);
+        $size  = ($size === false) ? null : (int)$size;
+        $mtime = @filemtime($srcAbs);
+        $mtime = ($mtime === false) ? null : (int)$mtime;
 
-            $cleanExt = preg_replace('/[^a-z0-9]+/', '', strtolower($ext));
-            if ($cleanExt === '') {
-                return null;
-            }
+        $cleanExt = preg_replace('/[^a-z0-9]+/', '', strtolower($ext));
+        if ($cleanExt === '') {
+            return null;
+        }
 
-            $token = 'external-' . sha1($newSourcePath) . '.' . $cleanExt;
+        $chosenId = (int)$chosen['id'];
+        $token    = trim((string)($chosen['filename'] ?? ''));
+        if ($token === '') {
+            // Fallback solo per record storici anomali: token stabile basato
+            // sull'id DB, non sul path corrente.
+            $token = 'external-' . sha1('audio:' . $chosenId) . '.' . $cleanExt;
+        }
 
+        $this->db->beginTransaction();
+        try {
             $upd = $this->db->prepare("
                 UPDATE audio_files
-                SET filename = :filename,
+                SET album_id = :album_id,
+                    track_id = :track_id,
+                    filename = :filename,
                     original_name = :original_name,
                     filesize = :filesize,
                     source_hash = :source_hash,
                     source_path = :source_path,
-                    source_mtime = :source_mtime
+                    source_mtime = :source_mtime,
+                    storage_type = 'external'
                 WHERE id = :id
                   AND storage_type = 'external'
             ");
             $upd->execute([
+                ':album_id'      => $albumId,
+                ':track_id'      => $trackId,
                 ':filename'      => $token,
                 ':original_name' => basename($srcAbs),
                 ':filesize'      => $size,
                 ':source_hash'   => $newHash,
                 ':source_path'   => $newSourcePath,
                 ':source_mtime'  => $mtime,
-                ':id'            => (int)$row['id'],
+                ':id'            => $chosenId,
             ]);
 
-            return 'imported';
+            // Tutti gli altri record external della stessa traccia sono morti:
+            // dopo il rebind non devono restare riferimenti 404 duplicati.
+            $staleIds = [];
+            foreach ($deadRows as $row) {
+                $id = (int)($row['id'] ?? 0);
+                if ($id > 0 && $id !== $chosenId) {
+                    $staleIds[] = $id;
+                }
+            }
+
+            if (!empty($staleIds)) {
+                $placeholders = implode(',', array_fill(0, count($staleIds), '?'));
+                $del = $this->db->prepare("DELETE FROM audio_files WHERE storage_type = 'external' AND id IN ($placeholders)");
+                $del->execute($staleIds);
+            }
+
+            $this->db->commit();
+        } catch (Throwable $e) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $e;
         }
 
-        return null;
+        return 'imported';
     }
 
     /**
@@ -1413,12 +1520,6 @@ class MediaImportService
         return $path;
     }
 
-    private function trackHasAudio(int $trackId): bool
-    {
-        $stmt = $this->db->prepare("SELECT id FROM audio_files WHERE track_id = :track_id LIMIT 1");
-        $stmt->execute([':track_id' => $trackId]);
-        return $stmt->fetchColumn() !== false;
-    }
 
     private function appendReviewText(string $current, string $extra): string
     {

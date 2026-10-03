@@ -14,6 +14,17 @@
  * CLI overrides remain available for diagnostics:
  *   php media-scan-worker.php --once
  *   php media-scan-worker.php --dir=/path/import --interval=10 --stable=30
+ *
+ * Managed mode (installations without Docker):
+ *   php media-scan-worker.php --managed
+ *   Started automatically by MediaScanWorkerSupervisor from the web app.
+ *   The process stops by itself when scanning is disabled in Settings, when
+ *   the database is no longer reachable (server stopped), when Grizzly's code
+ *   changes (update) or when the installation is removed. The next web
+ *   request starts it again when needed.
+ *
+ * In every mode the worker holds storage/media-scan-worker.lock for its whole
+ * life, so only one worker per installation can run, whoever started it.
  */
 
 if (PHP_SAPI !== 'cli') {
@@ -24,18 +35,18 @@ if (PHP_SAPI !== 'cli') {
 $root = __DIR__;
 require_once $root . '/config/database.php';
 
-foreach (glob($root . '/app/models/*.php') as $f) {
-    require_once $f;
-}
-
-// Load services while avoiding duplicate MediaImportService backup copies.
-foreach (glob($root . '/app/services/*.php') as $f) {
-    $base = basename($f);
-    if (stripos($base, 'MediaImportService') !== false) {
-        continue;
+// Carica solo il file canonico associato alla classe richiesta.
+// Evita di eseguire copie/backup .php presenti nelle cartelle applicative.
+spl_autoload_register(function (string $class) use ($root): void {
+    foreach (['/app/models/', '/app/services/'] as $dir) {
+        $file = $root . $dir . $class . '.php';
+        if (is_file($file)) {
+            require_once $file;
+            return;
+        }
     }
-    require_once $f;
-}
+});
+
 require_once $root . '/app/services/MediaImportService.php';
 
 if (!class_exists('MediaImportService')) {
@@ -50,11 +61,14 @@ $options = [
     'interval_override' => null,
     'stable_override'   => null,
     'once'              => false,
+    'managed'           => false,
 ];
 
 foreach (array_slice($argv, 1) as $arg) {
     if ($arg === '--once') {
         $options['once'] = true;
+    } elseif ($arg === '--managed') {
+        $options['managed'] = true;
     } elseif (strpos($arg, '--dir=') === 0) {
         $options['dir_override'] = substr($arg, 6);
     } elseif (strpos($arg, '--interval=') === 0) {
@@ -66,6 +80,22 @@ foreach (array_slice($argv, 1) as $arg) {
 
 // L'heartbeat rappresenta solo il worker normale persistente, non i run diagnostici.
 $heartbeatEnabled = !$options['once'] && $options['dir_override'] === null;
+
+// La modalità gestita ha senso solo per il worker persistente normale.
+if ($options['once'] || $options['dir_override'] !== null) {
+    $options['managed'] = false;
+}
+
+// Chi ha avviato il worker: riportato nell'heartbeat per la pagina Settings.
+$hostPrefixEnv = getenv('MEDIA_SCAN_HOST_PREFIX');
+if ($options['managed']) {
+    define('GRIZZLY_WORKER_MODE', 'managed');
+} elseif ($hostPrefixEnv !== false && trim($hostPrefixEnv) !== '') {
+    define('GRIZZLY_WORKER_MODE', 'docker');
+} else {
+    define('GRIZZLY_WORKER_MODE', 'manual');
+}
+unset($hostPrefixEnv);
 
 function workerLog(string $message): void
 {
@@ -96,6 +126,7 @@ function writeWorkerHeartbeat(
     $payload = [
         'timestamp'       => time(),
         'pid'             => getmypid(),
+        'mode'            => defined('GRIZZLY_WORKER_MODE') ? GRIZZLY_WORKER_MODE : 'manual',
         'enabled'         => $enabled,
         'configured_path' => $configuredPath,
     ];
@@ -113,15 +144,54 @@ function writeWorkerHeartbeat(
 }
 
 /**
+ * Alla chiusura ordinata marca l'heartbeat come "stopped", solo se appartiene
+ * a questo processo: la pagina Settings mostra subito il worker come fermo e
+ * il supervisore conserva la prova che l'avvio era riuscito.
+ */
+function markWorkerHeartbeatStopped(string $root): void
+{
+    $file = rtrim($root, '/') . '/storage/media-scan-worker-heartbeat.json';
+    $raw = @file_get_contents($file);
+    if ($raw === false) {
+        return;
+    }
+
+    $data = json_decode($raw, true);
+    if (!is_array($data) || !isset($data['pid']) || (int)$data['pid'] !== getmypid()) {
+        return;
+    }
+
+    $data['timestamp'] = time();
+    $data['stopped'] = true;
+
+    $json = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($json === false) {
+        return;
+    }
+
+    $tmp = $file . '.tmp.' . getmypid();
+    if (@file_put_contents($tmp, $json, LOCK_EX) !== false) {
+        @rename($tmp, $file);
+    } else {
+        @unlink($tmp);
+    }
+}
+
+/**
  * Rispetta l'intervallo configurato ma aggiorna l'heartbeat durante l'attesa.
+ *
+ * $shouldStop (facoltativo) viene valutato a ogni frazione di attesa e
+ * restituisce il motivo di arresto oppure stringa vuota. Restituisce il
+ * motivo che ha interrotto l'attesa, stringa vuota se l'attesa è terminata.
  */
 function workerSleepWithHeartbeat(
     string $root,
     int $seconds,
     bool $enabled,
     string $configuredPath,
-    bool $heartbeatEnabled
-): void {
+    bool $heartbeatEnabled,
+    ?callable $shouldStop = null
+): string {
     $remaining = max(0, $seconds);
 
     while ($remaining > 0) {
@@ -129,10 +199,70 @@ function workerSleepWithHeartbeat(
         sleep($chunk);
         $remaining -= $chunk;
 
+        if ($shouldStop !== null) {
+            $reason = (string)$shouldStop();
+            if ($reason !== '') {
+                return $reason;
+            }
+        }
+
         if ($heartbeatEnabled) {
             writeWorkerHeartbeat($root, $enabled, $configuredPath);
         }
     }
+
+    return '';
+}
+
+/**
+ * Verifica che la connessione al database sia ancora utilizzabile.
+ * Le funzioni settingValue()/settingExists() intercettano gli errori e
+ * restituirebbero valori di default: senza questo controllo, dopo un riavvio
+ * di MySQL il worker continuerebbe a girare su una configurazione fittizia.
+ */
+function databaseAlive(PDO $db): bool
+{
+    try {
+        $db->query('SELECT 1')->fetchColumn();
+        return true;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+/**
+ * Impronta del codice da cui dipende il worker. In modalità gestita, se
+ * cambia (aggiornamento, nuova .env) o un file sparisce (disinstallazione),
+ * il worker termina e la richiesta web successiva lo riavvia con il codice
+ * aggiornato.
+ */
+function workerCodeFingerprint(string $root): string
+{
+    clearstatcache();
+
+    $files = [
+        $root . '/media-scan-worker.php',
+        $root . '/config/config.php',
+        $root . '/config/database.php',
+        $root . '/VERSION',
+        $root . '/.env',
+    ];
+    foreach (['/app/services/*.php', '/app/models/*.php'] as $pattern) {
+        $found = glob($root . $pattern);
+        if (is_array($found)) {
+            $files = array_merge($files, $found);
+        }
+    }
+
+    sort($files, SORT_STRING);
+
+    $rows = [];
+    foreach ($files as $file) {
+        $mtime = @filemtime($file);
+        $rows[] = $file . '|' . ($mtime === false ? 'missing' : $mtime . ':' . (int)@filesize($file));
+    }
+
+    return sha1(implode("\n", $rows));
 }
 
 function settingValue(PDO $db, string $key, ?string $default = null): ?string
@@ -483,14 +613,78 @@ if (!$lockHandle || !@flock($lockHandle, LOCK_EX | LOCK_NB)) {
     exit(0);
 }
 
+// Lock d'installazione in storage/: garantisce un solo worker per
+// installazione anche quando i processi usano TMPDIR diversi (terminale,
+// launchd, avvio gestito da Grizzly). La web app lo usa anche per sapere
+// se il worker è vivo durante import lunghi.
+$installLockHandle = null;
+if ($heartbeatEnabled) {
+    $storageDir = $root . '/storage';
+    if (is_dir($storageDir) || @mkdir($storageDir, 0775, true) || is_dir($storageDir)) {
+        $installLockHandle = @fopen($storageDir . '/media-scan-worker.lock', 'c');
+        if ($installLockHandle && !@flock($installLockHandle, LOCK_EX | LOCK_NB)) {
+            fwrite(STDERR, "Scanner Grizzly gia' attivo per questa installazione.\n");
+            exit(0);
+        }
+    }
+    unset($storageDir);
+}
+
+if ($options['managed'] && function_exists('posix_setsid')) {
+    // Sessione propria: i segnali inviati al gruppo di processi del server
+    // web (graceful restart di Apache) non devono raggiungere il worker.
+    @posix_setsid();
+}
+
+$codeFingerprint = $options['managed'] ? workerCodeFingerprint($root) : '';
+
+/**
+ * Motivo di arresto della modalità gestita, stringa vuota se il worker deve
+ * continuare. Il controllo sul DB vale anche durante le attese.
+ */
+$managedStopReason = function () use ($db, $root, &$codeFingerprint, $options): string {
+    if (!$options['managed']) {
+        return '';
+    }
+    if (!databaseAlive($db)) {
+        return 'database non raggiungibile';
+    }
+    if (!settingBool($db, 'media_scan_enabled', false)) {
+        return 'scansione disattivata da Settings';
+    }
+    if (workerCodeFingerprint($root) !== $codeFingerprint) {
+        return 'codice di Grizzly modificato o rimosso';
+    }
+    return '';
+};
+
+$stopReason = '';
+$exitCode = 0;
+
 $service = new MediaImportService();
 $state   = loadWorkerState($stateFile);
 $lastNotice = null;
 $lastActiveConfiguredPath = null;
 
-workerLog('Media scanner avviato; configurazione letta da Settings.');
+workerLog('Media scanner avviato (' . GRIZZLY_WORKER_MODE . ', PID ' . getmypid() . '); configurazione letta da Settings.');
 
 while (true) {
+    // Database perso (MySQL fermo o riavviato): la connessione PDO non si
+    // ripristina da sola. Il worker termina; Docker, launchd o la web app
+    // (modalità gestita) lo riavviano quando il database torna disponibile.
+    if (!databaseAlive($db)) {
+        $stopReason = 'database non raggiungibile';
+        $exitCode = 1;
+        break;
+    }
+
+    if ($options['managed']) {
+        $stopReason = $managedStopReason();
+        if ($stopReason !== '') {
+            break;
+        }
+    }
+
     // Backward compatibility: before the new DB settings exist, use BASE_PATH/import.
     $hasScannerSettings = settingExists($db, 'media_scan_path');
 
@@ -529,7 +723,10 @@ while (true) {
         if ($options['once']) {
             break;
         }
-        workerSleepWithHeartbeat($root, $interval, $enabled, $configuredPath, $heartbeatEnabled);
+        $stopReason = workerSleepWithHeartbeat($root, $interval, $enabled, $configuredPath, $heartbeatEnabled, $managedStopReason);
+        if ($stopReason !== '') {
+            break;
+        }
         continue;
     }
 
@@ -543,7 +740,10 @@ while (true) {
         if ($options['once']) {
             break;
         }
-        workerSleepWithHeartbeat($root, $interval, $enabled, $configuredPath, $heartbeatEnabled);
+        $stopReason = workerSleepWithHeartbeat($root, $interval, $enabled, $configuredPath, $heartbeatEnabled, $managedStopReason);
+        if ($stopReason !== '') {
+            break;
+        }
         continue;
     }
 
@@ -564,7 +764,10 @@ while (true) {
         if ($options['once']) {
             break;
         }
-        workerSleepWithHeartbeat($root, $interval, $enabled, $configuredPath, $heartbeatEnabled);
+        $stopReason = workerSleepWithHeartbeat($root, $interval, $enabled, $configuredPath, $heartbeatEnabled, $managedStopReason);
+        if ($stopReason !== '') {
+            break;
+        }
         continue;
     }
 
@@ -661,6 +864,7 @@ while (true) {
                 'imported_signature' => isset($previous['imported_signature']) ? $previous['imported_signature'] : null,
                 'last_result'        => 'pending',
                 'last_scan'          => isset($previous['last_scan']) ? $previous['last_scan'] : null,
+                'deferred_sources'   => [],
             ];
 
             workerLog('[PENDING] Modifiche rilevate: ' . $albumKey);
@@ -674,6 +878,34 @@ while (true) {
 
         if ($alreadyDone) {
             continue;
+        }
+
+        // Se il service ha rinviato un rebind perché il vecchio external era
+        // ancora raggiungibile, controlliamo solo quelle sorgenti. Appena almeno
+        // una scompare, rieseguiamo la riconciliazione anche se la directory
+        // corrente non ha cambiato signature.
+        if (($previous['last_result'] ?? '') === 'deferred') {
+            $waiting = isset($previous['deferred_sources']) && is_array($previous['deferred_sources'])
+                ? $previous['deferred_sources']
+                : [];
+
+            if (!empty($waiting)) {
+                $allStillLive = true;
+                foreach ($waiting as $waitPath) {
+                    $waitPath = normalizedConfiguredPath((string)$waitPath);
+                    $runtimeWait = $waitPath !== '' ? runtimeScanPath($waitPath) : '';
+                    if ($runtimeWait === '' || !is_file($runtimeWait) || !is_readable($runtimeWait)) {
+                        $allStillLive = false;
+                        break;
+                    }
+                }
+
+                if ($allStillLive) {
+                    continue;
+                }
+
+                workerLog("[RECONCILE] Sorgente precedente non piu' raggiungibile: " . basename($albumKey));
+            }
         }
 
         if ($stableFor < $stable) {
@@ -697,11 +929,36 @@ while (true) {
             && (int)$report['totals']['errors'] === 0
             && (int)$report['totals']['albums_found'] > 0;
 
-        $state['albums'][$albumKey]['last_scan']   = $now;
-        $state['albums'][$albumKey]['last_result'] = $ok ? 'ok' : 'error';
+        $deferred = $ok ? (int)($report['totals']['audio_deferred'] ?? 0) : 0;
 
-        if ($ok) {
+        $state['albums'][$albumKey]['last_scan'] = $now;
+
+        if ($ok && $deferred > 0) {
+            // Non marcare la signature come completata: il nuovo candidato resta
+            // in attesa finché il vecchio external non sparisce.
+            $waitSources = [];
+            foreach (($report['albums'] ?? []) as $albumReport) {
+                if (!is_array($albumReport)) {
+                    continue;
+                }
+                foreach (($albumReport['deferred_sources'] ?? []) as $waitPath) {
+                    $waitPath = normalizedConfiguredPath((string)$waitPath);
+                    if ($waitPath !== '') {
+                        $waitSources[$waitPath] = true;
+                    }
+                }
+            }
+
+            $state['albums'][$albumKey]['last_result']      = 'deferred';
+            $state['albums'][$albumKey]['deferred_sources'] = array_keys($waitSources);
+
+            workerLog('[DEFER] ' . basename($albumKey)
+                . ' | external in attesa=' . $deferred
+                . ' | sorgenti monitorate=' . count($waitSources));
+        } elseif ($ok) {
+            $state['albums'][$albumKey]['last_result']        = 'ok';
             $state['albums'][$albumKey]['imported_signature'] = $signature;
+            $state['albums'][$albumKey]['deferred_sources']   = [];
 
             workerLog('[OK] ' . basename($albumKey)
                 . ' | creati=' . (int)$report['totals']['albums_created']
@@ -709,19 +966,37 @@ while (true) {
                 . ' audio+=' . (int)$report['totals']['audio_imported']
                 . ' skip=' . (int)$report['totals']['audio_skipped']);
         } else {
+            $state['albums'][$albumKey]['last_result'] = 'error';
             $error = !empty($report['error']) ? $report['error'] : 'errore durante import';
             workerLog('[ERROR] ' . basename($albumKey) . ' | ' . $error);
         }
+
+        // Modalità gestita: tra un album e l'altro rispetta subito una
+        // disattivazione o un aggiornamento, senza attendere la fine del ciclo.
+        if ($options['managed']) {
+            $stopReason = $managedStopReason();
+            if ($stopReason !== '') {
+                break;
+            }
+        }
     }
 
-    foreach (array_keys($state['albums']) as $known) {
-        if (!isset($stillAlive[$known])) {
-            unset($state['albums'][$known]);
+    // Se il ciclo è stato interrotto non tutte le directory sono state
+    // visitate: la pulizia delle voci scomparse vale solo per cicli completi.
+    if ($stopReason === '') {
+        foreach (array_keys($state['albums']) as $known) {
+            if (!isset($stillAlive[$known])) {
+                unset($state['albums'][$known]);
+            }
         }
     }
 
     $state['configured_path'] = $configuredPath;
     saveWorkerState($stateFile, $state);
+
+    if ($stopReason !== '') {
+        break;
+    }
 
     if ($heartbeatEnabled) {
         writeWorkerHeartbeat($root, $enabled, $configuredPath);
@@ -731,8 +1006,26 @@ while (true) {
         break;
     }
 
-    workerSleepWithHeartbeat($root, $interval, $enabled, $configuredPath, $heartbeatEnabled);
+    $stopReason = workerSleepWithHeartbeat($root, $interval, $enabled, $configuredPath, $heartbeatEnabled, $managedStopReason);
+    if ($stopReason !== '') {
+        break;
+    }
+}
+
+if ($stopReason !== '') {
+    workerLog('[STOP] Worker terminato: ' . $stopReason . '.');
+}
+
+if ($heartbeatEnabled && ($options['managed'] || $exitCode !== 0)) {
+    markWorkerHeartbeatStopped($root);
+}
+
+if ($installLockHandle) {
+    @flock($installLockHandle, LOCK_UN);
+    @fclose($installLockHandle);
 }
 
 @flock($lockHandle, LOCK_UN);
 @fclose($lockHandle);
+
+exit($exitCode);

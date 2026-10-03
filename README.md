@@ -323,13 +323,19 @@ cp .env.example .env
 
 For MAMP users: set `DB_PORT=8889` and adjust `BASE_URL` to match your MAMP virtual host.
 
-To use **Automatic scan** without Docker, run the worker in a second terminal:
+**Automatic scan** needs no extra setup without Docker either. Open **Settings → Automatic scan**, save the folder to watch and turn on **Enable automatic scan**: Grizzly starts the background worker itself and shows its status in the **Worker** row.
 
-```bash
-php media-scan-worker.php
-```
+The worker follows the lifecycle of the Grizzly server, like the `worker` service does in Docker:
 
-The watched folder, scan interval and stability delay are still managed from **Settings → Automatic scan**.
+- it keeps running when the browser is closed;
+- it stops when scanning is disabled, or when the database is no longer reachable (for example when MAMP is stopped);
+- the first page served by Grizzly after the server starts again restarts it;
+- after an update it stops by itself and restarts with the new code on the next request;
+- nothing is registered in the operating system: removing the Grizzly folder removes everything.
+
+Requirements: macOS or Linux, a PHP 7.4+ command-line binary with `pdo_mysql` and `openssl` (MAMP and standard Linux packages already provide one), and a `storage/` folder writable by the web server. Without `openssl` albums are still imported, but without the metadata downloaded from external services; Settings shows a warning in that case. Logs are written to `storage/logs/media-scan-worker.log`. Windows is not supported for automatic start: Settings shows the command to run the worker manually.
+
+If you prefer to manage the worker with your own service (systemd, launchd), set `GRIZZLY_WORKER_AUTOSTART=0` in `.env` and run `php media-scan-worker.php`. Only one worker per installation can run at a time, however it was started.
 
 ---
 
@@ -361,6 +367,7 @@ grizzly-music-archive/
 ├── api/                         < Lightweight application API endpoints
 ├── docs/                        < Project images and assets
 ├── media-scan-worker.php        < Background watched-folder scanner
+├── storage/                     < Runtime state: worker heartbeat, lock and logs (gitignored)
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .env.example                 < Template — copy to .env
@@ -406,6 +413,8 @@ Infrastructure configuration is managed through environment variables. Applicati
 | `LASTFM_API_KEY`  | *(empty)*                                           | Optional Last.fm API key fallback when no Settings override exists  |
 | `DISCOGS_TOKEN`   | *(empty)*                                           | Optional Discogs token fallback when no Settings override exists    |
 | `YOUTUBE_API_KEY` | *(empty)*                                           | Optional YouTube API key fallback when no Settings override exists  |
+| `GRIZZLY_WORKER_AUTOSTART` | `1`                                        | Without Docker only: set to `0` to stop Grizzly from starting the scan worker itself |
+| `GRIZZLY_PHP_CLI` | *(auto)*                                            | Without Docker only: path of the PHP command-line binary, if it is not found automatically |
 
 ---
 

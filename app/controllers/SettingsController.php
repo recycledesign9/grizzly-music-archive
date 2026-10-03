@@ -5,7 +5,7 @@
  *
  * Gestisce la pagina delle impostazioni di Grizzly Music Archive.
  * - configurazione percorso audio
- * - configurazione scansione automatica media
+ * - configurazione scansione automatica media e stato del worker
  * - export / import completo dell'archivio (dati + immagini)
  *
  * Route: ?route=settings
@@ -40,6 +40,9 @@ class SettingsController
                 break;
             case 'scanner-status':
                 $this->scannerStatus();
+                break;
+            case 'worker-start':
+                $this->startWorker();
                 break;
             case 'ignored-list':
                 $this->ignoredMediaSourcesList();
@@ -109,9 +112,10 @@ class SettingsController
         $mediaScanInterval = max(5, (int)$scannerSettings['media_scan_interval']);
         $mediaScanStableSeconds = max(10, (int)$scannerSettings['media_scan_stable_seconds']);
 
-        $workerStatus = $this->readScannerWorkerRuntimeStatus();
-        $mediaScanWorkerAlive = (bool)$workerStatus['alive'];
-        $mediaScanWorkerHeartbeatAge = $workerStatus['age'];
+        // Stato reale del worker: Docker, avviato da Grizzly o esterno.
+        $mediaScanWorker = MediaScanWorkerSupervisor::status($mediaScanEnabled);
+        $mediaScanWorkerAlive = (bool)$mediaScanWorker['alive'];
+        $mediaScanWorkerHeartbeatAge = $mediaScanWorker['heartbeat_age'];
 
         // Nella pagina Settings carichiamo soltanto il conteggio.
         // L'elenco completo viene richiesto via AJAX con ricerca e paginazione,
@@ -129,47 +133,10 @@ class SettingsController
     }
 
     /**
-     * Stato reale del processo worker.
-     *
-     * Il worker scrive un heartbeat locale in storage/ ogni pochi secondi.
-     * Lo stato runtime non viene salvato nel DB e non entra in export/import.
-     */
-    private function readScannerWorkerRuntimeStatus(): array
-    {
-        $file = BASE_PATH . '/storage/media-scan-worker-heartbeat.json';
-        $maxAge = 60;
-
-        if (!is_file($file) || !is_readable($file)) {
-            return ['alive' => false, 'age' => null, 'timestamp' => null];
-        }
-
-        $raw = @file_get_contents($file);
-        if ($raw === false || trim($raw) === '') {
-            return ['alive' => false, 'age' => null, 'timestamp' => null];
-        }
-
-        $data = json_decode($raw, true);
-        if (!is_array($data)) {
-            return ['alive' => false, 'age' => null, 'timestamp' => null];
-        }
-
-        $timestamp = isset($data['timestamp']) ? (int)$data['timestamp'] : 0;
-        if ($timestamp <= 0) {
-            return ['alive' => false, 'age' => null, 'timestamp' => null];
-        }
-
-        $age = max(0, time() - $timestamp);
-
-        return [
-            'alive' => $age <= $maxAge,
-            'age' => $age,
-            'timestamp' => $timestamp,
-        ];
-    }
-
-    /**
      * GET /index.php?route=settings/scanner-status
      * Restituisce separatamente configurazione ON/OFF e stato reale del worker.
+     * L'heartbeat e il lock del worker restano in storage/: non entrano nel DB
+     * né in export/import.
      */
     private function scannerStatus(): void
     {
@@ -187,14 +154,15 @@ class SettingsController
             $stmt->execute();
             $enabled = (string)$stmt->fetchColumn() === '1';
 
-            $worker = $this->readScannerWorkerRuntimeStatus();
+            $worker = MediaScanWorkerSupervisor::status($enabled);
 
             echo json_encode([
                 'ok' => true,
                 'enabled' => $enabled,
                 'worker_alive' => (bool)$worker['alive'],
-                'heartbeat_age' => $worker['age'],
-                'heartbeat_at' => $worker['timestamp'],
+                'heartbeat_age' => $worker['heartbeat_age'],
+                'heartbeat_at' => $worker['heartbeat_at'],
+                'worker' => $worker,
             ]);
             exit;
         } catch (Throwable $e) {
@@ -202,6 +170,75 @@ class SettingsController
             echo json_encode([
                 'ok' => false,
                 'message' => 'Impossibile leggere lo stato del worker.'
+                    . (defined('DEBUG') && DEBUG ? ' ' . $e->getMessage() : '')
+            ]);
+            exit;
+        }
+    }
+
+    /**
+     * POST /index.php?route=settings/worker-start
+     * Nuovo tentativo immediato di avvio del worker (installazioni senza
+     * Docker), ignorando l'attesa tra tentativi falliti.
+     */
+    private function startWorker(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['ok' => false, 'message' => 'Metodo non consentito.']);
+            exit;
+        }
+
+        $sessionToken = (string)($_SESSION['csrf_token'] ?? '');
+        $postedToken  = (string)($_POST['csrf_token'] ?? '');
+        if ($sessionToken === '' || $postedToken === '' || !hash_equals($sessionToken, $postedToken)) {
+            http_response_code(403);
+            echo json_encode(['ok' => false, 'message' => 'Token CSRF non valido. Ricarica la pagina e riprova.']);
+            exit;
+        }
+
+        // Il worker è un processo figlio staccato: non deve ereditare il
+        // file di sessione bloccato.
+        session_write_close();
+
+        try {
+            if (MediaScanWorkerSupervisor::mode() !== 'managed') {
+                echo json_encode([
+                    'ok' => false,
+                    'message' => 'In questa installazione il worker non è avviato da Grizzly.',
+                    'worker' => MediaScanWorkerSupervisor::status(),
+                ]);
+                exit;
+            }
+
+            $db = Database::getInstance();
+            $stmt = $db->prepare("SELECT `value` FROM settings WHERE `key` = 'media_scan_enabled' LIMIT 1");
+            $stmt->execute();
+            if ((string)$stmt->fetchColumn() !== '1') {
+                http_response_code(422);
+                echo json_encode([
+                    'ok' => false,
+                    'message' => 'Attiva prima la scansione automatica.',
+                    'worker' => MediaScanWorkerSupervisor::status(false),
+                ]);
+                exit;
+            }
+
+            $worker = MediaScanWorkerSupervisor::ensureRunning(true);
+
+            echo json_encode([
+                'ok' => $worker['state'] !== 'unavailable',
+                'message' => $worker['message'],
+                'worker' => $worker,
+            ]);
+            exit;
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode([
+                'ok' => false,
+                'message' => 'Impossibile avviare il worker.'
                     . (defined('DEBUG') && DEBUG ? ' ' . $e->getMessage() : '')
             ]);
             exit;
@@ -425,12 +462,23 @@ class SettingsController
             ");
             $stmt->execute([':value' => $enabled ? '1' : '0']);
 
+            // Senza Docker il worker viene avviato subito da Grizzly; in
+            // disattivazione si arresta da solo entro pochi secondi.
+            $worker = null;
+            if ($enabled && MediaScanWorkerSupervisor::mode() === 'managed') {
+                session_write_close();
+                $worker = MediaScanWorkerSupervisor::ensureRunning(true);
+            } else {
+                $worker = MediaScanWorkerSupervisor::status($enabled);
+            }
+
             echo json_encode([
                 'ok' => true,
                 'enabled' => $enabled,
                 'message' => $enabled
                     ? 'Scansione automatica attivata.'
-                    : 'Scansione automatica disattivata.'
+                    : 'Scansione automatica disattivata.',
+                'worker' => $worker,
             ]);
             exit;
         } catch (Throwable $e) {

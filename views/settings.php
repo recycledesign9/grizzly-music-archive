@@ -11,9 +11,16 @@ require BASE_PATH . '/views/layout/header.php';
 /** @var int    $mediaScanStableSeconds */
 /** @var bool   $mediaScanWorkerAlive */
 /** @var int|null $mediaScanWorkerHeartbeatAge */
+/** @var array  $mediaScanWorker  stato da MediaScanWorkerSupervisor::status() */
 /** @var array  $ignoredMediaSources */
 
 $defaultAudioPath = defined('AUDIO_PATH') ? AUDIO_PATH : BASE_PATH . '/public/uploads/audio';
+$mediaScanWorker  = is_array($mediaScanWorker ?? null) ? $mediaScanWorker : [
+  'mode' => 'managed', 'state' => 'stopped', 'alive' => !empty($mediaScanWorkerAlive),
+  'message' => '', 'pid' => null, 'retry_in' => null, 'log_tail' => '', 'command' => '',
+];
+$mediaScanWorkerMode  = (string)($mediaScanWorker['mode'] ?? 'managed');
+$mediaScanWorkerState = (string)($mediaScanWorker['state'] ?? 'stopped');
 $ignoredCount     = (int)($ignoredMediaSourcesCount ?? 0);
 
 /** @var array $externalApiServices */
@@ -250,12 +257,27 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
             <p>Grizzly controlla una cartella e importa gli album che trova. Il caricamento manuale non cambia.</p>
           </div>
           <?php
-            $scannerBadgeClass = $mediaScanEnabled
-              ? ($mediaScanWorkerAlive ? 'bg-success' : 'bg-warning text-dark')
-              : 'bg-secondary';
-            $scannerBadgeText = $mediaScanEnabled
-              ? ($mediaScanWorkerAlive ? 'Attiva · worker in esecuzione' : 'Attiva · worker non raggiungibile')
-              : ($mediaScanWorkerAlive ? 'Disattivata · worker in attesa' : 'Disattivata · worker non raggiungibile');
+            if ($mediaScanEnabled) {
+              if ($mediaScanWorkerAlive) {
+                $scannerBadgeClass = 'bg-success';
+                $scannerBadgeText  = 'Attiva · worker in esecuzione';
+              } elseif ($mediaScanWorkerState === 'starting') {
+                $scannerBadgeClass = 'bg-warning text-dark';
+                $scannerBadgeText  = 'Attiva · avvio del worker';
+              } else {
+                $scannerBadgeClass = 'bg-warning text-dark';
+                $scannerBadgeText  = 'Attiva · worker non raggiungibile';
+              }
+            } else {
+              $scannerBadgeClass = 'bg-secondary';
+              if ($mediaScanWorkerAlive) {
+                $scannerBadgeText = 'Disattivata · worker in attesa';
+              } elseif ($mediaScanWorkerMode === 'docker') {
+                $scannerBadgeText = 'Disattivata · worker non raggiungibile';
+              } else {
+                $scannerBadgeText = 'Disattivata';
+              }
+            }
           ?>
           <span id="mediaScanStatusBadge"
             class="badge <?= $scannerBadgeClass ?>"
@@ -277,6 +299,34 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
                 id="mediaScanEnabled"
                 <?= $mediaScanEnabled ? 'checked' : '' ?>>
               <label class="form-check-label" for="mediaScanEnabled">Abilita scansione automatica</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="grz-set__row" id="mediaScanWorkerRow">
+          <div class="grz-set__label">
+            <h3>Worker</h3>
+            <?php if ($mediaScanWorkerMode === 'docker'): ?>
+              <p>Servizio <code>worker</code> di Docker Compose: si avvia e si arresta con i container di Grizzly.</p>
+            <?php elseif ($mediaScanWorkerMode === 'manual'): ?>
+              <p>Avvio automatico disattivato nel file <code>.env</code> (<code>GRIZZLY_WORKER_AUTOSTART=0</code>).</p>
+            <?php else: ?>
+              <p>Grizzly lo avvia quando la scansione è attiva e resta in funzione anche a browser chiuso. Si ferma quando disattivi la scansione o quando il server di Grizzly si arresta.</p>
+            <?php endif; ?>
+          </div>
+          <div class="grz-set__control">
+            <div class="grz-set__status mt-0" id="mediaScanWorkerStatus">
+              <span class="grz-set__dot <?= $mediaScanWorkerAlive ? 'grz-set__dot--ok' : 'bg-secondary' ?>" aria-hidden="true"></span>
+              <span id="mediaScanWorkerText"><?= htmlspecialchars((string)($mediaScanWorker['message'] ?? ''), ENT_QUOTES, 'UTF-8') ?></span>
+            </div>
+            <div id="mediaScanWorkerDetail" class="small text-muted mt-2 d-none"></div>
+            <div id="mediaScanWorkerWarning" class="small text-warning-emphasis mt-2 d-none"></div>
+            <pre id="mediaScanWorkerLog" class="grz-set__path small mt-2 mb-0 d-none" style="white-space: pre-wrap;"></pre>
+            <div class="grz-set__actions d-none" id="mediaScanWorkerActions">
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="btnStartMediaScanWorker">
+                <i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>Riprova avvio
+              </button>
+              <span id="mediaScanWorkerResult" class="small"></span>
             </div>
           </div>
         </div>
@@ -928,6 +978,69 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
     var mediaScanBadge = document.getElementById('mediaScanStatusBadge');
     var committedMediaScanEnabled = mediaScanToggle ? mediaScanToggle.checked : false;
     var mediaScanWorkerAlive = <?= !empty($mediaScanWorkerAlive) ? 'true' : 'false' ?>;
+    var mediaScanWorker = <?= json_encode($mediaScanWorker, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>;
+
+    // Riga "Worker": stato reale del processo (Docker, avviato da Grizzly
+    // oppure esterno) con dettagli e pulsante di nuovo tentativo.
+    function renderMediaScanWorker(worker) {
+      if (!worker || typeof worker !== 'object') return;
+      mediaScanWorker = worker;
+
+      var row = document.getElementById('mediaScanWorkerStatus');
+      var textEl = document.getElementById('mediaScanWorkerText');
+      var detailEl = document.getElementById('mediaScanWorkerDetail');
+      var logEl = document.getElementById('mediaScanWorkerLog');
+      var actionsEl = document.getElementById('mediaScanWorkerActions');
+      if (!row || !textEl) return;
+
+      var dot = row.querySelector('.grz-set__dot');
+      var dotClass = 'bg-secondary';
+      if (worker.state === 'running') dotClass = 'grz-set__dot--ok';
+      else if (worker.state === 'starting') dotClass = 'bg-warning';
+      else if (worker.state === 'failed' || worker.state === 'unavailable' || worker.state === 'offline') dotClass = 'grz-set__dot--err';
+      if (dot) dot.className = 'grz-set__dot ' + dotClass;
+
+      var text = worker.message || '';
+      if (worker.state === 'running' && worker.pid) {
+        text += ' PID ' + String(worker.pid) + '.';
+      }
+      textEl.textContent = text;
+
+      if (detailEl) {
+        var detail = '';
+        if (worker.state === 'failed' && worker.retry_in !== null && worker.retry_in !== undefined) {
+          detail = worker.retry_in > 0
+            ? 'Nuovo tentativo automatico tra ' + String(worker.retry_in) + ' secondi. Ultime righe del log:'
+            : 'Nuovo tentativo alla prossima richiesta. Ultime righe del log:';
+        }
+        if (worker.command) {
+          detail = 'In alternativa puoi avviarlo da terminale: <code>' + escHtml(worker.command) + '</code>';
+        }
+        detailEl.innerHTML = detail;
+        detailEl.classList.toggle('d-none', detail === '');
+      }
+
+      var warningEl = document.getElementById('mediaScanWorkerWarning');
+      if (warningEl) {
+        var warning = worker.warning || '';
+        warningEl.innerHTML = warning
+          ? '<i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>' + escHtml(warning)
+          : '';
+        warningEl.classList.toggle('d-none', warning === '');
+      }
+
+      if (logEl) {
+        var tail = worker.state === 'failed' ? (worker.log_tail || '') : '';
+        logEl.textContent = tail;
+        logEl.classList.toggle('d-none', tail === '');
+      }
+
+      if (actionsEl) {
+        var canRetry = worker.mode === 'managed' && !!worker.enabled
+          && (worker.state === 'failed' || worker.state === 'unavailable');
+        actionsEl.classList.toggle('d-none', !canRetry);
+      }
+    }
 
     function renderMediaScanState(enabled, workerAlive, heartbeatAge) {
       if (typeof workerAlive === 'boolean') {
@@ -937,6 +1050,8 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       if (!mediaScanBadge) return;
 
       var alive = !!mediaScanWorkerAlive;
+      var workerState = mediaScanWorker && mediaScanWorker.state ? mediaScanWorker.state : '';
+      var workerMode = mediaScanWorker && mediaScanWorker.mode ? mediaScanWorker.mode : 'managed';
       var text = '';
       var className = 'badge ';
 
@@ -944,15 +1059,22 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
         if (alive) {
           className += 'bg-success';
           text = 'Attiva · worker in esecuzione';
+        } else if (workerState === 'starting') {
+          className += 'bg-warning text-dark';
+          text = 'Attiva · avvio del worker';
         } else {
           className += 'bg-warning text-dark';
           text = 'Attiva · worker non raggiungibile';
         }
       } else {
         className += 'bg-secondary';
-        text = alive
-          ? 'Disattivata · worker in attesa'
-          : 'Disattivata · worker non raggiungibile';
+        if (alive) {
+          text = 'Disattivata · worker in attesa';
+        } else if (workerMode === 'docker') {
+          text = 'Disattivata · worker non raggiungibile';
+        } else {
+          text = 'Disattivata';
+        }
       }
 
       mediaScanBadge.className = className;
@@ -984,6 +1106,10 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
           mediaScanToggle.checked = committedMediaScanEnabled;
         }
 
+        if (data.worker) {
+          renderMediaScanWorker(data.worker);
+        }
+
         renderMediaScanState(
           committedMediaScanEnabled,
           !!data.worker_alive,
@@ -1011,6 +1137,48 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       refreshMediaScanRuntimeStatus();
     }, 10000);
 
+    // Dopo un'attivazione o un nuovo tentativo l'avvio richiede pochi
+    // secondi: controlli ravvicinati prima di tornare al polling normale.
+    function refreshMediaScanSoon() {
+      [2000, 5000, 10000, 20000].forEach(function(delay) {
+        setTimeout(refreshMediaScanRuntimeStatus, delay);
+      });
+    }
+
+    renderMediaScanWorker(mediaScanWorker);
+
+    var btnStartWorker = document.getElementById('btnStartMediaScanWorker');
+    if (btnStartWorker) {
+      btnStartWorker.addEventListener('click', function() {
+        var workerResult = document.getElementById('mediaScanWorkerResult');
+        var originalHtml = btnStartWorker.innerHTML;
+        btnStartWorker.disabled = true;
+        btnStartWorker.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Avvio…';
+        if (workerResult) workerResult.textContent = '';
+
+        postJSON(
+          BASE_URL + '/index.php?route=settings/worker-start',
+          {},
+          function(data) {
+            btnStartWorker.disabled = false;
+            btnStartWorker.innerHTML = originalHtml;
+
+            if (data.worker) {
+              renderMediaScanWorker(data.worker);
+              renderMediaScanState(committedMediaScanEnabled, !!data.worker.alive, data.worker.heartbeat_age);
+            }
+
+            if (!data.ok && workerResult) {
+              workerResult.className = 'small text-danger';
+              workerResult.textContent = data.message || 'Avvio non riuscito.';
+            }
+
+            refreshMediaScanSoon();
+          }
+        );
+      });
+    }
+
     // Lo switch ON/OFF è immediato e modifica SOLO media_scan_enabled.
     // In questo modo disabilitare lo scanner non salva per errore eventuali
     // modifiche non ancora confermate a path/intervallo/stabilità.
@@ -1037,8 +1205,14 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
 
             committedMediaScanEnabled = !!data.enabled;
             mediaScanToggle.checked = committedMediaScanEnabled;
-            renderMediaScanState(committedMediaScanEnabled);
+            if (data.worker) {
+              renderMediaScanWorker(data.worker);
+              renderMediaScanState(committedMediaScanEnabled, !!data.worker.alive, data.worker.heartbeat_age);
+            } else {
+              renderMediaScanState(committedMediaScanEnabled);
+            }
             refreshMediaScanRuntimeStatus();
+            refreshMediaScanSoon();
             mediaScanResult.className = 'small text-success';
             mediaScanResult.innerHTML = '<i class="bi bi-check-circle me-1"></i>' +
               escHtml(data.message || 'Stato scanner aggiornato.');

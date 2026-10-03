@@ -28,6 +28,11 @@ $section  = $segments[0] ?? 'dashboard';
 $action   = $segments[1] ?? 'index';
 $id       = isset($segments[2]) ? (int)$segments[2] : null;
 
+// Installazioni senza Docker: avvia il worker di scansione se la scansione è
+// attiva e nessun worker risponde. Prima di session_start() perché il processo
+// figlio non erediti il file di sessione. Costa una stat() nel caso normale.
+MediaScanWorkerSupervisor::tick();
+
 session_start();
 
 // CSRF token
