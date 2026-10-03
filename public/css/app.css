@@ -874,15 +874,90 @@ body:has(#sticky-player[style*="flex"]) {
   gap: 8px;
 }
 
+#yt-track-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
 #yt-track-label {
+  display: none;
+}
+
+/* Titolo, artista e album sono visibili e cliccabili sia nella lightbox
+   completa sia nel mini-player PiP. */
+#yt-track-title-link {
+  display: block;
+  min-width: 0;
+  color: #f2f2f2;
   font-size: 13px;
-  font-weight: 600;
-  color: #e0e0e0;
+  font-weight: 650;
+  line-height: 1.25;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 1;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+#yt-track-title-link:not(.is-disabled):hover,
+#yt-track-title-link:not(.is-disabled):focus {
+  color: #ffc107;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 193, 7, 0.55);
+  text-underline-offset: 2px;
+}
+
+#yt-track-title-link.is-disabled {
+  cursor: default;
+}
+
+#yt-track-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   min-width: 0;
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#yt-track-artist-link,
+#yt-track-album-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: rgba(255, 255, 255, 0.58);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+#yt-track-artist-link {
+  flex: 0 1 auto;
+}
+
+#yt-track-album-link {
+  flex: 1 1 auto;
+}
+
+#yt-track-artist-link:not(.is-disabled):hover,
+#yt-track-artist-link:not(.is-disabled):focus,
+#yt-track-album-link:not(.is-disabled):hover,
+#yt-track-album-link:not(.is-disabled):focus {
+  color: #ffc107;
+}
+
+#yt-track-artist-link.is-disabled,
+#yt-track-album-link.is-disabled {
+  cursor: default;
+}
+
+#yt-track-meta-sep {
+  flex: 0 0 auto;
+  opacity: 0.65;
 }
 
 /* Controlli coda "Riproduci tutti da YouTube" (mostrati da JS) */
@@ -1055,6 +1130,41 @@ body:has(#sticky-player[style*="flex"]) {
 /* Header più compatto in mini */
 #yt-lightbox.is-minimized #yt-lightbox-header {
   padding: 6px 8px;
+  align-items: center;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#yt-lightbox.is-minimized #yt-track-info,
+#yt-lightbox.is-minimized #yt-track-title-link,
+#yt-lightbox.is-minimized #yt-track-meta,
+#yt-lightbox.is-minimized #yt-track-artist-link,
+#yt-lightbox.is-minimized #yt-track-album-link {
+  cursor: grab;
+}
+
+#yt-lightbox.is-minimized #yt-lightbox-header button {
+  cursor: pointer;
+}
+
+#yt-lightbox.is-minimized.is-dragging #yt-lightbox-header,
+#yt-lightbox.is-minimized.is-dragging #yt-track-info,
+#yt-lightbox.is-minimized.is-dragging #yt-track-title-link,
+#yt-lightbox.is-minimized.is-dragging #yt-track-meta,
+#yt-lightbox.is-minimized.is-dragging #yt-track-artist-link,
+#yt-lightbox.is-minimized.is-dragging #yt-track-album-link {
+  cursor: grabbing;
+}
+
+/* Nel PiP gli stessi metadati restano visibili, solo più compatti. */
+#yt-lightbox.is-minimized #yt-track-title-link {
+  font-size: 12px;
+}
+
+#yt-lightbox.is-minimized #yt-track-meta {
+  font-size: 10px;
 }
 
 /* Il video ridotto invita al click per riespandere */

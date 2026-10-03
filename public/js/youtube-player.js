@@ -13,10 +13,14 @@
   const API_ENDPOINT = BASE_URL + '/api/youtube-track.php';
 
   // ── Stato modulo ────────────────────────────────────────────
-  var lightbox   = null;
-  var spinner    = null;
-  var trackLabel = null;
-  var isOpen     = false;
+  var lightbox       = null;
+  var spinner        = null;
+  var trackLabel     = null;
+  var trackTitleLink  = null;
+  var trackArtistLink = null;
+  var trackAlbumLink  = null;
+  var trackMetaSep   = null;
+  var isOpen         = false;
 
   var ytPlayer   = null;   // istanza YT.Player
   var apiReady   = false;  // IFrame API caricata e pronta
@@ -38,7 +42,15 @@
       '<div id="yt-lightbox-backdrop"></div>',
       '<div id="yt-lightbox-panel">',
         '<div id="yt-lightbox-header">',
-          '<span id="yt-track-label"></span>',
+          '<div id="yt-track-info">',
+            '<span id="yt-track-label"></span>',
+            '<a id="yt-track-title-link" href="#" title="Vai al disco"></a>',
+            '<div id="yt-track-meta">',
+              '<a id="yt-track-artist-link" href="#" title="Vai all\'artista"></a>',
+              '<span id="yt-track-meta-sep" aria-hidden="true">·</span>',
+              '<a id="yt-track-album-link" href="#" title="Vai al disco"></a>',
+            '</div>',
+          '</div>',
           '<div id="yt-queue-controls" style="display:none;">',
             '<button id="yt-prev" title="Traccia precedente">',
               '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">',
@@ -192,7 +204,7 @@
     qIndex = i;
     var item = queue[i];
 
-    updateLabel(item.artist + ' - ' + item.title);
+    updateTrackInfo(item);
     updateQueueCounter();
     showSpinner(true);
 
@@ -234,16 +246,115 @@
   function playNext() { playIndex(qIndex + 1); }
   function playPrev() { playIndex(qIndex - 1); }
 
+  // ── Contesto album per il PiP ──────────────────────────────
+  // Il riferimento viene catturato quando si apre YouTube, così resta corretto
+  // anche se poi l'utente naviga altrove mentre il mini-player continua a suonare.
+  function albumIdFromHref(href) {
+    if (!href) { return null; }
+    try {
+      var u = new URL(href, window.location.href);
+      var route = u.searchParams.get('route') || '';
+      var m = route.match(/^albums\/detail\/(\d+)/);
+      return m ? parseInt(m[1], 10) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function currentAlbumContext() {
+    try {
+      var u = new URL(window.location.href);
+      var route = u.searchParams.get('route') || '';
+      var m = route.match(/^albums\/detail\/(\d+)/);
+      if (!m || !window.__album) {
+        return { albumId: null, albumTitle: '', artistHref: '' };
+      }
+
+      var routeId = parseInt(m[1], 10);
+      var globalId = parseInt(window.__album.id || 0, 10);
+
+      // window.__album sopravvive alla SPA: usalo solo se appartiene davvero
+      // alla pagina album attualmente aperta, evitando metadati rimasti stale.
+      if (!routeId || routeId !== globalId) {
+        return { albumId: null, albumTitle: '', artistHref: '' };
+      }
+
+      var artistLink = document.querySelector('.album-hero-artist a[href*="route=artists/profile/"]');
+
+      return {
+        albumId: routeId,
+        albumTitle: window.__album.title || '',
+        artistHref: artistLink ? artistLink.getAttribute('href') || '' : ''
+      };
+    } catch (e) {
+      return { albumId: null, albumTitle: '', artistHref: '' };
+    }
+  }
+
+  function albumContextForButton(btn) {
+    var albumId = null;
+    var albumTitle = '';
+    var artistHref = '';
+
+    // Supporto futuro/retrocompatibile se il markup espone già i data-*.
+    if (btn) {
+      if (btn.dataset.albumId) {
+        var parsed = parseInt(btn.dataset.albumId, 10);
+        if (parsed > 0) { albumId = parsed; }
+      }
+      albumTitle = btn.dataset.albumTitle || '';
+      artistHref = btn.dataset.artistHref || '';
+
+      // Se il bottone vive in una riga playlist che contiene un link al disco,
+      // ricava il contesto senza richiedere modifiche al markup esistente.
+      if (!albumId || !albumTitle) {
+        var row = btn.closest('.track-item, tr, li');
+        var albumLink = row ? row.querySelector('a[href*="route=albums/detail/"]') : null;
+        if (albumLink) {
+          if (!albumId) { albumId = albumIdFromHref(albumLink.getAttribute('href')); }
+          if (!albumTitle) {
+            albumTitle = albumLink.dataset.albumTitle || albumLink.textContent.trim();
+          }
+        }
+
+        if (!artistHref) {
+          var artistLink = row ? row.querySelector('a[href*="route=artists/profile/"]') : null;
+          if (artistLink) {
+            artistHref = artistLink.getAttribute('href') || '';
+          }
+        }
+      }
+    }
+
+    // Nella scheda album corrente recupera anche il link già esistente
+    // al profilo artista, evitando di inventare route o lookup aggiuntivi.
+    var current = currentAlbumContext();
+    if (!albumId && current.albumId) { albumId = current.albumId; }
+    if (!albumTitle && current.albumTitle) { albumTitle = current.albumTitle; }
+    if (!artistHref && current.artistHref) { artistHref = current.artistHref; }
+
+    return {
+      albumId: albumId,
+      albumTitle: albumTitle,
+      artistHref: artistHref
+    };
+  }
+
   // ── API pubbliche: single-track ─────────────────────────────
   function openForTrack(trackId, artist, title, btn) {
     pauseAudioIfPlaying();
     isQueueMode = false;
+
+    var album = albumContextForButton(btn);
     queue = [{
-      trackId: trackId,
-      artist:  artist,
-      title:   title,
-      videoId: (btn && btn.dataset.videoId) ? btn.dataset.videoId : null,
-      btn:     btn || null
+      trackId:   trackId,
+      artist:    artist,
+      title:     title,
+      albumId:    album.albumId,
+      albumTitle: album.albumTitle,
+      artistHref: album.artistHref,
+      videoId:    (btn && btn.dataset.videoId) ? btn.dataset.videoId : null,
+      btn:       btn || null
     }];
     setQueueControlsVisible(false);
     openLightbox();
@@ -258,12 +369,16 @@
 
     queue = [];
     btns.forEach(function (btn) {
+      var album = albumContextForButton(btn);
       queue.push({
-        trackId: btn.dataset.trackId || '',
-        artist:  btn.dataset.artist  || '',
-        title:   btn.dataset.title   || '',
-        videoId: btn.dataset.videoId || null,
-        btn:     btn
+        trackId:    btn.dataset.trackId || '',
+        artist:     btn.dataset.artist  || '',
+        title:      btn.dataset.title   || '',
+        albumId:    album.albumId,
+        albumTitle: album.albumTitle,
+        artistHref: album.artistHref,
+        videoId:    btn.dataset.videoId || null,
+        btn:        btn
       });
     });
 
@@ -368,7 +483,7 @@
   // Si trascina afferrando l'header. Usa i Pointer Events con
   // setPointerCapture: funziona con mouse e touch e gli eventi
   // di move restano sull'header anche passando sopra l'iframe.
-  var dragging = null;   // stato del drag corrente {dx, dy, w, h}
+  var dragging = null;   // stato del drag corrente
   var savedPos = null;   // ultima posizione trascinata {left, top}
 
   function getPanel() {
@@ -402,43 +517,95 @@
     lightbox.style.bottom = '';
   }
 
+  function navigateHeaderLink(link) {
+    if (!link) { return; }
+    var href = link.getAttribute('href');
+    if (!href) { return; }
+
+    // Usa la navigazione SPA di Grizzly quando disponibile; fallback normale.
+    if (typeof window._spaNavigate === 'function') {
+      window._spaNavigate(href);
+    } else {
+      window.location.href = href;
+    }
+  }
+
   function onDragStart(e) {
     if (!isMinimized) { return; }
-    // I bottoni dell'header (prev/next/riduci/chiudi) restano cliccabili
+
+    // I pulsanti dell'header restano esclusivamente pulsanti.
     if (e.target.closest('button')) { return; }
+
     var panel = getPanel();
     if (!panel) { return; }
 
+    var link = e.target.closest('a');
     var rect = panel.getBoundingClientRect();
+
     dragging = {
-      dx: e.clientX - rect.left,   // offset del puntatore dentro il pannello
+      dx: e.clientX - rect.left,
       dy: e.clientY - rect.top,
-      w:  rect.width,
-      h:  rect.height
+      startX: e.clientX,
+      startY: e.clientY,
+      w: rect.width,
+      h: rect.height,
+      moved: false,
+      link: link || null
     };
-    lightbox.classList.add('is-dragging');
+
     if (e.currentTarget.setPointerCapture) {
       e.currentTarget.setPointerCapture(e.pointerId);
     }
-    e.preventDefault(); // evita selezione testo / scroll touch
+
+    // Blocca il comportamento nativo del link e la selezione testo.
+    // Se il gesto resta un click, la navigazione viene eseguita manualmente
+    // in onDragEnd(); se si muove, l'intera area diventa una maniglia di drag.
+    e.preventDefault();
   }
 
   function onDragMove(e) {
     if (!dragging) { return; }
+
+    var deltaX = e.clientX - dragging.startX;
+    var deltaY = e.clientY - dragging.startY;
+
+    // Piccola soglia per distinguere un click da un vero trascinamento.
+    if (!dragging.moved && Math.sqrt(deltaX * deltaX + deltaY * deltaY) < 5) {
+      return;
+    }
+
+    if (!dragging.moved) {
+      dragging.moved = true;
+      lightbox.classList.add('is-dragging');
+    }
+
     var pos = clampPos(
       e.clientX - dragging.dx,
       e.clientY - dragging.dy,
       dragging.w,
       dragging.h
     );
+
     applyPos(pos.left, pos.top);
     savedPos = pos;
+    e.preventDefault();
   }
 
-  function onDragEnd() {
+  function onDragEnd(e) {
     if (!dragging) { return; }
+
+    var state = dragging;
     dragging = null;
     lightbox.classList.remove('is-dragging');
+
+    // Nessun movimento: era un click sul metadato.
+    if (!state.moved && state.link) {
+      navigateHeaderLink(state.link);
+    }
+
+    if (e && e.preventDefault) {
+      e.preventDefault();
+    }
   }
 
   // Se la finestra del browser viene ridimensionata, ri-clampa
@@ -453,8 +620,65 @@
     savedPos = pos;
   }
 
-  function updateLabel(label) {
-    if (trackLabel) { trackLabel.textContent = label || ''; }
+  function updateTrackInfo(item) {
+    item = item || {};
+
+    var artist = item.artist || '';
+    var title = item.title || '';
+    var albumTitle = item.albumTitle || '';
+    var albumId = parseInt(item.albumId || 0, 10);
+    var albumHref = albumId > 0
+      ? BASE_URL + '/index.php?route=albums/detail/' + albumId
+      : '';
+
+    // Modalità normale: conserva ESATTAMENTE la label storica "Artista - Titolo".
+    if (trackLabel) {
+      trackLabel.textContent = (artist ? artist + ' - ' : '') + title;
+    }
+
+    // Modalità PiP: titolo del brano cliccabile verso il disco corrispondente.
+    if (trackTitleLink) {
+      trackTitleLink.textContent = title;
+      if (albumHref) {
+        trackTitleLink.href = albumHref;
+        trackTitleLink.classList.remove('is-disabled');
+        trackTitleLink.setAttribute('aria-label', 'Apri il disco ' + (albumTitle || title));
+      } else {
+        trackTitleLink.removeAttribute('href');
+        trackTitleLink.classList.add('is-disabled');
+        trackTitleLink.removeAttribute('aria-label');
+      }
+    }
+
+    if (trackArtistLink) {
+      trackArtistLink.textContent = artist;
+      if (item.artistHref) {
+        trackArtistLink.href = item.artistHref;
+        trackArtistLink.classList.remove('is-disabled');
+        trackArtistLink.setAttribute('aria-label', 'Apri artista ' + artist);
+      } else {
+        trackArtistLink.removeAttribute('href');
+        trackArtistLink.classList.add('is-disabled');
+        trackArtistLink.removeAttribute('aria-label');
+      }
+    }
+
+    if (trackAlbumLink) {
+      trackAlbumLink.textContent = albumTitle;
+      if (albumHref && albumTitle) {
+        trackAlbumLink.href = albumHref;
+        trackAlbumLink.classList.remove('is-disabled');
+        trackAlbumLink.setAttribute('aria-label', 'Apri il disco ' + albumTitle);
+      } else {
+        trackAlbumLink.removeAttribute('href');
+        trackAlbumLink.classList.add('is-disabled');
+        trackAlbumLink.removeAttribute('aria-label');
+      }
+    }
+
+    if (trackMetaSep) {
+      trackMetaSep.style.display = (artist && albumTitle) ? '' : 'none';
+    }
   }
 
   function updateQueueCounter() {
@@ -510,9 +734,13 @@
 
   // ── Init ────────────────────────────────────────────────────
   function init() {
-    lightbox   = createLightbox();
-    spinner    = document.getElementById('yt-spinner');
-    trackLabel = document.getElementById('yt-track-label');
+    lightbox       = createLightbox();
+    spinner        = document.getElementById('yt-spinner');
+    trackLabel     = document.getElementById('yt-track-label');
+    trackTitleLink  = document.getElementById('yt-track-title-link');
+    trackArtistLink = document.getElementById('yt-track-artist-link');
+    trackAlbumLink  = document.getElementById('yt-track-album-link');
+    trackMetaSep   = document.getElementById('yt-track-meta-sep');
 
     document.getElementById('yt-lightbox-close').addEventListener('click', closeLightbox);
 
