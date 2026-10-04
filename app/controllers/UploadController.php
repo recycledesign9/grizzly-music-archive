@@ -119,7 +119,7 @@ class UploadController
       $stmt->execute([$albumId, $trackId, $filename, $file['name'], $file['size']]);
       $_SESSION['flash_success'] = 'File audio caricato con successo.';
     } else {
-      $_SESSION['flash_error'] = 'Errore nel salvataggio del file. Controlla i permessi della cartella uploads/audio/.';
+      $_SESSION['flash_error'] = 'Errore nel salvataggio del file. Controlla i permessi della cartella audio configurata.';
     }
 
     header('Location: ' . BASE_URL . '/index.php?route=albums/detail/' . $albumId);
@@ -247,7 +247,7 @@ class UploadController
     $dest     = $audioDir . '/' . $filename;
 
     if (!move_uploaded_file($file['tmp_name'], $dest)) {
-      echo json_encode(['success' => false, 'message' => 'Errore nel salvataggio del file. Controlla i permessi di uploads/audio/.']);
+      echo json_encode(['success' => false, 'message' => 'Errore nel salvataggio del file. Controlla i permessi della cartella audio configurata.']);
       exit;
     }
 

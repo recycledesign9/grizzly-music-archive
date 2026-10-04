@@ -342,53 +342,12 @@ class MediaController
         header('Content-Type: application/json');
 
         $path = trim($_GET['path'] ?? '');
-        $path = str_replace('\\', '/', $path);
-        $path = rtrim($path, '/');
 
-        // Se vuoto: testa il path attualmente configurato (default o DB)
-        if ($path === '') {
-            $result = MediaPathResolver::testAudioPath();
-            echo json_encode($result);
-            exit;
-        }
+        // La traduzione host -> runtime è centralizzata nel resolver:
+        // l'utente vede sempre il percorso reale del server, mai /hostfs.
+        $result = MediaPathResolver::testPath($path);
 
-        // Testa il path specificato senza tocccare il DB
-        if (!is_dir($path)) {
-            echo json_encode([
-                'ok'      => false,
-                'path'    => $path,
-                'message' => 'Cartella non trovata: ' . $path,
-            ]);
-            exit;
-        }
-        if (!is_writable($path)) {
-            echo json_encode([
-                'ok'      => false,
-                'path'    => $path,
-                'message' => 'Cartella non scrivibile: ' . $path,
-            ]);
-            exit;
-        }
-
-        $mp3   = glob($path . '/*.mp3') ?: [];
-        $flac  = glob($path . '/*.flac') ?: [];
-        $files = array_merge($mp3, $flac);
-        $count = count($files);
-        if ($count === 0) {
-            echo json_encode([
-                'ok'      => true,
-                'path'    => $path,
-                'message' => 'OK — cartella raggiungibile, nessun file audio presente.',
-                'count'   => 0,
-            ]);
-            exit;
-        }
-        echo json_encode([
-            'ok'      => true,
-            'path'    => $path,
-            'message' => 'OK — ' . $count . ' file audio presenti',
-            'count'   => $count,
-        ]);
+        echo json_encode($result);
         exit;
     }
 
@@ -505,178 +464,183 @@ class MediaController
     // ----------------------------------------------------------
     private function browseDir(): void
     {
-        // Pulisce qualsiasi output precedente (warning PHP ecc.)
-        while (ob_get_level()) ob_end_clean();
+        while (ob_get_level()) {
+            ob_end_clean();
+        }
         ob_start();
 
-        // Silenzia warning PHP — li gestiamo manualmente
         $prevError = error_reporting(0);
-
         header('Content-Type: application/json');
 
-        $raw = trim($_GET['path'] ?? '');
-        $raw = str_replace('\\', '/', $raw);
+        $requested = trim($_GET['path'] ?? '');
+        $requested = str_replace('\\', '/', $requested);
 
-        // Se vuoto, usa /Volumes su Mac (dove stanno i dischi esterni),
-        // oppure la cartella uploads su Linux/Docker, oppure C:/ su Windows
-        if ($raw === '') {
-            if (PHP_OS === 'Darwin') {
-                $raw = '/Volumes';
+        $hostMapped = MediaPathResolver::hasHostMapping();
+
+        // Punto di partenza:
+        // - Docker: root del filesystem HOST, esposta internamente sotto /hostfs
+        // - macOS nativo: /Volumes
+        // - Windows: C:/
+        // - Linux nativo: /
+        if ($requested === '') {
+            if ($hostMapped) {
+                $requested = '/';
+            } elseif (PHP_OS === 'Darwin') {
+                $requested = '/Volumes';
             } elseif (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-                $raw = 'C:/';
+                $requested = 'C:/';
             } else {
-                // Linux/Docker: parte dagli uploads del progetto (sempre accessibili).
-                // Per i dischi esterni montati nel container (es. /mnt/external)
-                // usare i bookmark qui sotto — appaiono automaticamente.
-                $uploadsBase = defined('BASE_PATH')
-                    ? BASE_PATH . '/public/uploads'
-                    : '/var/www/html/public/uploads';
-                $raw = is_dir($uploadsBase) ? $uploadsBase : '/var/www/html';
+                $requested = '/';
             }
         }
 
-        $real = realpath($raw);
+        $runtimeRequested = MediaPathResolver::toRuntimePath($requested);
+        $realRuntime = realpath($runtimeRequested);
 
-        if ($real === false || !is_dir($real)) {
-            ob_end_clean();
-            error_reporting($prevError);
-            echo json_encode([
-                'ok'    => false,
-                'error' => 'Percorso non valido o non accessibile: ' . basename($raw),
-            ]);
-            exit;
-        }
-
-        $real = rtrim(str_replace('\\', '/', $real), '/');
-
-        // Verifica permessi di lettura prima di scandir
-        if (!is_readable($real)) {
-            ob_end_clean();
-            error_reporting($prevError);
-            echo json_encode([
-                'ok'    => false,
-                'error' => 'Permessi insufficienti per leggere: ' . $real,
-            ]);
-            exit;
-        }
-
-        $entries = scandir($real);
-        $dirs    = [];
-
-        if ($entries !== false) {
-            foreach ($entries as $entry) {
-                if ($entry === '.') continue;
-                $fullPath = $real . '/' . $entry;
-
-                // Salta se non è una directory o non è leggibile
-                if (!is_dir($fullPath)) continue;
-
-                // Nasconde cartelle nascoste Unix/Mac (tranne "..")
-                if ($entry !== '..' && isset($entry[0]) && $entry[0] === '.') continue;
-
-                // Salta cartelle di sistema Mac note
-                $systemDirs = ['Trashes', 'Spotlight-V100', 'fseventsd', 'MobileBackups'];
-                if (in_array($entry, $systemDirs)) continue;
-
-                $dirs[] = [
-                    'name' => $entry,
-                    'path' => $entry === '..' ? dirname($real) : $real . '/' . $entry,
-                    'up'   => $entry === '..',
-                ];
-            }
-        }
-
-        $parent = ($real !== dirname($real)) ? dirname($real) : null;
-
-        // Bookmark rapidi: percorsi utili sempre visibili in cima
+        // Bookmarks costruiti in coordinate HOST. In Docker vengono verificati
+        // passando automaticamente dal mapping /hostfs.
         $bookmarks = [];
         $candidates = [];
 
-        if (PHP_OS === 'Darwin') {
-            // Mac: dischi esterni in /Volumes, home utente Apache
-            $candidates = [
-                '/Volumes'              => 'Volumi e dischi esterni',
-                '/Users'                => 'Utenti',
-            ];
-            // Aggiunge ogni disco montato in /Volumes come scorciatoia diretta
-            if (is_dir('/Volumes') && is_readable('/Volumes')) {
-                $vols = scandir('/Volumes') ?: [];
-                foreach ($vols as $vol) {
-                    if ($vol === '.' || $vol === '..') continue;
-                    $vp = '/Volumes/' . $vol;
-                    if (is_dir($vp) && is_readable($vp)) {
-                        $candidates[$vp] = $vol . ' (disco)';
-                    }
-                }
-            }
-        } elseif (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-            // Windows: lettere di unità comuni
-            foreach (['C:/', 'D:/', 'E:/', 'F:/', 'G:/'] as $drive) {
-                if (is_dir($drive)) {
-                    $candidates[$drive] = $drive;
-                }
-            }
-        } else {
-            // Linux / Docker
-            // La cartella uploads è sempre accessibile (volume Docker o path di default).
-            // I dischi esterni devono essere montati nel container tramite docker-compose.yml:
-            //   volumes:
-            //     - /percorso/disco/host:/mnt/external
-            // Verranno rilevati automaticamente e mostrati nei bookmark.
-            $uploadsBase = defined('BASE_PATH')
-                ? BASE_PATH . '/public/uploads'
-                : '/var/www/html/public/uploads';
-
-            $candidates = [];
-
-            if (is_dir($uploadsBase)) {
-                $candidates[$uploadsBase] = 'Upload Grizzly (default)';
-            }
-            if (is_dir($uploadsBase . '/audio')) {
-                $candidates[$uploadsBase . '/audio'] = 'Audio (MP3/FLAC)';
-            }
-            if (is_dir($uploadsBase . '/covers')) {
-                $candidates[$uploadsBase . '/covers'] = 'Cover album';
-            }
-
-            // Scansiona i mount point standard — rileva automaticamente
-            // qualsiasi volume montato nel container (dischi esterni, NAS, ecc.)
-            foreach (['/mnt', '/media', '/srv'] as $mountBase) {
-                if (!is_dir($mountBase) || !is_readable($mountBase)) continue;
-                $entries = @scandir($mountBase) ?: [];
-                foreach ($entries as $entry) {
-                    if ($entry === '.' || $entry === '..') continue;
-                    $mp = $mountBase . '/' . $entry;
-                    if (is_dir($mp) && is_readable($mp)) {
-                        $candidates[$mp] = $entry . ' (volume in ' . $mountBase . ')';
-                    }
-                }
-            }
-
-            // Home utenti — utile su server bare-metal senza Docker
-            if (is_dir('/home') && is_readable('/home')) {
-                $candidates['/home'] = 'Home utenti';
-            }
+        $configuredAudio = MediaPathResolver::getConfiguredDbPath();
+        if ($configuredAudio !== '') {
+            $candidates[$configuredAudio] = 'Libreria audio attuale';
         }
 
-        foreach ($candidates as $path => $label) {
-            if (is_dir($path)) {
-                $bookmarks[] = [
-                    'path'  => $path,
-                    'label' => $label,
+        $scanRoot = $this->getSettingValue('media_scan_path');
+        if ($scanRoot !== '') {
+            $candidates[$scanRoot] = 'Cartella scansione automatica';
+        }
+
+        if ($hostMapped) {
+            $candidates['/home'] = 'Home utenti';
+            $candidates['/mnt'] = 'Dischi e mount in /mnt';
+            $candidates['/media'] = 'Dischi e mount in /media';
+            $candidates['/srv'] = 'Dati in /srv';
+            $candidates['/storage'] = 'Storage';
+            $candidates['/data'] = 'Data';
+            $candidates['/run/media'] = 'Dischi rimovibili';
+        } elseif (PHP_OS === 'Darwin') {
+            $candidates['/Volumes'] = 'Volumi e dischi esterni';
+            $candidates['/Users'] = 'Utenti';
+        } elseif (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            foreach (['C:/', 'D:/', 'E:/', 'F:/', 'G:/'] as $drive) {
+                $candidates[$drive] = $drive;
+            }
+        } else {
+            $candidates['/home'] = 'Home utenti';
+            $candidates['/mnt'] = 'Dischi e mount in /mnt';
+            $candidates['/media'] = 'Dischi e mount in /media';
+            $candidates['/srv'] = 'Dati in /srv';
+            $candidates['/storage'] = 'Storage';
+            $candidates['/data'] = 'Data';
+            $candidates['/run/media'] = 'Dischi rimovibili';
+        }
+
+        foreach ($candidates as $displayPath => $label) {
+            $displayPath = rtrim(str_replace('\\', '/', $displayPath), '/');
+            if ($displayPath === '') {
+                $displayPath = '/';
+            }
+
+            $runtimePath = MediaPathResolver::toRuntimePath($displayPath);
+            if (!is_dir($runtimePath) || !is_readable($runtimePath)) {
+                continue;
+            }
+
+            $bookmarks[] = [
+                'path' => $displayPath,
+                'label' => $label,
+            ];
+        }
+
+        if ($realRuntime === false || !is_dir($realRuntime)) {
+            ob_end_clean();
+            error_reporting($prevError);
+            echo json_encode([
+                'ok' => false,
+                'error' => 'Percorso non valido o non accessibile: ' . $requested,
+                'bookmarks' => $bookmarks,
+            ]);
+            exit;
+        }
+
+        if (!is_readable($realRuntime)) {
+            ob_end_clean();
+            error_reporting($prevError);
+            echo json_encode([
+                'ok' => false,
+                'error' => 'Permessi insufficienti per leggere: ' . $requested,
+                'bookmarks' => $bookmarks,
+            ]);
+            exit;
+        }
+
+        $realRuntime = rtrim(str_replace('\\', '/', $realRuntime), '/');
+        if ($realRuntime === '') {
+            $realRuntime = '/';
+        }
+
+        $currentDisplay = MediaPathResolver::toDisplayPath($realRuntime);
+        $entries = @scandir($realRuntime);
+        $dirs = [];
+
+        if ($entries !== false) {
+            foreach ($entries as $entry) {
+                if ($entry === '.' || $entry === '..') {
+                    continue;
+                }
+
+                // Cartelle nascoste e metadata di sistema non aiutano nella scelta
+                // di una libreria musicale e rendono il picker molto rumoroso.
+                if (isset($entry[0]) && $entry[0] === '.') {
+                    continue;
+                }
+
+                $fullRuntime = rtrim($realRuntime, '/') . '/' . $entry;
+                if ($realRuntime === '/') {
+                    $fullRuntime = '/' . $entry;
+                }
+
+                if (!is_dir($fullRuntime) || !is_readable($fullRuntime)) {
+                    continue;
+                }
+
+                $fullDisplay = MediaPathResolver::toDisplayPath($fullRuntime);
+
+                $dirs[] = [
+                    'name' => $entry,
+                    'path' => $fullDisplay,
+                    'writable' => is_writable($fullRuntime),
                 ];
             }
         }
+
+        usort($dirs, static function (array $a, array $b): int {
+            return strnatcasecmp((string)$a['name'], (string)$b['name']);
+        });
+
+        $parentDisplay = null;
+        if ($realRuntime !== '/' && $realRuntime !== MediaPathResolver::toRuntimePath('/')) {
+            $parentRuntime = dirname($realRuntime);
+            $parentDisplay = MediaPathResolver::toDisplayPath($parentRuntime);
+        }
+
+        // Mostra "Posizioni" soltanto all'apertura/root: non ripeterle in ogni
+        // sottocartella evita salti e rende la navigazione prevedibile.
+        $showBookmarks = ($requested === '/' || $requested === '' || $currentDisplay === '/');
 
         ob_end_clean();
         error_reporting($prevError);
 
         echo json_encode([
-            'ok'        => true,
-            'current'   => $real,
-            'parent'    => $parent,
-            'dirs'      => $dirs,
+            'ok' => true,
+            'current' => $currentDisplay,
+            'parent' => $parentDisplay,
+            'dirs' => $dirs,
             'bookmarks' => $bookmarks,
+            'show_bookmarks' => $showBookmarks,
+            'current_writable' => is_writable($realRuntime),
         ]);
         exit;
     }
@@ -688,14 +652,17 @@ class MediaController
     private function migrateCount(): void
     {
         header('Content-Type: application/json');
-        $dir   = MediaPathResolver::getAudioDir();
-        $mp3   = glob($dir . '/*.mp3') ?: [];
-        $flac  = glob($dir . '/*.flac') ?: [];
+
+        $dir = MediaPathResolver::getAudioDir();
+        $mp3 = glob($dir . '/*.mp3') ?: [];
+        $flac = glob($dir . '/*.flac') ?: [];
         $files = array_merge($mp3, $flac);
+
         echo json_encode([
-            'ok'    => true,
+            'ok' => true,
             'total' => count($files),
-            'dir'   => $dir,
+            // Non esporre il path runtime Docker (/hostfs/...) alla UI.
+            'dir' => MediaPathResolver::getConfiguredPath(),
         ]);
         exit;
     }
@@ -733,17 +700,24 @@ class MediaController
             exit;
         }
 
-        $targetDir = rtrim(str_replace('\\', '/', $targetDir), '/');
+        $targetDisplay = rtrim(str_replace('\\', '/', $targetDir), '/');
+        $targetRuntime = MediaPathResolver::toRuntimePath($targetDisplay);
 
-        if (!is_dir($targetDir)) {
-            if (!mkdir($targetDir, 0755, true)) {
-                echo json_encode(['ok' => false, 'message' => 'Impossibile creare la cartella: ' . $targetDir]);
+        if (!is_dir($targetRuntime)) {
+            if (!@mkdir($targetRuntime, 0755, true) && !is_dir($targetRuntime)) {
+                echo json_encode([
+                    'ok' => false,
+                    'message' => 'Impossibile creare la cartella: ' . $targetDisplay,
+                ]);
                 exit;
             }
         }
 
-        if (!is_writable($targetDir)) {
-            echo json_encode(['ok' => false, 'message' => 'Cartella non scrivibile: ' . $targetDir]);
+        if (!is_writable($targetRuntime)) {
+            echo json_encode([
+                'ok' => false,
+                'message' => 'Cartella non scrivibile: ' . $targetDisplay,
+            ]);
             exit;
         }
 
@@ -767,7 +741,7 @@ class MediaController
 
         foreach ($chunk as $srcFile) {
             $filename = basename($srcFile);
-            $destFile = $targetDir . '/' . $filename;
+            $destFile = $targetRuntime . '/' . $filename;
 
             // Salta se già presente e dimensione identica (evita copia inutile)
             if (file_exists($destFile) && filesize($destFile) === filesize($srcFile)) {

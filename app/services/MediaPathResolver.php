@@ -3,44 +3,50 @@
 /**
  * MediaPathResolver
  *
- * Astrae il percorso fisico e gli URL dei file audio.
- * Le cover restano sempre in public/uploads/covers/ (webroot),
- * servite direttamente da Apache senza overhead PHP.
+ * Astrae il percorso configurato dall'utente dal percorso fisico usato
+ * dal processo PHP.
  *
- * L'audio può essere ricollocato su un path esterno configurabile
- * tramite la tabella `settings` (chiave: audio_path).
+ * In installazioni native i due percorsi coincidono.
  *
- * Logica di risoluzione:
- *   1. Legge `audio_path` dalla tabella settings (cache in memoria per request)
- *   2. Se vuoto/non impostato, usa la costante AUDIO_PATH da config.php
- *   3. Gli URL audio passano sempre per MediaController (?route=media/audio/filename)
- *      in modo da funzionare sia con path dentro che fuori dalla webroot
+ * In Docker il percorso scelto dall'utente resta sempre il percorso reale
+ * dell'host (es. /mnt/media/Grizzly/audio), mentre a runtime viene tradotto
+ * automaticamente sotto MEDIA_HOST_PREFIX / MEDIA_SCAN_HOST_PREFIX
+ * (es. /hostfs/mnt/media/Grizzly/audio).
  *
- * Posizionare in: app/services/MediaPathResolver.php
+ * Il path predefinito interno di Grizzly (AUDIO_PATH) non viene mai
+ * prefissato: continua a vivere nel volume uploads_data.
  */
 class MediaPathResolver
 {
-    /** @var string|null Cache per la request corrente */
-    private static $resolvedBasePath = null;
+    /** @var string|null Cache del valore DB per la request corrente. */
+    private static $configuredDbPath = null;
+
+    /** @var bool */
+    private static $configuredDbPathLoaded = false;
 
     // ----------------------------------------------------------
-    // Path fisico assoluto della cartella audio
+    // Path audio
     // ----------------------------------------------------------
 
     /**
-     * Restituisce il path assoluto della cartella audio.
-     * Il path salvato in settings è già la cartella finale dei file —
-     * nessuna concatenazione aggiuntiva viene effettuata.
-     * Es: /Applications/MAMP/htdocs/supergrizzly/public/uploads/audio
-     *     oppure /Volumes/WDBlack/test
+     * Restituisce il percorso fisico realmente usato da PHP.
+     *
+     * - path personalizzato: host path -> runtime path Docker
+     * - default: AUDIO_PATH interno all'applicazione
      */
     public static function getAudioDir(): string
     {
-        return rtrim(self::resolveBasePath(), '/');
+        $configured = self::getConfiguredDbPath();
+
+        if ($configured !== '') {
+            return rtrim(self::toRuntimePath($configured), '/');
+        }
+
+        return rtrim(self::defaultAudioPath(), '/');
     }
 
     /**
-     * Path assoluto completo per un singolo file audio (solo filename, no path).
+     * Path fisico completo per un file managed.
      */
     public static function getAudioAbsPath(string $filename): string
     {
@@ -48,136 +54,253 @@ class MediaPathResolver
     }
 
     // ----------------------------------------------------------
-    // URL pubblico per il browser
+    // URL pubblici
     // ----------------------------------------------------------
 
-    /**
-     * URL dello streaming PHP per un file audio.
-     * Funziona sia con file nella webroot che fuori.
-     * Il MediaController legge il file e lo streama con Range support.
-     */
     public static function getStreamUrl(string $filename): string
     {
         return BASE_URL . '/index.php?route=media/audio/' . urlencode(basename($filename));
     }
 
-    /**
-     * URL per download diretto (Content-Disposition: attachment).
-     */
     public static function getDownloadUrl(string $filename): string
     {
         return BASE_URL . '/index.php?route=media/download/' . urlencode(basename($filename));
     }
 
     // ----------------------------------------------------------
-    // Lettura e test del path configurato
+    // Path configurato / mapping host <-> runtime
     // ----------------------------------------------------------
 
     /**
-     * Restituisce il path configurato (dalla tabella settings o fallback config.php).
+     * Restituisce il percorso da mostrare all'utente.
+     *
+     * Se audio_path è configurato ritorna esattamente il path host salvato.
+     * In assenza di override ritorna il default interno di Grizzly.
      */
     public static function getConfiguredPath(): string
     {
-        return self::resolveBasePath();
+        $configured = self::getConfiguredDbPath();
+
+        return $configured !== '' ? $configured : self::defaultAudioPath();
     }
 
     /**
-     * Aggiorna il path nella tabella settings.
-     * Passa una stringa vuota per tornare al default (AUDIO_PATH da config.php).
+     * Restituisce solo il valore personalizzato salvato nel DB.
+     * Stringa vuota = usa il default interno.
+     */
+    public static function getConfiguredDbPath(): string
+    {
+        if (self::$configuredDbPathLoaded) {
+            return (string)self::$configuredDbPath;
+        }
+
+        self::$configuredDbPathLoaded = true;
+        self::$configuredDbPath = '';
+
+        try {
+            $db = Database::getInstance();
+            $stmt = $db->prepare("SELECT `value` FROM settings WHERE `key` = 'audio_path' LIMIT 1");
+            $stmt->execute();
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($row && trim((string)$row['value']) !== '') {
+                self::$configuredDbPath = self::normalizePath((string)$row['value']);
+            }
+        } catch (Exception $e) {
+            // DB/settings non disponibili: resta attivo il default.
+        }
+
+        return (string)self::$configuredDbPath;
+    }
+
+    /**
+     * True quando Docker espone il filesystem host sotto un prefisso runtime.
+     */
+    public static function hasHostMapping(): bool
+    {
+        return self::hostPrefix() !== '';
+    }
+
+    /**
+     * Traduce un percorso visibile all'utente nel percorso realmente usato
+     * dal container.
      *
-     * @throws RuntimeException se il path non è valido o non scrivibile
+     * I path interni all'applicazione non vengono prefissati.
+     */
+    public static function toRuntimePath(string $path): string
+    {
+        $path = self::normalizePath($path);
+
+        if ($path === '') {
+            return '';
+        }
+
+        $prefix = self::hostPrefix();
+
+        if ($prefix === '' || self::isInternalAppPath($path)) {
+            return $path;
+        }
+
+        // Evita doppi prefissi in caso di chiamate interne.
+        if ($path === $prefix || strpos($path, $prefix . '/') === 0) {
+            return $path;
+        }
+
+        if ($path === '/') {
+            return $prefix;
+        }
+
+        return $prefix . '/' . ltrim($path, '/');
+    }
+
+    /**
+     * Converte un path runtime Docker nel path host mostrato all'utente.
+     */
+    public static function toDisplayPath(string $path): string
+    {
+        $path = self::normalizePath($path);
+        $prefix = self::hostPrefix();
+
+        if ($prefix === '') {
+            return $path;
+        }
+
+        if ($path === $prefix) {
+            return '/';
+        }
+
+        if (strpos($path, $prefix . '/') === 0) {
+            $display = substr($path, strlen($prefix));
+            return $display === '' ? '/' : $display;
+        }
+
+        return $path;
+    }
+
+    /**
+     * Salva un nuovo path utente.
+     *
+     * Il DB conserva sempre il path host leggibile dall'utente, mai /hostfs.
      */
     public static function setConfiguredPath(string $path): void
     {
-        $path = trim($path);
+        $path = self::normalizePath($path);
 
         if ($path !== '') {
-            // Normalizza separatori (compatibilità Windows/Mac)
-            $path = str_replace('\\', '/', $path);
-            $path = rtrim($path, '/');
+            $runtime = self::toRuntimePath($path);
 
-            // Validazione base
-            if (!is_dir($path)) {
+            if (!is_dir($runtime)) {
                 throw new RuntimeException('Il percorso non esiste o non è una cartella: ' . $path);
             }
-            if (!is_writable($path)) {
-                throw new RuntimeException('Il percorso non è scrivibile: ' . $path);
+
+            if (!is_writable($runtime)) {
+                throw new RuntimeException(
+                    'La cartella esiste ma Grizzly non può scriverci: ' . $path
+                );
             }
         }
 
-        $db   = Database::getInstance();
+        $db = Database::getInstance();
         $stmt = $db->prepare("
             INSERT INTO settings (`key`, `value`)
             VALUES ('audio_path', :val_insert)
             ON DUPLICATE KEY UPDATE `value` = :val_update
         ");
-        $stmt->execute([':val_insert' => $path, ':val_update' => $path]);
+        $stmt->execute([
+            ':val_insert' => $path,
+            ':val_update' => $path,
+        ]);
 
-        // Invalida la cache per la request corrente
-        self::$resolvedBasePath = null;
+        self::$configuredDbPath = $path;
+        self::$configuredDbPathLoaded = true;
     }
 
     /**
-     * Verifica che la cartella audio (quella effettivamente usata) esista e sia scrivibile.
-     * Utile per la pagina Settings.
+     * Testa un percorso mostrato all'utente senza salvarlo.
      *
-     * @return array{ok: bool, path: string, message: string}
+     * @return array{ok: bool, path: string, message: string, count?: int, writable?: bool}
      */
-    public static function testAudioPath(): array
+    public static function testPath(string $path): array
     {
-        $dir = self::getAudioDir();
+        $display = self::normalizePath($path);
 
-        if (!is_dir($dir)) {
-            return [
-                'ok'      => false,
-                'path'    => $dir,
-                'message' => 'Cartella non trovata: ' . $dir,
-            ];
-        }
-        if (!is_writable($dir)) {
-            return [
-                'ok'      => false,
-                'path'    => $dir,
-                'message' => 'Cartella non scrivibile: ' . $dir,
-            ];
+        if ($display === '') {
+            $display = self::getConfiguredPath();
         }
 
-        // Conta tutti i file audio presenti (MP3 + FLAC)
-        $files = self::getAudioFiles($dir);
+        $runtime = self::pathIsConfiguredDefault($display)
+            ? self::defaultAudioPath()
+            : self::toRuntimePath($display);
+
+        if (!is_dir($runtime)) {
+            return [
+                'ok' => false,
+                'path' => $display,
+                'message' => 'Cartella non trovata: ' . $display,
+                'writable' => false,
+            ];
+        }
+
+        if (!is_readable($runtime)) {
+            return [
+                'ok' => false,
+                'path' => $display,
+                'message' => 'Cartella non leggibile: ' . $display,
+                'writable' => false,
+            ];
+        }
+
+        if (!is_writable($runtime)) {
+            return [
+                'ok' => false,
+                'path' => $display,
+                'message' => 'Cartella raggiungibile ma non scrivibile da Grizzly: ' . $display,
+                'writable' => false,
+            ];
+        }
+
+        $files = self::getAudioFiles($runtime);
         $count = count($files);
 
-        if ($count === 0) {
-            return [
-                'ok'      => true,
-                'path'    => $dir,
-                'message' => 'Cartella raggiungibile, nessun file audio presente.',
-                'count'   => 0,
-            ];
-        }
-
         return [
-            'ok'      => true,
-            'path'    => $dir,
-            'message' => 'OK — ' . $count . ' file audio presenti',
-            'count'   => $count,
+            'ok' => true,
+            'path' => $display,
+            'message' => $count > 0
+                ? 'OK — ' . $count . ' file audio presenti'
+                : 'OK — cartella raggiungibile e scrivibile',
+            'count' => $count,
+            'writable' => true,
         ];
     }
 
     /**
-     * Conta i file audio e calcola la dimensione totale nella cartella corrente.
+     * Testa la cartella attualmente attiva.
+     */
+    public static function testAudioPath(): array
+    {
+        return self::testPath(self::getConfiguredPath());
+    }
+
+    /**
+     * Conta MP3/FLAC e dimensione totale della cartella attiva.
      *
      * @return array{count: int, size_bytes: int, size_human: string}
      */
     public static function getAudioStats(): array
     {
-        $dir   = self::getAudioDir();
+        $dir = self::getAudioDir();
         $files = is_dir($dir) ? self::getAudioFiles($dir) : [];
         $total = 0;
-        foreach ($files as $f) {
-            $total += filesize($f);
+
+        foreach ($files as $file) {
+            $size = @filesize($file);
+            if ($size !== false) {
+                $total += $size;
+            }
         }
+
         return [
-            'count'      => count($files),
+            'count' => count($files),
             'size_bytes' => $total,
             'size_human' => self::humanBytes($total),
         ];
@@ -188,49 +311,51 @@ class MediaPathResolver
     // ----------------------------------------------------------
 
     /**
-     * Copia tutti i file audio dal path attuale al nuovo path.
-     * NON cambia il setting — chiama setConfiguredPath() separatamente
-     * solo dopo che la copia è andata a buon fine.
-     *
-     * @param  string $newDir  Path assoluto della nuova cartella audio
-     * @return array{ok: bool, moved: int, errors: string[], skipped: int}
+     * Copia tutti i file audio managed nel nuovo path.
+     * Il path passato è sempre quello visibile all'utente.
      */
     public static function migrateAudioFiles(string $newDir): array
     {
-        $newDir = rtrim(str_replace('\\', '/', $newDir), '/');
+        $displayTarget = self::normalizePath($newDir);
+        $runtimeTarget = self::toRuntimePath($displayTarget);
         $srcDir = self::getAudioDir();
-        $result = ['ok' => true, 'moved' => 0, 'errors' => [], 'skipped' => 0];
 
-        if (!is_dir($newDir)) {
-            if (!mkdir($newDir, 0755, true)) {
-                $result['ok']       = false;
-                $result['errors'][] = 'Impossibile creare la cartella di destinazione: ' . $newDir;
+        $result = [
+            'ok' => true,
+            'moved' => 0,
+            'errors' => [],
+            'skipped' => 0,
+        ];
+
+        if (!is_dir($runtimeTarget)) {
+            if (!@mkdir($runtimeTarget, 0755, true) && !is_dir($runtimeTarget)) {
+                $result['ok'] = false;
+                $result['errors'][] =
+                    'Impossibile creare la cartella di destinazione: ' . $displayTarget;
                 return $result;
             }
         }
 
-        if (!is_writable($newDir)) {
-            $result['ok']       = false;
-            $result['errors'][] = 'Cartella di destinazione non scrivibile: ' . $newDir;
+        if (!is_writable($runtimeTarget)) {
+            $result['ok'] = false;
+            $result['errors'][] =
+                'Cartella di destinazione non scrivibile: ' . $displayTarget;
             return $result;
         }
 
-        // Migra MP3 e FLAC
-        $files = self::getAudioFiles($srcDir);
-
-        foreach ($files as $srcFile) {
+        foreach (self::getAudioFiles($srcDir) as $srcFile) {
             $filename = basename($srcFile);
-            $destFile = $newDir . '/' . $filename;
+            $destFile = rtrim($runtimeTarget, '/') . '/' . $filename;
 
             if (file_exists($destFile)) {
                 $result['skipped']++;
                 continue;
             }
 
-            if (copy($srcFile, $destFile)) {
+            if (@copy($srcFile, $destFile)) {
                 $result['moved']++;
             } else {
-                $result['ok']       = false;
+                $result['ok'] = false;
                 $result['errors'][] = 'Copia fallita: ' . $filename;
             }
         }
@@ -242,54 +367,80 @@ class MediaPathResolver
     // Internals
     // ----------------------------------------------------------
 
-    /**
-     * Restituisce tutti i file audio (MP3 + FLAC) presenti in una cartella.
-     *
-     * @param  string $dir  Path assoluto della cartella
-     * @return string[]     Array di path assoluti
-     */
-    private static function getAudioFiles(string $dir): array
+    private static function defaultAudioPath(): string
     {
-        $dir   = rtrim($dir, '/');
-        $mp3   = glob($dir . '/*.mp3')  ?: [];
-        $flac  = glob($dir . '/*.flac') ?: [];
-        return array_merge($mp3, $flac);
+        return defined('AUDIO_PATH')
+            ? rtrim((string)AUDIO_PATH, '/')
+            : rtrim(BASE_PATH . '/public/uploads/audio', '/');
+    }
+
+    private static function pathIsConfiguredDefault(string $path): bool
+    {
+        return self::normalizePath($path) === self::normalizePath(self::defaultAudioPath());
+    }
+
+    private static function hostPrefix(): string
+    {
+        $prefix = trim((string)getenv('MEDIA_HOST_PREFIX'));
+
+        if ($prefix === '') {
+            // Compatibilità con le installazioni Docker già esistenti.
+            $prefix = trim((string)getenv('MEDIA_SCAN_HOST_PREFIX'));
+        }
+
+        return $prefix === '' ? '' : rtrim(self::normalizePath($prefix), '/');
+    }
+
+    private static function isInternalAppPath(string $path): bool
+    {
+        $base = rtrim(self::normalizePath(BASE_PATH), '/');
+        $path = self::normalizePath($path);
+
+        if ($base === '' || $path === '') {
+            return false;
+        }
+
+        return $path === $base || strpos($path, $base . '/') === 0;
+    }
+
+    private static function normalizePath(string $path): string
+    {
+        $path = trim(str_replace('\\', '/', $path));
+
+        if ($path === '') {
+            return '';
+        }
+
+        // Mantiene intatta la root Unix.
+        if ($path === '/') {
+            return '/';
+        }
+
+        // Mantiene C:/ su Windows.
+        if (preg_match('/^[A-Za-z]:\/$/', $path)) {
+            return $path;
+        }
+
+        return rtrim($path, '/');
     }
 
     /**
-     * Risolve il path base con cache per la request corrente.
-     * Legge da DB, fallback a costante AUDIO_PATH.
+     * @return string[]
      */
-    private static function resolveBasePath(): string
+    private static function getAudioFiles(string $dir): array
     {
-        if (self::$resolvedBasePath !== null) {
-            return self::$resolvedBasePath;
-        }
+        $dir = rtrim($dir, '/');
+        $mp3 = glob($dir . '/*.mp3') ?: [];
+        $flac = glob($dir . '/*.flac') ?: [];
 
-        try {
-            $db   = Database::getInstance();
-            $stmt = $db->prepare("SELECT `value` FROM settings WHERE `key` = 'audio_path' LIMIT 1");
-            $stmt->execute();
-            $row  = $stmt->fetch(PDO::FETCH_ASSOC);
-
-            if ($row && trim($row['value']) !== '') {
-                self::$resolvedBasePath = rtrim(trim($row['value']), '/');
-                return self::$resolvedBasePath;
-            }
-        } catch (Exception $e) {
-            // Tabella settings non ancora creata o errore DB: usa fallback
-        }
-
-        // Fallback: AUDIO_PATH da config.php punta già alla cartella finale dei file audio
-        self::$resolvedBasePath = defined('AUDIO_PATH') ? AUDIO_PATH : (BASE_PATH . '/public/uploads/audio');
-        return self::$resolvedBasePath;
+        return array_merge($mp3, $flac);
     }
 
     private static function humanBytes(int $bytes): string
     {
         if ($bytes >= 1073741824) return round($bytes / 1073741824, 1) . ' GB';
-        if ($bytes >= 1048576)    return round($bytes / 1048576, 1) . ' MB';
-        if ($bytes >= 1024)       return round($bytes / 1024, 1) . ' KB';
+        if ($bytes >= 1048576) return round($bytes / 1048576, 1) . ' MB';
+        if ($bytes >= 1024) return round($bytes / 1024, 1) . ' KB';
         return $bytes . ' B';
     }
 }

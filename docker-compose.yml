@@ -12,8 +12,10 @@ x-app-env: &app-env
   YOUTUBE_API_KEY:  ${YOUTUBE_API_KEY:-}
   DEBUG:            ${DEBUG:-false}
 
-  # Internal Docker mapping only. The music-library path is configured
-  # exclusively from Grizzly: Settings -> Automatic scan.
+  # Internal Docker mapping. Paths chosen in Settings always stay in host
+  # coordinates (for example /mnt/music); Grizzly translates them to /hostfs
+  # only inside containers. MEDIA_SCAN_HOST_PREFIX is kept for compatibility.
+  MEDIA_HOST_PREFIX:      /hostfs
   MEDIA_SCAN_HOST_PREFIX: /hostfs
 
 
@@ -45,12 +47,16 @@ services:
       # The app container is also the single initializer of this volume.
       - runtime_data:/var/www/html/storage
 
-      # Read-only view of the host filesystem.
-      # Users choose the real host path only from Settings.
+      # Host filesystem used by the Settings folder picker and by relocatable
+      # managed audio. Users always choose normal host paths in the UI;
+      # Grizzly maps them internally under /hostfs.
+      #
+      # The app needs read/write access so uploads and audio migration can target
+      # a folder selected from Settings. Normal Unix permissions still apply.
       - type: bind
         source: /
         target: /hostfs
-        read_only: true
+        read_only: false
 
     depends_on:
       db:

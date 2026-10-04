@@ -106,7 +106,12 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
             <h3>Cartella attuale</h3>
           </div>
           <div class="grz-set__control">
-            <div class="grz-set__path"><?= htmlspecialchars($audioPathActive) ?></div>
+            <?php if (trim((string)$audioPathDb) === ''): ?>
+              <div class="grz-set__path">Archivio interno Grizzly</div>
+              <div class="small text-muted mt-1">Gestito automaticamente da Grizzly.</div>
+            <?php else: ?>
+              <div class="grz-set__path"><?= htmlspecialchars($audioPathDb) ?></div>
+            <?php endif; ?>
             <div class="grz-set__status" id="pathStatusBadge">
               <?php if ($audioTest['ok']): ?>
                 <span class="grz-set__dot grz-set__dot--ok" aria-hidden="true"></span>
@@ -122,7 +127,7 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
         <div class="grz-set__row">
           <div class="grz-set__label">
             <h3>Cambia percorso</h3>
-            <p>Percorso assoluto. Lascia vuoto per usare quello predefinito.</p>
+            <p>Scegli la cartella in cui Grizzly deve salvare i file audio. Puoi usare il browser oppure inserire il percorso manualmente.</p>
           </div>
           <div class="grz-set__control">
             <details class="grz-set__panel" id="audioPathPanel">
@@ -137,13 +142,13 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
                   <input type="text"
                     id="audioPathInput"
                     class="form-control font-monospace"
-                    placeholder="/Volumes/ExternalDisk/grizzly-audio"
+                    placeholder="Seleziona una cartella o inserisci un percorso assoluto"
                     value="<?= htmlspecialchars($audioPathDb) ?>">
                   <button class="btn btn-outline-secondary" type="button" id="btnTestPath">
                     <i class="bi bi-plug me-1" aria-hidden="true"></i>Testa
                   </button>
                 </div>
-                <div class="form-text">Predefinito: <code><?= htmlspecialchars($defaultAudioPath) ?></code></div>
+                <div class="form-text">Lascia vuoto per usare l'archivio audio interno gestito da Grizzly.</div>
                 <div id="testResult" class="small mt-2"></div>
 
                 <!-- Browser cartelle: percorso audio -->
@@ -193,7 +198,7 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
               <input type="text"
                 id="migrateTargetInput"
                 class="form-control font-monospace"
-                placeholder="Percorso assoluto di destinazione">
+                placeholder="Seleziona una cartella o inserisci un percorso assoluto">
             </div>
 
             <!-- Browser cartelle: migrazione -->
@@ -338,12 +343,36 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
           </div>
           <div class="grz-set__control">
             <label for="mediaScanPath" class="form-label">Cartella da scansionare</label>
-            <input type="text"
-              id="mediaScanPath"
-              class="form-control font-monospace"
-              placeholder="/Volumes/Music/Incoming"
-              value="<?= htmlspecialchars($mediaScanPath, ENT_QUOTES, 'UTF-8') ?>">
-            <div class="form-text">In Docker usa il percorso reale dell'host, non quello interno al container.</div>
+            <div class="input-group">
+              <button class="btn btn-outline-secondary" type="button" id="btnBrowseScan" title="Sfoglia cartelle" aria-label="Sfoglia cartelle">
+                <i class="bi bi-folder2-open" aria-hidden="true"></i>
+              </button>
+              <input type="text"
+                id="mediaScanPath"
+                class="form-control font-monospace"
+                placeholder="Seleziona una cartella o inserisci un percorso assoluto"
+                value="<?= htmlspecialchars($mediaScanPath, ENT_QUOTES, 'UTF-8') ?>">
+            </div>
+            <div class="form-text">Scegli una cartella del server. In Docker Grizzly gestisce automaticamente il percorso interno.</div>
+
+            <div id="dirBrowserScan" class="d-none mt-3">
+              <div class="card border">
+                <div class="card-header py-2 d-flex align-items-center justify-content-between">
+                  <span class="small fw-semibold"><i class="bi bi-folder2-open me-1" aria-hidden="true"></i>Sfoglia cartelle</span>
+                  <button type="button" class="btn-close btn-sm" id="btnCloseBrowserScan" aria-label="Chiudi"></button>
+                </div>
+                <div class="card-body p-0">
+                  <div id="browserCurrentPathScan" class="px-3 py-2 bg-body-secondary text-body small border-bottom"></div>
+                  <div id="browserListScan" style="max-height:280px;overflow-y:auto"></div>
+                </div>
+                <div class="card-footer py-2 d-flex gap-2">
+                  <button type="button" class="btn btn-sm btn-warning" id="btnSelectScanDir">
+                    <i class="bi bi-check-lg me-1" aria-hidden="true"></i>Usa questa cartella
+                  </button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" id="btnCancelBrowserScan">Annulla</button>
+                </div>
+              </div>
+            </div>
 
             <div class="grz-set__pair">
               <div>
@@ -1885,160 +1914,301 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       }
     };
 
-    // ── Browse cartelle server ─────────────────────────────────
+    // ── Browser cartelle server ─────────────────────────────────
+    // Un solo componente logico serve Libreria audio, Migrazione e Scanner.
+    // Le richieste precedenti vengono annullate: una risposta lenta non può
+    // più ridisegnare il browser dopo che l'utente è già entrato altrove.
     var currentBrowsePath = '';
-    var currentBrowserTarget = 'audio'; // 'audio' | 'migrate'
+    var currentBrowserTarget = 'audio'; // 'audio' | 'migrate' | 'scan'
+    var browserRequestId = 0;
+    var browserAbortController = null;
 
-    document.getElementById('btnBrowseDir').onclick = function() {
-      var current = document.getElementById('audioPathInput').value.trim();
-      currentBrowserTarget = 'audio';
-      openBrowser(current || '');
-    };
+    function browserElements(target) {
+      var suffix = target === 'migrate' ? 'Migrate' : (target === 'scan' ? 'Scan' : '');
 
-    document.getElementById('btnCloseBrowser').onclick =
-      document.getElementById('btnCancelBrowser').onclick = function() {
-        document.getElementById('dirBrowser').classList.add('d-none');
+      return {
+        browser: document.getElementById('dirBrowser' + suffix),
+        list: document.getElementById('browserList' + suffix),
+        path: document.getElementById('browserCurrentPath' + suffix),
+        select: document.getElementById(
+          target === 'migrate' ? 'btnSelectMigrateDir' :
+          (target === 'scan' ? 'btnSelectScanDir' : 'btnSelectThisDir')
+        )
       };
+    }
 
-    document.getElementById('btnSelectThisDir').onclick = function() {
-      document.getElementById('audioPathInput').value = currentBrowsePath;
-      document.getElementById('dirBrowser').classList.add('d-none');
-    };
+    function closeBrowser(target) {
+      var els = browserElements(target);
+      if (els.browser) els.browser.classList.add('d-none');
+    }
 
-    // ── Browser migrazione ──────────────────────────────────────
-    document.getElementById('btnBrowseMigrate').onclick = function() {
-      var current = document.getElementById('migrateTargetInput').value.trim();
-      currentBrowserTarget = 'migrate';
-      openBrowser(current || '');
-    };
+    function setBrowserTargetValue(target, path) {
+      if (target === 'migrate') {
+        document.getElementById('migrateTargetInput').value = path;
+      } else if (target === 'scan') {
+        document.getElementById('mediaScanPath').value = path;
+      } else {
+        document.getElementById('audioPathInput').value = path;
+      }
+    }
 
-    document.getElementById('btnCloseBrowserMigrate').onclick =
-      document.getElementById('btnCancelBrowserMigrate').onclick = function() {
-        document.getElementById('dirBrowserMigrate').classList.add('d-none');
-      };
+    function renderBrowserBreadcrumb(pathEl, path) {
+      if (!pathEl) return;
 
-    document.getElementById('btnSelectMigrateDir').onclick = function() {
-      document.getElementById('migrateTargetInput').value = currentBrowsePath;
-      document.getElementById('dirBrowserMigrate').classList.add('d-none');
-    };
+      path = path || '/';
+
+      // Windows: il path resta comunque navigabile dalla lista; manteniamo
+      // la visualizzazione semplice per non spezzare "C:/".
+      if (/^[A-Za-z]:\//.test(path)) {
+        pathEl.innerHTML =
+          '<span class="font-monospace small">' + escHtml(path) + '</span>';
+        return;
+      }
+
+      var parts = path.split('/').filter(function(part) { return part !== ''; });
+      var html = '<div class="d-flex align-items-center flex-wrap gap-1">';
+      html += '<button type="button" class="btn btn-link btn-sm p-0 browser-crumb font-monospace" data-path="/">/</button>';
+
+      var cumulative = '';
+      for (var i = 0; i < parts.length; i++) {
+        cumulative += '/' + parts[i];
+        html += '<span class="text-muted">›</span>';
+        html += '<button type="button" class="btn btn-link btn-sm p-0 browser-crumb font-monospace" data-path="' +
+          escAttr(cumulative) + '">' + escHtml(parts[i]) + '</button>';
+      }
+
+      html += '</div>';
+      pathEl.innerHTML = html;
+
+      var crumbs = pathEl.querySelectorAll('.browser-crumb');
+      for (var ci = 0; ci < crumbs.length; ci++) {
+        crumbs[ci].addEventListener('click', function() {
+          openBrowser(this.getAttribute('data-path') || '/');
+        });
+      }
+    }
+
+    function renderBrowserBookmarks(bookmarks) {
+      if (!bookmarks || !bookmarks.length) return '';
+
+      var html =
+        '<div class="px-3 pt-2 pb-1 border-bottom bg-body-tertiary">' +
+        '<span class="text-muted" style="font-size:.7rem;text-transform:uppercase;' +
+        'letter-spacing:.05em;font-weight:600">' +
+        '<i class="bi bi-lightning-fill me-1 text-info"></i>Posizioni</span></div>';
+
+      for (var bi = 0; bi < bookmarks.length; bi++) {
+        var bk = bookmarks[bi];
+        html +=
+          '<button type="button" class="browser-entry btn btn-link text-start text-decoration-none w-100 rounded-0 ' +
+          'd-flex align-items-center px-3 py-2 border-bottom" data-path="' + escAttr(bk.path) + '">' +
+          '<i class="bi bi-hdd text-info me-2"></i>' +
+          '<span class="small text-body fw-semibold">' + escHtml(bk.label) + '</span>' +
+          '<span class="small text-muted ms-auto font-monospace text-truncate" style="max-width:50%">' +
+          escHtml(bk.path) + '</span>' +
+          '</button>';
+      }
+
+      return html;
+    }
+
+    function bindBrowserEntries(list) {
+      var entries = list.querySelectorAll('.browser-entry');
+      for (var i = 0; i < entries.length; i++) {
+        entries[i].addEventListener('click', function() {
+          openBrowser(this.getAttribute('data-path') || '');
+        });
+      }
+    }
 
     function openBrowser(path) {
-      var isMigrate = (currentBrowserTarget === 'migrate');
-      var browser = document.getElementById(isMigrate ? 'dirBrowserMigrate' : 'dirBrowser');
-      var list = document.getElementById(isMigrate ? 'browserListMigrate' : 'browserList');
-      var pathEl = document.getElementById(isMigrate ? 'browserCurrentPathMigrate' : 'browserCurrentPath');
+      var targetAtRequest = currentBrowserTarget;
+      var els = browserElements(targetAtRequest);
+      if (!els.browser || !els.list || !els.path) return;
 
-      browser.classList.remove('d-none');
-      list.innerHTML = '<div class="text-center p-3 text-muted small">' +
+      els.browser.classList.remove('d-none');
+      els.list.innerHTML =
+        '<div class="text-center p-3 text-muted small">' +
         '<span class="spinner-border spinner-border-sm me-2"></span>Caricamento…</div>';
 
-      fetch(BASE_URL + '/index.php?route=media/browse-dir&path=' + encodeURIComponent(path), {
-          headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-          }
-        })
+      if (browserAbortController && typeof browserAbortController.abort === 'function') {
+        browserAbortController.abort();
+      }
+
+      browserAbortController = typeof AbortController !== 'undefined'
+        ? new AbortController()
+        : null;
+
+      browserRequestId++;
+      var requestId = browserRequestId;
+
+      var fetchOptions = {
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest'
+        }
+      };
+
+      if (browserAbortController) {
+        fetchOptions.signal = browserAbortController.signal;
+      }
+
+      fetch(
+        BASE_URL + '/index.php?route=media/browse-dir&path=' + encodeURIComponent(path || ''),
+        fetchOptions
+      )
         .then(function(r) {
           var ct = r.headers.get('content-type') || '';
           if (!ct.includes('application/json')) {
             return r.text().then(function(t) {
-              throw new Error('Risposta non-JSON: ' + t.replace(/<[^>]+>/g, '').trim().substring(0, 100));
+              throw new Error(
+                'Risposta non valida dal server: ' +
+                t.replace(/<[^>]+>/g, '').trim().substring(0, 100)
+              );
             });
           }
           return r.json();
         })
         .then(function(data) {
-          var html = '';
-
-          // Sezione Accesso rapido — bookmarks (dischi /Volumes, ecc.)
-          if (data.bookmarks && data.bookmarks.length) {
-            html += '<div class="px-3 pt-2 pb-1 border-bottom bg-body-tertiary">' +
-              '<span class="text-muted" style="font-size:.7rem;text-transform:uppercase;' +
-              'letter-spacing:.05em;font-weight:600">' +
-              '<i class="bi bi-lightning-fill me-1 text-info"></i>Accesso rapido</span></div>';
-            for (var bi = 0; bi < data.bookmarks.length; bi++) {
-              var bk = data.bookmarks[bi];
-              html += '<div class="browser-entry d-flex align-items-center px-3 py-1 border-bottom" ' +
-                'data-path="' + escAttr(bk.path) + '" style="cursor:pointer">' +
-                '<i class="bi bi-hdd text-info me-2"></i>' +
-                '<span class="small text-info fw-semibold">' + escHtml(bk.label) + '</span>' +
-                '<span class="small text-muted ms-2 font-monospace" style="font-size:.7rem">' +
-                escHtml(bk.path) + '</span>' +
-                '</div>';
-            }
-          }
-
-          // Cartella inaccessibile: mostra errore ma mantieni bookmarks visibili
-          if (!data.ok) {
-            html += '<div class="p-3 text-warning small">' +
-              '<i class="bi bi-lock me-1"></i>' +
-              escHtml(data.error || 'Accesso negato.') +
-              '<br><span class="text-muted small">Usa Accesso rapido per navigare ai dischi.</span></div>';
-            list.innerHTML = html;
+          // Ignora risposte obsolete arrivate fuori ordine.
+          if (requestId !== browserRequestId || targetAtRequest !== currentBrowserTarget) {
             return;
           }
 
-          currentBrowsePath = data.current;
-          pathEl.textContent = data.current;
+          var html = '';
 
-          if (data.bookmarks && data.bookmarks.length) {
-            html += '<div class="px-3 pt-2 pb-1 border-bottom bg-body-tertiary">' +
-              '<span class="text-muted" style="font-size:.7rem;text-transform:uppercase;' +
-              'letter-spacing:.05em;font-weight:600">Cartelle</span></div>';
+          if (data.show_bookmarks || !data.ok) {
+            html += renderBrowserBookmarks(data.bookmarks || []);
           }
 
-          // Riga ".." per salire
-          if (data.parent !== null && data.parent !== undefined) {
-            html += '<div class="browser-entry d-flex align-items-center px-3 py-2 border-bottom" ' +
-              'data-path="' + escAttr(data.parent) + '" style="cursor:pointer">' +
-              '<i class="bi bi-arrow-up-circle text-muted me-2"></i>' +
-              '<span class="small text-muted fst-italic">..</span>' +
+          if (!data.ok) {
+            els.list.innerHTML = html +
+              '<div class="p-3 text-warning small">' +
+              '<i class="bi bi-exclamation-triangle me-1"></i>' +
+              escHtml(data.error || 'Cartella non accessibile.') +
+              '<div class="text-muted mt-1">Scegli una delle posizioni disponibili oppure torna alla cartella precedente.</div>' +
               '</div>';
+            bindBrowserEntries(els.list);
+            return;
           }
 
-          // Sottocartelle (escludi le righe ".." già gestite sopra)
-          var dirs = (data.dirs || []).filter(function(d) {
-            return !d.up;
-          });
+          currentBrowsePath = data.current || '/';
+          renderBrowserBreadcrumb(els.path, currentBrowsePath);
+
+          if (data.parent !== null && data.parent !== undefined) {
+            html +=
+              '<button type="button" class="browser-entry btn btn-link text-start text-decoration-none w-100 rounded-0 ' +
+              'd-flex align-items-center px-3 py-2 border-bottom" data-path="' +
+              escAttr(data.parent) + '">' +
+              '<i class="bi bi-arrow-up-circle text-muted me-2"></i>' +
+              '<span class="small text-body">Cartella superiore</span>' +
+              '</button>';
+          }
+
+          var dirs = data.dirs || [];
+
           if (dirs.length === 0) {
-            html += '<div class="p-3 text-muted small fst-italic">Nessuna sottocartella accessibile.</div>';
+            html +=
+              '<div class="p-3 text-muted small fst-italic">Nessuna sottocartella accessibile.</div>';
           } else {
-            for (var i = 0; i < dirs.length; i++) {
-              html += '<div class="browser-entry d-flex align-items-center px-3 py-2 border-bottom" ' +
-                'data-path="' + escAttr(dirs[i].path) + '" style="cursor:pointer">' +
+            for (var di = 0; di < dirs.length; di++) {
+              var dir = dirs[di];
+              html +=
+                '<button type="button" class="browser-entry btn btn-link text-start text-decoration-none w-100 rounded-0 ' +
+                'd-flex align-items-center px-3 py-2 border-bottom" data-path="' +
+                escAttr(dir.path) + '">' +
                 '<i class="bi bi-folder-fill text-warning me-2"></i>' +
-                '<span class="small">' + escHtml(dirs[i].name) + '</span>' +
-                '</div>';
+                '<span class="small text-body">' + escHtml(dir.name) + '</span>' +
+                (dir.writable === false
+                  ? '<span class="badge bg-secondary ms-auto">sola lettura</span>'
+                  : '') +
+                '</button>';
             }
           }
 
-          list.innerHTML = html;
+          els.list.innerHTML = html;
+          els.list.scrollTop = 0;
+          bindBrowserEntries(els.list);
 
-          var entries = list.querySelectorAll('.browser-entry');
-          for (var ei = 0; ei < entries.length; ei++) {
-            entries[ei].addEventListener('click', function() {
-              openBrowser(this.dataset.path);
-              // Scrolla la lista in cima dopo la navigazione
-              list.scrollTop = 0;
-            });
-            entries[ei].addEventListener('mouseenter', function() {
-              this.classList.add('bg-body-secondary');
-            });
-            entries[ei].addEventListener('mouseleave', function() {
-              this.classList.remove('bg-body-secondary');
-            });
-          }
-
-          // Se siamo arrivati da un bookmark (accesso rapido), scrolla
-          // la lista per mostrare le cartelle sotto la sezione bookmarks
-          var cartelleHeader = list.querySelector('.bg-body-tertiary:last-of-type');
-          if (cartelleHeader) {
-            list.scrollTop = cartelleHeader.offsetTop;
+          // Per audio e migrazione la cartella deve essere scrivibile.
+          // Lo scanner invece ha bisogno soltanto di leggerla.
+          if (els.select) {
+            var needsWrite = targetAtRequest !== 'scan';
+            var writable = data.current_writable !== false;
+            els.select.disabled = needsWrite && !writable;
+            els.select.title = needsWrite && !writable
+              ? 'Questa cartella non è scrivibile da Grizzly.'
+              : '';
           }
         })
         .catch(function(e) {
-          list.innerHTML = '<div class="p-3 text-danger small"><i class="bi bi-x-circle me-1"></i>' +
-            escHtml(e.message) + '</div>';
+          if (e && e.name === 'AbortError') return;
+          if (requestId !== browserRequestId) return;
+
+          els.list.innerHTML =
+            '<div class="p-3 text-danger small">' +
+            '<i class="bi bi-x-circle me-1"></i>' + escHtml(e.message) +
+            '</div>';
         });
+    }
+
+    // Libreria audio
+    document.getElementById('btnBrowseDir').onclick = function() {
+      currentBrowserTarget = 'audio';
+      var current = document.getElementById('audioPathInput').value.trim();
+      openBrowser(current || '');
+    };
+
+    document.getElementById('btnCloseBrowser').onclick =
+      document.getElementById('btnCancelBrowser').onclick = function() {
+        closeBrowser('audio');
+      };
+
+    document.getElementById('btnSelectThisDir').onclick = function() {
+      setBrowserTargetValue('audio', currentBrowsePath);
+      closeBrowser('audio');
+    };
+
+    // Migrazione
+    document.getElementById('btnBrowseMigrate').onclick = function() {
+      currentBrowserTarget = 'migrate';
+      var current = document.getElementById('migrateTargetInput').value.trim();
+      openBrowser(current || '');
+    };
+
+    document.getElementById('btnCloseBrowserMigrate').onclick =
+      document.getElementById('btnCancelBrowserMigrate').onclick = function() {
+        closeBrowser('migrate');
+      };
+
+    document.getElementById('btnSelectMigrateDir').onclick = function() {
+      setBrowserTargetValue('migrate', currentBrowsePath);
+      closeBrowser('migrate');
+    };
+
+    // Scansione automatica
+    var btnBrowseScan = document.getElementById('btnBrowseScan');
+    if (btnBrowseScan) {
+      btnBrowseScan.onclick = function() {
+        currentBrowserTarget = 'scan';
+        var current = document.getElementById('mediaScanPath').value.trim();
+        openBrowser(current || '');
+      };
+    }
+
+    var btnCloseBrowserScan = document.getElementById('btnCloseBrowserScan');
+    var btnCancelBrowserScan = document.getElementById('btnCancelBrowserScan');
+    if (btnCloseBrowserScan && btnCancelBrowserScan) {
+      btnCloseBrowserScan.onclick = btnCancelBrowserScan.onclick = function() {
+        closeBrowser('scan');
+      };
+    }
+
+    var btnSelectScanDir = document.getElementById('btnSelectScanDir');
+    if (btnSelectScanDir) {
+      btnSelectScanDir.onclick = function() {
+        setBrowserTargetValue('scan', currentBrowsePath);
+        closeBrowser('scan');
+      };
     }
 
     // ── Svuota cache Wikipedia ──────────────────────────────────
