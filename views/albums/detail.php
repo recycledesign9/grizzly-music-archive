@@ -1824,6 +1824,9 @@ $audioTitle = $albumHasAudio
          "Sonic Youth - A Thousand Leaves - 07 - Hits of Sunshine.mp3"
          "Pink Floyd - The Wall - 01 - In The Flesh.mp3"
 
+       Pattern C — Artista - NN - Titolo:
+         "Slipknot - 03 - Eyeless.mp3"
+
        Ritorna { trackNum: int|null, titleClean: string }
     ---------------------------------------------------------------- */
     function parseFileName(filename) {
@@ -1841,6 +1844,23 @@ $audioTitle = $albumHasAudio
         return {
           trackNum: parseInt(m[1], 10),
           titleClean: m[2].trim()
+        };
+      }
+
+      // Pattern C: "Artista - NN - Titolo" (un solo blocco prima del numero)
+      //   "Slipknot - 03 - Eyeless.mp3"
+      //   "Slipknot - 02 - (SIC).mp3"
+      // Senza questo pattern il nome non iniziava con un numero e non
+      // aveva i quattro blocchi del Pattern B: il numero traccia restava
+      // null e il titolo confrontato era "Slipknot - 03 - Eyeless", con
+      // similarità sotto soglia per ogni traccia (nessun file associato).
+      // Il blocco iniziale non deve essere un numero, altrimenti è il
+      // Pattern A1 ("01 - 02 - Titolo" resta numero 01).
+      m = name.match(/^(.+?)\s+-\s+(?:\d{1,2}-)?(\d{1,3})\s+-\s+(.+)$/);
+      if (m && !/^\d+$/.test(m[1].trim())) {
+        return {
+          trackNum: parseInt(m[2], 10),
+          titleClean: m[3].trim()
         };
       }
 
