@@ -6,6 +6,54 @@ class AlbumMetadataService
 {
     private const MAX_TRACKS = 40;
 
+    // EDIZIONI (ottobre 2026). Versione della logica che costruisce le
+    // varianti di tracklist di un release-group: cambiandola, le cache
+    // in cache/album-editions/ scritte con la logica precedente vengono
+    // ignorate e ricostruite alla prima ricerca.
+    // v2: titoli confrontati con tolleranza, varianti quasi identiche
+    // unite, frammenti (singoli, estratti) esclusi dall'elenco.
+    private const EDITIONS_LOGIC_VERSION = 2;
+
+    // Durata della cache delle edizioni: il catalogo di un album cambia
+    // di rado, ma nuove ristampe vengono aggiunte a MusicBrainz nel tempo.
+    private const EDITIONS_CACHE_TTL = 2592000; // 30 giorni
+
+    // Browse MusicBrainz con inc=recordings. Il limite richiesto è 100
+    // release per pagina, ma MusicBrainz ne restituisce meno: si ferma
+    // intorno alle 500 tracce complessive per pagina (verificato su
+    // Slipknot, ottobre 2026: release-count 39, 29 release lette nella
+    // prima pagina, 486 tracce). La paginazione avanza quindi per numero
+    // di release effettivamente ricevute, non per multipli di 100.
+    // 8 pagine coprono circa 4000 tracce, cioè 250-300 release di un
+    // album di 13-15 brani. Oltre questa soglia l'elenco viene marcato
+    // come parziale; la release scelta dalla ricerca viene comunque
+    // aggiunta. La prima ricerca su un album con molte stampe può
+    // richiedere 15-25 secondi; le successive leggono la cache.
+    private const EDITIONS_PAGE_SIZE = 100;
+    private const EDITIONS_MAX_PAGES = 8;
+
+    // Numero massimo di titoli elencati come differenza tra due varianti.
+    private const EDITIONS_DIFF_MAX = 6;
+
+    // Numero minimo di stampe perché una variante che TOGLIE tracce
+    // dell'originale faccia comparire l'elenco delle edizioni. Una
+    // variante con una sola release è spesso un inserimento incompleto
+    // su MusicBrainz, non una vera edizione alternativa.
+    private const EDITIONS_EXCEPTION_MIN_RELEASES = 2;
+
+    // Una variante con meno di questa frazione delle tracce dell'originale
+    // è un frammento collegato all'album (singolo, estratto digitale da
+    // 1-2 brani) e non un'edizione: viene esclusa dall'elenco.
+    private const EDITIONS_FRAGMENT_RATIO = 0.5;
+
+    // Tolleranza nel confronto tra titoli: lunghezza minima del titolo
+    // più corto perché valga il contenimento ("A Little Help From My
+    // Friends" dentro "With a Little Help From My Friends", "Lucy in
+    // the Sky With Diamonds" dentro la versione "(Dolby Atmos)"), e
+    // quota massima di caratteri diversi per i refusi di trascrizione.
+    private const TITLE_MATCH_MIN_CONTAINED = 5;
+    private const TITLE_MATCH_MAX_DISTANCE  = 0.15;
+
     // MusicBrainz consente circa una richiesta al secondo per client.
     // Manteniamo anche il paese principale dell'artista per scegliere
     // l'edizione territoriale più coerente (GB per Radiohead/Coldplay,
@@ -13,7 +61,14 @@ class AlbumMetadataService
     private float $lastMusicBrainzRequestAt = 0.0;
     private string $preferredArtistCountry = '';
 
-    public function search(string $artist, string $album, int $year = 0): array
+    // ----------------------------------------------------------
+    // $currentMbid (facoltativo): MBID della release già salvata sulla
+    // scheda in modifica. Se appartiene a una delle varianti trovate,
+    // quella variante resta selezionata e l'MBID non cambia: un
+    // aggiornamento dalle fonti non deve mai spostare in silenzio la
+    // scheda su un'edizione diversa da quella scelta.
+    // ----------------------------------------------------------
+    public function search(string $artist, string $album, int $year = 0, string $currentMbid = ''): array
     {
         $artistRaw = $artist;
         $albumRaw  = $album;
@@ -35,11 +90,16 @@ class AlbumMetadataService
             $result['year']  = !empty($mb['date']) ? substr($mb['date'], 0, 4) : '';
             $result['mbid']  = $mb['id'] ?? '';
 
-            // Genere da MusicBrainz release-group
-            if (!empty($mb['release-group']['genres'][0]['name'])) {
-                $result['genre'] = ucfirst($mb['release-group']['genres'][0]['name']);
-            } elseif (!empty($mb['genres'][0]['name'])) {
-                $result['genre'] = ucfirst($mb['genres'][0]['name']);
+            // Genere da MusicBrainz release-group. MusicBrainz non
+            // garantisce l'ordine dell'array genres: topGenreName()
+            // sceglie il genere con più voti (campo count), così due
+            // ricerche sullo stesso album danno lo stesso genere.
+            $topGenre = $this->topGenreName($mb['release-group']['genres'] ?? []);
+            if ($topGenre === '') {
+                $topGenre = $this->topGenreName($mb['genres'] ?? []);
+            }
+            if ($topGenre !== '') {
+                $result['genre'] = ucfirst($topGenre);
             }
 
             // Etichetta della stessa release scelta per MBID, cover e
@@ -54,7 +114,77 @@ class AlbumMetadataService
             $result['release_country'] = $mb['country'] ?? '';
             $result['artist_country']  = $this->preferredArtistCountry;
 
-            if (!empty($mb['id'])) {
+            // ================= EDIZIONI DEL RELEASE-GROUP =================
+            // La ricerca qui sopra serve solo a identificare l'ALBUM
+            // (release-group). L'edizione si sceglie tra TUTTE le release
+            // ufficiali del gruppo, raggruppate per tracklist: prima la
+            // scelta avveniva tra le 10-15 release restituite dalla
+            // ricerca testuale e dipendeva dall'anno inviato dal form,
+            // che a sua volta veniva riscritto dalla ricerca precedente
+            // (Slipknot: anno 2000 -> digipak a 19 tracce, riconfermata
+            // a ogni aggiornamento).
+            $rgId     = (string)($mb['release-group']['id'] ?? '');
+            $editions = $rgId !== '' ? $this->getReleaseGroupEditions($rgId, $mb) : [];
+
+            if (!empty($editions['groups'])) {
+                $groups      = $editions['groups'];
+                $defaultIdx  = (int)$editions['default_index'];
+                $selectedIdx = $defaultIdx;
+                $selectedMbid = '';
+
+                $currentMbid = strtolower(trim($currentMbid));
+                if ($this->isUuid($currentMbid)) {
+                    foreach ($groups as $gi => $g) {
+                        if (in_array($currentMbid, $g['release_ids'], true)) {
+                            $selectedIdx  = $gi;
+                            $selectedMbid = $currentMbid;
+                            break;
+                        }
+                    }
+                }
+
+                $sel = $groups[$selectedIdx];
+                if ($selectedMbid === '') {
+                    $selectedMbid = $sel['mbid'];
+                }
+
+                $result['mbid']   = $selectedMbid;
+                $result['tracks'] = $sel['tracks'];
+                if ($sel['label'] !== '') {
+                    $result['label'] = $sel['label'];
+                }
+                $result['release_country'] = $sel['country'];
+
+                // Anno = prima pubblicazione dell'album, indipendente
+                // dall'edizione posseduta (salvata tramite MBID).
+                if (!empty($editions['first_year'])) {
+                    $result['year'] = (string)$editions['first_year'];
+                }
+
+                // L'elenco delle edizioni compare SOLO nei casi limite:
+                //  - esiste una variante diffusa che toglie o sostituisce
+                //    tracce dell'originale (Slipknot: ristampa senza
+                //    Purity e Frail Limb Nursery, con Me Inside);
+                //  - la scheda è già collegata a un'edizione diversa
+                //    dall'originale, così la scelta resta visibile.
+                // Deluxe, bonus track, ristampe con le stesse tracce:
+                // la prima ricerca applica l'originale e basta.
+                $result['release_group'] = $rgId;
+                if ($selectedIdx !== $defaultIdx || $this->hasConflictingEdition($groups, $defaultIdx)) {
+                    $result['editions']         = $this->publicEditions($groups, $defaultIdx, $selectedIdx, $selectedMbid);
+                    $result['editions_partial'] = !empty($editions['partial']);
+                }
+
+                $cover = $this->getCoverFromCAA($selectedMbid);
+                if (empty($cover)) {
+                    $cover = $this->getCoverFromReleaseGroup($rgId);
+                }
+                if (!empty($cover)) {
+                    $result['cover'] = $cover;
+                }
+            } elseif (!empty($mb['id'])) {
+                // Percorso precedente, invariato: browse non disponibile
+                // (rete, rate limit) o release-group senza tracklist.
                 $tracks = $this->getTracksFromMusicBrainzRelease($mb['id']);
                 $result['tracks'] = $this->cleanTracks($tracks);
 
@@ -192,7 +322,62 @@ class AlbumMetadataService
 
         $result['debug_source'] = !$isMbValid ? 'discogs' : 'musicbrainz';
 
+        // Le varianti descrivono tracklist MusicBrainz: se la tracklist
+        // finale arriva da Discogs o Last.fm non sono più confrontabili
+        // con quella applicata e non vengono proposte.
+        if (!$isMbValid) {
+            unset($result['editions'], $result['editions_partial'], $result['release_group']);
+        }
+
         return $result;
+    }
+
+    // ----------------------------------------------------------
+    // Dati di una singola edizione, scelta dall'utente nell'elenco
+    // delle varianti del form. $releaseGroupId e $releaseMbid arrivano
+    // dalla risposta di search(); le varianti vengono lette dalla cache
+    // (o ricostruite se scaduta). Restituisce [] se l'MBID non
+    // appartiene al release-group indicato.
+    // ----------------------------------------------------------
+    public function fetchEdition(string $releaseGroupId, string $releaseMbid): array
+    {
+        $releaseGroupId = strtolower(trim($releaseGroupId));
+        $releaseMbid    = strtolower(trim($releaseMbid));
+
+        if (!$this->isUuid($releaseGroupId) || !$this->isUuid($releaseMbid)) {
+            return [];
+        }
+
+        $editions = $this->getReleaseGroupEditions($releaseGroupId, []);
+        if (empty($editions['groups'])) {
+            return [];
+        }
+
+        $groups = $editions['groups'];
+        foreach ($groups as $gi => $g) {
+            if (!in_array($releaseMbid, $g['release_ids'], true)) {
+                continue;
+            }
+
+            $public = $this->publicEditions($groups, (int)$editions['default_index'], $gi, $releaseMbid);
+
+            $cover = $this->getCoverFromCAA($releaseMbid);
+            if (empty($cover)) {
+                $cover = $this->getCoverFromReleaseGroup($releaseGroupId);
+            }
+
+            return [
+                'mbid'          => $releaseMbid,
+                'release_group' => $releaseGroupId,
+                'label'         => $g['label'],
+                'tracks'        => $g['tracks'],
+                'cover'         => $cover,
+                'cover_local'   => '',
+                'edition'       => $public[$gi],
+            ];
+        }
+
+        return [];
     }
 
     // Semplificata: la validazione "è la release giusta?" (tipo release,
@@ -250,7 +435,9 @@ class AlbumMetadataService
 
     // ================= HTTP =================
 
-    private function httpGetJson(string $url, array $headers = []): array
+    // $timeout: 10 s per le chiamate normali; il browse delle edizioni
+    // (fino a 100 release con tracce) usa un valore più alto.
+    private function httpGetJson(string $url, array $headers = [], int $timeout = 10): array
     {
         $ua = defined('APP_USER_AGENT') ? APP_USER_AGENT : 'MusicArchive/1.0';
         $isMusicBrainz = stripos($url, 'https://musicbrainz.org/') === 0;
@@ -268,7 +455,7 @@ class AlbumMetadataService
                         'User-Agent: ' . $ua,
                         'Accept: application/json'
                     ], $headers)),
-                    'timeout' => 10,
+                    'timeout' => $timeout,
                     'ignore_errors' => true
                 ]
             ]);
@@ -728,8 +915,14 @@ class AlbumMetadataService
 
         if (empty($data['media'])) return [];
 
+        return $this->tracksFromMedia($data['media']);
+    }
+
+    // Tracce di tutti i media di una release MusicBrainz (lookup o browse).
+    private function tracksFromMedia(array $media): array
+    {
         $tracks = [];
-        foreach ($data['media'] as $medium) {
+        foreach ($media as $medium) {
             if (empty($medium['tracks'])) continue;
 
             foreach ($medium['tracks'] as $t) {
@@ -745,15 +938,669 @@ class AlbumMetadataService
                 // MusicBrainz aveva perfettamente la durata totale.
                 $length = $t['length'] ?? ($t['recording']['length'] ?? null);
 
+                // Millisecondi arrotondati al secondo: il troncamento
+                // mostrava 0:35 per una traccia di 35,6 s (742617000027
+                // di Slipknot, 0:36 su copertina e Wikipedia).
                 $tracks[] = [
                     'position' => count($tracks) + 1,
                     'title'    => $t['title'],
-                    'duration' => !empty($length) ? (int)($length / 1000) : 0
+                    'duration' => !empty($length) ? (int)round($length / 1000) : 0
                 ];
             }
         }
 
         return $tracks;
+    }
+
+    // ================= EDIZIONI (VARIANTI DI TRACKLIST) =================
+    //
+    // Un album (release-group) ha spesso decine di release: stampe per
+    // paese, ristampe, formati diversi. Quasi tutte hanno la stessa
+    // tracklist; alcune no (Slipknot: prima stampa 1999 con Purity,
+    // ristampa senza Purity e con Me Inside, digipak 2000 con bonus).
+    // Le release vengono quindi raggruppate per "firma" della tracklist,
+    // cioè la sequenza dei titoli normalizzati. Le durate non entrano
+    // nella firma: differenze di qualche secondo tra stampe non indicano
+    // una tracklist diversa.
+    //
+    // Restituisce:
+    //   groups        varianti ordinate per prima pubblicazione
+    //   default_index variante proposta come originale
+    //   first_year    anno di prima pubblicazione dell'album
+    //   partial       true se il gruppo ha più release di quelle lette
+    // oppure [] se MusicBrainz non risponde o non espone le tracce:
+    // in quel caso search() usa il percorso precedente.
+    // ----------------------------------------------------------
+    private function getReleaseGroupEditions(string $rgId, array $searchRelease): array
+    {
+        $rgId = strtolower(trim($rgId));
+        if (!$this->isUuid($rgId)) {
+            return [];
+        }
+
+        $cached = $this->readEditionsCache($rgId);
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        $releases = [];
+        $complete = true;  // nessun errore di rete durante il browse
+        $partial  = false; // release oltre il limite di pagine
+        $offset   = 0;
+
+        for ($page = 0; $page < self::EDITIONS_MAX_PAGES; $page++) {
+            $url = 'https://musicbrainz.org/ws/2/release?release-group=' . $rgId
+                . '&inc=media+labels+recordings&fmt=json'
+                . '&limit=' . self::EDITIONS_PAGE_SIZE
+                . '&offset=' . $offset;
+
+            $data = $this->httpGetJson($url, [], 25);
+
+            if (!isset($data['releases']) || !is_array($data['releases'])) {
+                $complete = false;
+                break;
+            }
+
+            foreach ($data['releases'] as $rel) {
+                $releases[] = $rel;
+            }
+
+            $pageCount = count($data['releases']);
+            $offset   += $pageCount;
+            $total     = (int)($data['release-count'] ?? 0);
+
+            if ($pageCount === 0 || $offset >= $total) {
+                break;
+            }
+            if ($page === self::EDITIONS_MAX_PAGES - 1) {
+                $partial = true;
+            }
+        }
+
+        if (empty($releases)) {
+            return [];
+        }
+
+        // La release identificata dalla ricerca deve far parte del
+        // confronto anche quando il browse è stato troncato.
+        $searchId = strtolower((string)($searchRelease['id'] ?? ''));
+        if ($this->isUuid($searchId)) {
+            $present = false;
+            foreach ($releases as $rel) {
+                if (strtolower((string)($rel['id'] ?? '')) === $searchId) {
+                    $present = true;
+                    break;
+                }
+            }
+            if (!$present) {
+                $lookup = $this->httpGetJson(
+                    'https://musicbrainz.org/ws/2/release/' . $searchId . '?inc=media+labels+recordings&fmt=json'
+                );
+                if (!empty($lookup['id'])) {
+                    $releases[] = $lookup;
+                }
+            }
+        }
+
+        $built = $this->buildEditionGroups($releases);
+        if (empty($built['groups'])) {
+            return [];
+        }
+
+        $built['partial'] = $partial || !$complete;
+
+        // Cache solo se il browse si è concluso senza errori di rete:
+        // un elenco monco per un 503 non deve restare in cache 30 giorni.
+        if ($complete) {
+            $this->writeEditionsCache($rgId, $built);
+        }
+
+        return $built;
+    }
+
+    private function buildEditionGroups(array $releases): array
+    {
+        $preferred = strtoupper(trim($this->preferredArtistCountry));
+
+        $byKey      = [];
+        $seenIds    = [];
+        $durationOf = []; // titolo normalizzato -> durata, per riempire i buchi
+
+        foreach ($releases as $rel) {
+            $id = strtolower((string)($rel['id'] ?? ''));
+            if (!$this->isUuid($id) || isset($seenIds[$id])) {
+                continue;
+            }
+            $seenIds[$id] = true;
+
+            // Stesse regole della ricerca: solo release ufficiali (quelle
+            // senza status restano) e nessuna edizione giapponese.
+            $status = strtolower(trim($rel['status'] ?? ''));
+            if ($status !== '' && $status !== 'official') {
+                continue;
+            }
+            if ($this->isJapaneseMusicBrainzRelease($rel)) {
+                continue;
+            }
+
+            $media = $rel['media'] ?? [];
+            if (empty($media)) {
+                continue;
+            }
+
+            $tracks = $this->cleanTracks($this->tracksFromMedia($media));
+            if (empty($tracks)) {
+                continue;
+            }
+
+            $titleKeys = [];
+            foreach ($tracks as $t) {
+                $k = $this->titleKey($t['title']);
+                $titleKeys[] = $k;
+                if (!empty($t['duration']) && !isset($durationOf[$k])) {
+                    $durationOf[$k] = (int)$t['duration'];
+                }
+            }
+
+            $formats = [];
+            foreach ($media as $m) {
+                $f = trim((string)($m['format'] ?? ''));
+                if ($f !== '' && !in_array($f, $formats, true)) {
+                    $formats[] = $f;
+                }
+            }
+
+            $date    = trim((string)($rel['date'] ?? ''));
+            $country = strtoupper(trim((string)($rel['country'] ?? '')));
+
+            $record = [
+                'id'          => $id,
+                'date'        => $date,
+                'date_sort'   => $this->sortableDate($date),
+                'year'        => $date !== '' ? (int)substr($date, 0, 4) : 0,
+                'country'     => $country,
+                'country_rank'=> $this->countryRank($country, $preferred),
+                'media_count' => count($media),
+                'formats'     => $formats,
+                'packaging'   => trim((string)($rel['packaging'] ?? '')),
+                'label'       => (string)($rel['label-info'][0]['label']['name'] ?? ''),
+                'has_cover'   => !empty($rel['cover-art-archive']['front']),
+                'tracks'      => $tracks,
+                'title_keys'  => $titleKeys,
+            ];
+
+            $sig = implode('|', $titleKeys);
+            if (!isset($byKey[$sig])) {
+                $byKey[$sig] = [];
+            }
+            $byKey[$sig][] = $record;
+        }
+
+        if (empty($byKey)) {
+            return [];
+        }
+
+        $groups = [];
+        foreach ($byKey as $sig => $records) {
+            // Release rappresentativa della variante (il suo MBID viene
+            // salvato se l'utente sceglie questa variante): prima per
+            // anno, a parità di anno quella del paese dell'artista, poi
+            // quella con cover su Cover Art Archive, poi la data precisa.
+            usort($records, function ($a, $b) {
+                $ya = $a['year'] ?: 9999;
+                $yb = $b['year'] ?: 9999;
+                if ($ya !== $yb) return $ya - $yb;
+                if ($a['country_rank'] !== $b['country_rank']) return $a['country_rank'] - $b['country_rank'];
+                if ($a['has_cover'] !== $b['has_cover']) return $a['has_cover'] ? -1 : 1;
+                $cmp = strcmp($a['date_sort'], $b['date_sort']);
+                if ($cmp !== 0) return $cmp;
+                return strcmp($a['id'], $b['id']);
+            });
+            $rep = $records[0];
+
+            $firstSort = '9999-99-99';
+            $firstDate = '';
+            $bestRank  = 9;
+            $ids       = [];
+            foreach ($records as $r) {
+                $ids[] = $r['id'];
+                if ($r['date_sort'] < $firstSort) {
+                    $firstSort = $r['date_sort'];
+                    $firstDate = $r['date'];
+                }
+                if ($r['country_rank'] < $bestRank) {
+                    $bestRank = $r['country_rank'];
+                }
+            }
+
+            $groups[] = [
+                'signature'     => $sig,
+                'mbid'          => $rep['id'],
+                'release_ids'   => $ids,
+                'release_count' => count($records),
+                'first_date'    => $firstDate,
+                'first_sort'    => $firstSort,
+                // Data mostrata: quella della release rappresentativa,
+                // così data e paese descrivono la stessa stampa.
+                'rep_date'      => $rep['date'] !== '' ? $rep['date'] : $firstDate,
+                'year'          => $firstDate !== '' ? (int)substr($firstDate, 0, 4) : 0,
+                'country'       => $rep['country'],
+                'best_rank'     => $bestRank,
+                'formats'       => $rep['formats'],
+                'packaging'     => $rep['packaging'],
+                'label'         => $rep['label'],
+                'multi_disc'    => $rep['media_count'] > 1,
+                'has_cover'     => $rep['has_cover'],
+                'tracks'        => $rep['tracks'],
+                'title_keys'    => $rep['title_keys'],
+            ];
+        }
+
+        $groups = $this->mergeNearIdenticalGroups($groups);
+
+        // Durate mancanti: la stessa registrazione compare in più
+        // varianti, quindi una durata nota altrove vale anche qui.
+        foreach ($groups as &$g) {
+            foreach ($g['tracks'] as $ti => &$t) {
+                if (empty($t['duration'])) {
+                    $k = $g['title_keys'][$ti] ?? '';
+                    if ($k !== '' && isset($durationOf[$k])) {
+                        $t['duration'] = $durationOf[$k];
+                    }
+                }
+            }
+            unset($t);
+        }
+        unset($g);
+
+        // Ordine di presentazione: per prima pubblicazione.
+        usort($groups, function ($a, $b) {
+            $cmp = strcmp($a['first_sort'], $b['first_sort']);
+            if ($cmp !== 0) return $cmp;
+            return $b['release_count'] - $a['release_count'];
+        });
+
+        // Variante proposta come originale. Se esiste una variante a
+        // disco singolo, quelle multi-disco (bonus disc, anniversari)
+        // non vengono proposte per prime, come in pickBestRelease().
+        $singleExists = false;
+        foreach ($groups as $g) {
+            if (!$g['multi_disc']) {
+                $singleExists = true;
+                break;
+            }
+        }
+
+        $defaultIdx = -1;
+        foreach ($groups as $gi => $g) {
+            if ($singleExists && $g['multi_disc']) {
+                continue;
+            }
+            if ($defaultIdx === -1) {
+                $defaultIdx = $gi;
+                continue;
+            }
+            $d  = $groups[$defaultIdx];
+            $ya = $g['year'] ?: 9999;
+            $yb = $d['year'] ?: 9999;
+            if ($ya !== $yb) {
+                if ($ya < $yb) $defaultIdx = $gi;
+                continue;
+            }
+            if ($g['best_rank'] !== $d['best_rank']) {
+                if ($g['best_rank'] < $d['best_rank']) $defaultIdx = $gi;
+                continue;
+            }
+            $cmp = strcmp($g['first_sort'], $d['first_sort']);
+            if ($cmp !== 0) {
+                if ($cmp < 0) $defaultIdx = $gi;
+                continue;
+            }
+            if ($g['release_count'] > $d['release_count']) {
+                $defaultIdx = $gi;
+            }
+        }
+        if ($defaultIdx === -1) {
+            $defaultIdx = 0;
+        }
+
+        // Frammenti esclusi: varianti con meno della metà delle tracce
+        // dell'originale (Sgt. Pepper: release digitali da 1-2 brani
+        // collegate all'album). L'originale resta sempre.
+        $minTracks = (int)ceil(count($groups[$defaultIdx]['tracks']) * self::EDITIONS_FRAGMENT_RATIO);
+        $kept      = [];
+        $newDefault = 0;
+        foreach ($groups as $gi => $g) {
+            if ($gi !== $defaultIdx && count($g['tracks']) < $minTracks) {
+                continue;
+            }
+            if ($gi === $defaultIdx) {
+                $newDefault = count($kept);
+            }
+            $kept[] = $g;
+        }
+        $groups     = $kept;
+        $defaultIdx = $newDefault;
+
+        $firstYear = 0;
+        foreach ($groups as $g) {
+            if ($g['year'] > 0 && ($firstYear === 0 || $g['year'] < $firstYear)) {
+                $firstYear = $g['year'];
+            }
+        }
+
+        return [
+            'groups'        => $groups,
+            'default_index' => $defaultIdx,
+            'first_year'    => $firstYear,
+            'partial'       => false,
+        ];
+    }
+
+    // Vero se almeno una variante a disco singolo, presente in un numero
+    // minimo di stampe, NON contiene tutte le tracce della variante
+    // originale. Le varianti che aggiungono soltanto (deluxe, bonus
+    // track) non contano: chi le possiede ha comunque l'album originale.
+    private function hasConflictingEdition(array $groups, int $defaultIdx): bool
+    {
+        if (!isset($groups[$defaultIdx])) {
+            return false;
+        }
+        $defaultKeys = $groups[$defaultIdx]['title_keys'];
+
+        foreach ($groups as $gi => $g) {
+            if ($gi === $defaultIdx || $g['multi_disc']) {
+                continue;
+            }
+            if ($g['release_count'] < self::EDITIONS_EXCEPTION_MIN_RELEASES) {
+                continue;
+            }
+            list($missing) = $this->diffTitleKeys($defaultKeys, $g['title_keys']);
+            if (!empty($missing)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Due titoli normalizzati indicano lo stesso brano se coincidono, se
+    // uno contiene l'altro (versioni annotate, articolo mancante) o se
+    // differiscono per pochi caratteri (refusi di trascrizione).
+    private function titleKeysMatch(string $a, string $b): bool
+    {
+        if ($a === $b) return true;
+        if ($a === '' || $b === '') return false;
+
+        $la = strlen($a);
+        $lb = strlen($b);
+        $short = $la <= $lb ? $a : $b;
+        $long  = $la <= $lb ? $b : $a;
+
+        if (strlen($short) >= self::TITLE_MATCH_MIN_CONTAINED && strpos($long, $short) !== false) {
+            return true;
+        }
+
+        // levenshtein() lavora su byte e fino a 255 caratteri
+        if ($la <= 255 && $lb <= 255) {
+            // Sotto i 7 caratteri la soglia è 0: "hole" e "home" restano
+            // brani diversi.
+            $max = (int)floor(max($la, $lb) * self::TITLE_MATCH_MAX_DISTANCE);
+            return $max > 0 && levenshtein($a, $b) <= $max;
+        }
+
+        return false;
+    }
+
+    // Confronto uno a uno tra due tracklist: ogni brano di una può
+    // corrispondere a un solo brano dell'altra. Prima gli abbinamenti
+    // esatti, poi quelli tolleranti sui brani rimasti. Così "Spit It Out
+    // (Hyper version)" risulta aggiunta anche se "Spit It Out" è già
+    // presente, e "Scissors" si abbina a "Scissors / Eeyore".
+    // Restituisce [indici non abbinati di $baseKeys, di $otherKeys].
+    private function diffTitleKeys(array $baseKeys, array $otherKeys): array
+    {
+        $baseFree  = [];
+        $otherFree = [];
+        foreach ($baseKeys as $i => $k) {
+            if ($k !== '') $baseFree[$i] = $k;
+        }
+        foreach ($otherKeys as $j => $k) {
+            if ($k !== '') $otherFree[$j] = $k;
+        }
+
+        foreach ($baseFree as $i => $k) {
+            foreach ($otherFree as $j => $o) {
+                if ($k === $o) {
+                    unset($baseFree[$i], $otherFree[$j]);
+                    break;
+                }
+            }
+        }
+        foreach ($baseFree as $i => $k) {
+            foreach ($otherFree as $j => $o) {
+                if ($this->titleKeysMatch($k, $o)) {
+                    unset($baseFree[$i], $otherFree[$j]);
+                    break;
+                }
+            }
+        }
+
+        return [array_keys($baseFree), array_keys($otherFree)];
+    }
+
+    // Unisce le varianti che hanno lo stesso numero di tracce e titoli
+    // corrispondenti posizione per posizione: sono la stessa tracklist
+    // scritta in modo diverso (Sgt. Pepper US 1967 con "A Little Help
+    // From My Friends"). Resta la variante con più stampe; data di prima
+    // pubblicazione, paese migliore e MBID delle stampe vengono riuniti.
+    private function mergeNearIdenticalGroups(array $groups): array
+    {
+        $n = count($groups);
+        $absorbed = [];
+
+        for ($i = 0; $i < $n; $i++) {
+            if (isset($absorbed[$i])) continue;
+
+            for ($j = $i + 1; $j < $n; $j++) {
+                if (isset($absorbed[$j])) continue;
+
+                $a = $groups[$i];
+                $b = $groups[$j];
+                if (count($a['title_keys']) !== count($b['title_keys'])) continue;
+
+                $same = true;
+                foreach ($a['title_keys'] as $ti => $k) {
+                    if (!$this->titleKeysMatch($k, $b['title_keys'][$ti])) {
+                        $same = false;
+                        break;
+                    }
+                }
+                if (!$same) continue;
+
+                // Base: più stampe, a parità quella pubblicata prima
+                $baseIsA = $a['release_count'] > $b['release_count']
+                    || ($a['release_count'] === $b['release_count'] && strcmp($a['first_sort'], $b['first_sort']) <= 0);
+                $base  = $baseIsA ? $a : $b;
+                $other = $baseIsA ? $b : $a;
+
+                $base['release_ids']   = array_values(array_unique(array_merge($base['release_ids'], $other['release_ids'])));
+                $base['release_count'] = count($base['release_ids']);
+                if (strcmp($other['first_sort'], $base['first_sort']) < 0) {
+                    $base['first_sort'] = $other['first_sort'];
+                    $base['first_date'] = $other['first_date'];
+                    $base['year']       = $other['year'];
+                }
+                $base['best_rank'] = min($base['best_rank'], $other['best_rank']);
+
+                $groups[$i]    = $base;
+                $absorbed[$j]  = true;
+            }
+        }
+
+        $out = [];
+        foreach ($groups as $gi => $g) {
+            if (!isset($absorbed[$gi])) {
+                $out[] = $g;
+            }
+        }
+        return $out;
+    }
+
+    // Descrizione delle varianti per il frontend: niente tracce complete
+    // (arrivano con fetchEdition), solo i dati per riconoscerle e le
+    // differenze rispetto alla variante originale.
+    private function publicEditions(array $groups, int $defaultIdx, int $selectedIdx, string $selectedMbid): array
+    {
+        $default = $groups[$defaultIdx] ?? $groups[0];
+
+        $out = [];
+        foreach ($groups as $gi => $g) {
+            $added   = [];
+            $removed = [];
+
+            if ($gi !== $defaultIdx) {
+                list($missing, $extra) = $this->diffTitleKeys($default['title_keys'], $g['title_keys']);
+                foreach ($missing as $ti) {
+                    $removed[] = $default['tracks'][$ti]['title'];
+                }
+                foreach ($extra as $ti) {
+                    $added[] = $g['tracks'][$ti]['title'];
+                }
+            }
+
+            $out[] = [
+                'key'           => substr(md5($g['signature']), 0, 12),
+                'mbid'          => $gi === $selectedIdx ? $selectedMbid : $g['mbid'],
+                'date'          => $g['rep_date'],
+                'year'          => $g['year'],
+                'country'       => $g['country'],
+                'formats'       => implode(' + ', $g['formats']),
+                'packaging'     => $g['packaging'],
+                'label'         => $g['label'],
+                'track_count'   => count($g['tracks']),
+                'release_count' => $g['release_count'],
+                'multi_disc'    => $g['multi_disc'],
+                'has_cover'     => $g['has_cover'],
+                'is_default'    => $gi === $defaultIdx,
+                'selected'      => $gi === $selectedIdx,
+                'added'         => array_slice($added, 0, self::EDITIONS_DIFF_MAX),
+                'added_more'    => max(0, count($added) - self::EDITIONS_DIFF_MAX),
+                'removed'       => array_slice($removed, 0, self::EDITIONS_DIFF_MAX),
+                'removed_more'  => max(0, count($removed) - self::EDITIONS_DIFF_MAX),
+            ];
+        }
+
+        return $out;
+    }
+
+    // Titolo ridotto a lettere e cifre minuscole: "Wait and Bleed",
+    // "Wait And Bleed" e "Wait & Bleed" non devono generare varianti.
+    // Anche le annotazioni di rimasterizzazione ("Eyeless (2009
+    // Remaster)", "Eyeless - Remastered") vengono ignorate: indicano lo
+    // stesso brano, non una tracklist diversa.
+    private function titleKey(string $title): string
+    {
+        $title = preg_replace('/\s*[\(\[][^\)\]]*remaster[^\)\]]*[\)\]]/i', '', $title) ?? $title;
+        $title = preg_replace('/\s+-\s+[^-]*remaster.*$/i', '', $title) ?? $title;
+        $t = function_exists('mb_strtolower') ? mb_strtolower($title, 'UTF-8') : strtolower($title);
+        $t = str_replace('&', 'and', $t);
+        $k = preg_replace('/[^\p{L}\p{N}]+/u', '', $t);
+        return ($k === null || $k === '') ? trim($t) : $k;
+    }
+
+    // Data confrontabile come stringa. Le date parziali ("1999",
+    // "1999-11") finiscono DOPO le date complete dello stesso periodo:
+    // una ristampa datata solo "1999" non deve risultare anteriore
+    // alla prima stampa del 29 giugno 1999.
+    private function sortableDate(string $date): string
+    {
+        if (preg_match('/^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?/', $date, $m)) {
+            $mm = isset($m[2]) && $m[2] !== '' ? $m[2] : '99';
+            $dd = isset($m[3]) && $m[3] !== '' ? $m[3] : '99';
+            return $m[1] . '-' . $mm . '-' . $dd;
+        }
+        return '9999-99-99';
+    }
+
+    private function countryRank(string $country, string $preferred): int
+    {
+        if ($country === '') return 3;
+        if ($preferred !== '' && $country === $preferred) return 0;
+        if (in_array($country, ['XE', 'XW'], true)) return 1;
+        return 2;
+    }
+
+    private function isUuid(string $value): bool
+    {
+        return (bool)preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', strtolower($value));
+    }
+
+    // Genere con più voti; a parità di voti resta l'ordine originale.
+    private function topGenreName(array $genres): string
+    {
+        $best      = '';
+        $bestCount = -1;
+        foreach ($genres as $g) {
+            $name = trim((string)($g['name'] ?? ''));
+            if ($name === '') continue;
+            $count = (int)($g['count'] ?? 0);
+            if ($count > $bestCount) {
+                $bestCount = $count;
+                $best      = $name;
+            }
+        }
+        return $best;
+    }
+
+    private function editionsCacheFile(string $rgId): string
+    {
+        $base = defined('BASE_PATH') ? BASE_PATH : dirname(__DIR__, 2);
+        return $base . '/cache/album-editions/' . $rgId . '.json';
+    }
+
+    private function readEditionsCache(string $rgId): ?array
+    {
+        $file = $this->editionsCacheFile($rgId);
+        if (!is_file($file)) {
+            return null;
+        }
+        if ((time() - (int)@filemtime($file)) > self::EDITIONS_CACHE_TTL) {
+            return null;
+        }
+
+        $raw = @file_get_contents($file);
+        if ($raw === false) {
+            return null;
+        }
+        $data = json_decode($raw, true);
+        if (!is_array($data)
+            || (int)($data['version'] ?? 0) !== self::EDITIONS_LOGIC_VERSION
+            || empty($data['editions']['groups'])
+        ) {
+            return null;
+        }
+
+        return $data['editions'];
+    }
+
+    private function writeEditionsCache(string $rgId, array $editions): void
+    {
+        $file = $this->editionsCacheFile($rgId);
+        $dir  = dirname($file);
+        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+            return;
+        }
+
+        $payload = json_encode([
+            'version'  => self::EDITIONS_LOGIC_VERSION,
+            'rg'       => $rgId,
+            'editions' => $editions,
+        ], JSON_UNESCAPED_UNICODE);
+
+        if ($payload !== false) {
+            @file_put_contents($file, $payload, LOCK_EX);
+        }
     }
 
     // ================= DISCOGS =================

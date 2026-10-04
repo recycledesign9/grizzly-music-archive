@@ -224,7 +224,7 @@ $cancelUrl = $isEdit
     <section class="grz-fsec grz-lookup" aria-labelledby="lookupHeading">
       <div class="grz-fsec__head">
         <h2 id="lookupHeading">Identifica il disco</h2>
-        <p>Artista e titolo bastano: cover, anno, etichetta, genere e tracklist arrivano dalle fonti. Per un'edizione precisa indica anche l'anno.</p>
+        <p>Artista e titolo bastano: cover, anno, etichetta, genere e tracklist arrivano dalle fonti. Se il disco esiste in più edizioni con tracklist diversa, puoi scegliere quella che possiedi.</p>
       </div>
 
       <div class="grz-lookup__grid">
@@ -300,6 +300,24 @@ $cancelUrl = $isEdit
           <span>MusicBrainz · Cover Art Archive · Last.fm</span>
           <button type="button" class="btn btn-link grz-lookup-retry" id="lookupRetry">Non è questa edizione?</button>
         </div>
+      </div>
+
+      <!-- Edizioni con tracklist diversa dello stesso album (release-group
+           MusicBrainz). Compare solo se le varianti sono almeno due. I
+           radio non appartengono al form (attributo form verso un id
+           inesistente): la scelta si salva tramite l'MBID nascosto. -->
+      <div id="lookupEditions" class="grz-editions mt-3" hidden>
+        <!-- Riga di riepilogo sempre visibile; l'elenco resta chiuso e si
+             apre dal pulsante o dal link "Non è questa edizione?". -->
+        <div class="d-flex align-items-baseline gap-2 flex-wrap">
+          <span id="lookupEditionsHead" class="small"></span>
+          <button type="button" class="btn btn-link btn-sm p-0 align-baseline" id="lookupEditionsToggle"
+            aria-expanded="false" aria-controls="lookupEditionsPanel"></button>
+        </div>
+        <div id="lookupEditionsPanel" class="mt-2" hidden>
+          <div id="lookupEditionsList" class="list-group" role="radiogroup" aria-labelledby="lookupEditionsHead"></div>
+        </div>
+        <div id="lookupEditionsMsg" class="small mt-2" aria-live="polite"></div>
       </div>
     </section>
 
@@ -583,6 +601,10 @@ $cancelUrl = $isEdit
 
     const PLACEHOLDER = <?= json_encode($placeholderSrc) ?>;
     const FETCH_URL = <?= json_encode(BASE_URL . '/index.php?route=albums/fetch-meta') ?>;
+    const FETCH_EDITION_URL = <?= json_encode(BASE_URL . '/index.php?route=albums/fetch-edition') ?>;
+    // MBID salvato sulla scheda in modifica: identifica "la tua edizione"
+    // nell'elenco delle varianti.
+    const SAVED_MBID = <?= json_encode($isEdit ? strtolower((string)($album['mbid'] ?? '')) : '') ?>;
 
     // -------------------------------------------------------
     // Utilità
@@ -923,6 +945,32 @@ $cancelUrl = $isEdit
       }
     }
 
+    // Cover dalle fonti (ricerca o edizione scelta). Restituisce l'URL
+    // di anteprima, oppure '' se la risposta non contiene una cover.
+    function applyCover(data) {
+      if (!data.cover_local && !data.cover) return '';
+
+      const coverImg = document.getElementById('coverImg');
+      const coverUrlInput = document.getElementById('coverUrlInput');
+      const coverLocalInput = document.getElementById('coverLocalNew');
+      const coverMsg = document.getElementById('coverMsg');
+      const previewSrc = data.cover_preview || data.cover || '';
+
+      if (coverImg && previewSrc) coverImg.src = previewSrc;
+
+      if (data.cover_local) {
+        if (coverLocalInput) coverLocalInput.value = data.cover_local;
+        if (coverUrlInput) coverUrlInput.value = '';
+        if (coverMsg) coverMsg.textContent = 'Cover salvata in locale.';
+      } else {
+        if (coverUrlInput) coverUrlInput.value = data.cover || '';
+        if (coverLocalInput) coverLocalInput.value = '';
+        if (coverMsg) coverMsg.textContent = 'Cover collegata da URL esterno.';
+      }
+      markSource('cover', true);
+      return previewSrc;
+    }
+
     function applyMeta(data) {
       const applied = [];
 
@@ -938,27 +986,7 @@ $cancelUrl = $isEdit
         if (titleInput && !titleInput.value) titleInput.value = data.title;
       }
 
-      let previewSrc = '';
-      if (data.cover_local || data.cover) {
-        const coverImg = document.getElementById('coverImg');
-        const coverUrlInput = document.getElementById('coverUrlInput');
-        const coverLocalInput = document.getElementById('coverLocalNew');
-        const coverMsg = document.getElementById('coverMsg');
-        previewSrc = data.cover_preview || data.cover || '';
-
-        if (coverImg && previewSrc) coverImg.src = previewSrc;
-
-        if (data.cover_local) {
-          if (coverLocalInput) coverLocalInput.value = data.cover_local;
-          if (coverUrlInput) coverUrlInput.value = '';
-          if (coverMsg) coverMsg.textContent = 'Cover salvata in locale.';
-        } else {
-          if (coverUrlInput) coverUrlInput.value = data.cover || '';
-          if (coverLocalInput) coverLocalInput.value = '';
-          if (coverMsg) coverMsg.textContent = 'Cover collegata da URL esterno.';
-        }
-        markSource('cover', true);
-      }
+      const previewSrc = applyCover(data);
 
       if (data.mbid) {
         const mbidInput = document.getElementById('mbidInput');
@@ -1010,6 +1038,8 @@ $cancelUrl = $isEdit
       }
 
       const yearInput = document.getElementById('yearInput');
+      const mbidField = document.getElementById('mbidInput');
+      hideEditions();
       setBusy(true);
 
       fetch(FETCH_URL, {
@@ -1018,6 +1048,7 @@ $cancelUrl = $isEdit
           body: 'artist=' + encodeURIComponent(artist) +
             '&title=' + encodeURIComponent(title) +
             '&year=' + encodeURIComponent(yearInput ? yearInput.value : '') +
+            '&mbid=' + encodeURIComponent(mbidField ? mbidField.value : '') +
             '&csrf_token=' + encodeURIComponent(csrf)
         })
         .then(function(r) {
@@ -1042,6 +1073,7 @@ $cancelUrl = $isEdit
             : '<i class="bi bi-check2" aria-hidden="true"></i> Trovato e applicato ai campi sotto';
           const meta = res.applied.join(' · ') + (res.previewSrc ? (res.applied.length ? ' · ' : '') + 'cover' : '');
           showResult('found', status, (data.title || title) + ' · ' + artist, meta, res.previewSrc);
+          renderEditions(data);
           updateStatus();
         })
         .catch(function(err) {
@@ -1050,6 +1082,257 @@ $cancelUrl = $isEdit
             '<i class="bi bi-exclamation-circle" aria-hidden="true"></i> Recupero non riuscito',
             '', err.message + '. Riprova tra qualche secondo o compila i campi a mano.', '');
         });
+    }
+
+    // -------------------------------------------------------
+    // Edizioni con tracklist diversa (albums/fetch-edition)
+    // -------------------------------------------------------
+    const editionState = { releaseGroup: '', editions: [], applied: -1, req: 0, partial: false };
+
+    function hideEditions() {
+      const box = document.getElementById('lookupEditions');
+      const list = document.getElementById('lookupEditionsList');
+      const msg = document.getElementById('lookupEditionsMsg');
+      editionState.req++; // scarta eventuali risposte ancora in volo
+      editionState.releaseGroup = '';
+      editionState.editions = [];
+      editionState.applied = -1;
+      if (list) list.innerHTML = '';
+      if (msg) msg.textContent = '';
+      setEditionsOpen(false);
+      if (box) box.hidden = true;
+    }
+
+    // Apre o chiude l'elenco delle edizioni
+    function setEditionsOpen(open) {
+      const panel = document.getElementById('lookupEditionsPanel');
+      const toggle = document.getElementById('lookupEditionsToggle');
+      if (panel) panel.hidden = !open;
+      if (toggle) {
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        toggle.textContent = open
+          ? 'Nascondi le edizioni'
+          : 'Mostra le ' + editionState.editions.length + ' edizioni';
+      }
+    }
+
+    // Riepilogo con l'edizione applicata, visibile a elenco chiuso
+    function updateEditionsHead(partial) {
+      const head = document.getElementById('lookupEditionsHead');
+      if (!head) return;
+      const ed = editionState.editions[editionState.applied];
+      let txt = 'Questo disco esiste in ' + editionState.editions.length + ' versioni con tracklist diversa.';
+      if (ed) {
+        txt += ' Applicata: ' + editionLine(ed) +
+          (ed.is_default ? ' (originale).' : '.');
+      }
+      if (partial) txt += ' L\'album ha moltissime stampe: l\'elenco potrebbe essere incompleto.';
+      head.textContent = txt;
+    }
+
+    const editionsToggle = document.getElementById('lookupEditionsToggle');
+    if (editionsToggle) {
+      editionsToggle.addEventListener('click', function() {
+        setEditionsOpen(this.getAttribute('aria-expanded') !== 'true');
+      });
+    }
+
+    function editionPlural(n, one, many) {
+      return n + ' ' + (n === 1 ? one : many);
+    }
+
+    function listTitles(titles, more) {
+      return titles.join(', ') + (more > 0 ? ' e altre ' + more : '');
+    }
+
+    function editionLine(ed) {
+      const parts = [];
+      parts.push(ed.year ? String(ed.year) : 'Anno ignoto');
+      if (ed.country) parts.push(ed.country);
+      if (ed.formats) parts.push(ed.formats);
+      const pk = String(ed.packaging || '');
+      if (pk && pk !== 'None' && pk !== 'Jewel Case') parts.push(pk);
+      parts.push(editionPlural(ed.track_count, 'traccia', 'tracce'));
+      return parts.join(' · ');
+    }
+
+    function editionDetail(ed) {
+      const parts = [];
+      if (ed.is_default) {
+        parts.push('Tracklist della prima pubblicazione');
+      } else {
+        if (ed.removed && ed.removed.length) parts.push('senza ' + listTitles(ed.removed, ed.removed_more));
+        if (ed.added && ed.added.length) parts.push('con ' + listTitles(ed.added, ed.added_more));
+        if (!parts.length) parts.push('stesse tracce in ordine diverso');
+      }
+      if (ed.multi_disc) parts.push('più dischi');
+      if (ed.label) parts.push(ed.label);
+      parts.push(editionPlural(ed.release_count, 'stampa', 'stampe'));
+      return parts.join(' · ');
+    }
+
+    function renderEditions(data) {
+      const box = document.getElementById('lookupEditions');
+      const head = document.getElementById('lookupEditionsHead');
+      const list = document.getElementById('lookupEditionsList');
+      if (!box || !head || !list) return;
+
+      const eds = Array.isArray(data.editions) ? data.editions : [];
+      if (eds.length < 2 || !data.release_group) {
+        hideEditions();
+        return;
+      }
+
+      editionState.releaseGroup = data.release_group;
+      editionState.editions = eds;
+      editionState.applied = -1;
+
+      editionState.partial = !!data.editions_partial;
+
+      list.innerHTML = eds.map(function(ed, i) {
+        if (ed.selected) editionState.applied = i;
+        const badges =
+          (ed.is_default ? ' <span class="badge text-bg-warning ms-1">originale</span>' : '') +
+          (SAVED_MBID && ed.selected && ed.mbid === SAVED_MBID ? ' <span class="badge text-bg-secondary ms-1">la tua edizione</span>' : '');
+        return '<label class="list-group-item d-flex gap-3 align-items-start">' +
+          '<input class="form-check-input flex-shrink-0 mt-1" type="radio" name="grz_edition_choice" form="grzEditionsNoSubmit"' +
+          ' value="' + escHtml(ed.mbid) + '" data-index="' + i + '"' + (ed.selected ? ' checked' : '') + '>' +
+          '<span><span class="fw-semibold">' + escHtml(editionLine(ed)) + '</span>' + badges +
+          '<br><span class="small text-body-secondary">' + escHtml(editionDetail(ed)) + '</span></span>' +
+          '</label>';
+      }).join('');
+
+      list.querySelectorAll('input[type="radio"]').forEach(function(r) {
+        r.addEventListener('change', onEditionChange);
+      });
+
+      updateEditionsHead(editionState.partial);
+      setEditionsOpen(false);
+      box.hidden = false;
+    }
+
+    function setEditionsBusy(busy) {
+      const list = document.getElementById('lookupEditionsList');
+      if (!list) return;
+      list.setAttribute('aria-busy', busy ? 'true' : 'false');
+      list.querySelectorAll('input[type="radio"]').forEach(function(r) { r.disabled = busy; });
+    }
+
+    function checkAppliedEdition() {
+      const list = document.getElementById('lookupEditionsList');
+      if (!list) return;
+      list.querySelectorAll('input[type="radio"]').forEach(function(r) {
+        r.checked = parseInt(r.getAttribute('data-index'), 10) === editionState.applied;
+      });
+    }
+
+    function onEditionChange() {
+      const idx = parseInt(this.getAttribute('data-index'), 10);
+      const ed = editionState.editions[idx];
+      if (!ed || !editionState.releaseGroup) return;
+
+      const msg = document.getElementById('lookupEditionsMsg');
+      const csrf = form.querySelector('[name="csrf_token"]').value;
+      const reqId = ++editionState.req;
+
+      setEditionsBusy(true);
+      const frame = document.getElementById('coverDrop');
+      if (frame) frame.classList.add('is-loading');
+      if (msg) msg.textContent = 'Carico l\'edizione selezionata…';
+
+      fetch(FETCH_EDITION_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'release_group=' + encodeURIComponent(editionState.releaseGroup) +
+            '&mbid=' + encodeURIComponent(ed.mbid) +
+            '&csrf_token=' + encodeURIComponent(csrf)
+        })
+        .then(function(r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function(data) {
+          if (reqId !== editionState.req) return;
+          setEditionsBusy(false);
+          if (frame) frame.classList.remove('is-loading');
+          if (data.error) throw new Error(data.error);
+          applyEdition(data);
+          editionState.applied = idx;
+          updateEditionsHead(editionState.partial);
+          if (msg) msg.textContent = '';
+        })
+        .catch(function(err) {
+          if (reqId !== editionState.req) return;
+          setEditionsBusy(false);
+          if (frame) frame.classList.remove('is-loading');
+          checkAppliedEdition();
+          if (msg) msg.textContent = 'Edizione non caricata: ' + err.message + '. Riprova tra qualche secondo.';
+        });
+    }
+
+    // Applica l'edizione scelta. Anno e genere non cambiano: l'anno è
+    // quello di prima pubblicazione dell'album, l'edizione posseduta
+    // si salva tramite l'MBID. La tracklist si sostituisce direttamente
+    // solo se il riquadro è vuoto o contiene ancora tracce arrivate
+    // dalle fonti e non modificate a mano; altrimenti passa dalla
+    // conferma "Sostituisci tracklist", come nella ricerca.
+    function applyEdition(data) {
+      const mbidInput = document.getElementById('mbidInput');
+      if (mbidInput && data.mbid) mbidInput.value = data.mbid;
+
+      if (data.label) {
+        setLabel(data.label);
+        markSource('label', true);
+      }
+
+      const previewSrc = applyCover(data);
+      const thumb = document.getElementById('lookupThumb');
+      if (thumb && previewSrc) {
+        thumb.hidden = false;
+        thumb.src = previewSrc;
+      }
+
+      let pending = false;
+      const tracks = Array.isArray(data.tracks) ? data.tracks : [];
+      if (tracks.length) {
+        const srcMark = form.querySelector('.grz-src[data-src="tracks"]');
+        const fromSource = srcMark && !srcMark.hidden;
+        if (!tracklistHasContent() || fromSource) {
+          renderTracklist(tracks);
+          markSource('tracks', true);
+          pendingTracks = null;
+          if (replaceBox) replaceBox.hidden = true;
+        } else {
+          pending = true;
+          pendingTracks = tracks;
+          const n = tracks.length;
+          const txt = document.getElementById('tracksReplaceText');
+          if (txt) txt.textContent = 'Tracklist dell\'edizione scelta: ' + editionPlural(n, 'traccia', 'tracce') + '. Quella attuale non è stata modificata.';
+          if (replaceBox) replaceBox.hidden = false;
+        }
+      }
+
+      // Riepilogo aggiornato con i dati ora presenti nei campi
+      const parts = [];
+      const y = document.getElementById('yearInput');
+      const lab = document.getElementById('labelInput');
+      const gen = document.getElementById('genreInput');
+      if (y && y.value) parts.push(y.value);
+      if (lab && lab.value.trim()) parts.push(lab.value.trim());
+      if (gen && gen.value.trim()) parts.push(gen.value.trim());
+      if (tracks.length) parts.push(editionPlural(tracks.length, 'traccia', 'tracce'));
+      if (previewSrc) parts.push('cover');
+      const metaEl = document.getElementById('lookupMeta');
+      if (metaEl) metaEl.textContent = parts.join(' · ');
+      const statusEl = document.getElementById('lookupStatus');
+      if (statusEl) {
+        statusEl.innerHTML = pending
+          ? '<i class="bi bi-check2" aria-hidden="true"></i> Edizione cambiata: tracklist da confermare'
+          : '<i class="bi bi-check2" aria-hidden="true"></i> Edizione cambiata e applicata ai campi sotto';
+      }
+
+      updateTrackSummary();
+      updateStatus();
     }
 
     if (fetchBtn) fetchBtn.addEventListener('click', runLookup);
@@ -1068,6 +1351,16 @@ $cancelUrl = $isEdit
     const retryBtn = document.getElementById('lookupRetry');
     if (retryBtn) {
       retryBtn.addEventListener('click', function() {
+        // Con più edizioni disponibili il link porta all'elenco
+        const edBox = document.getElementById('lookupEditions');
+        if (edBox && !edBox.hidden) {
+          setEditionsOpen(true);
+          const checked = edBox.querySelector('input[type="radio"]:checked') ||
+            edBox.querySelector('input[type="radio"]');
+          edBox.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          if (checked) checked.focus();
+          return;
+        }
         const y = document.getElementById('yearInput');
         const t = document.getElementById('titleInput');
         if (y && !y.value) {

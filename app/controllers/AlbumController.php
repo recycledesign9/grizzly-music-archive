@@ -69,6 +69,10 @@ class AlbumController
       case 'fetch-meta':
         $this->fetchMeta();
         break;
+
+      case 'fetch-edition':
+        $this->fetchEdition();
+        break;
       case 'api_cover':
         $this->apiCover();
         break;
@@ -811,14 +815,27 @@ class AlbumController
       $title  = trim($_POST['title']  ?? '');
       $year   = (int)($_POST['year']  ?? 0);
 
+      // MBID già presente nel form (scheda in modifica o ricerca
+      // precedente): se appartiene a una delle edizioni trovate, quella
+      // edizione resta selezionata. Valori non validi vengono ignorati.
+      $currentMbid = strtolower(trim($_POST['mbid'] ?? ''));
+      if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $currentMbid)) {
+        $currentMbid = '';
+      }
+
       if (!$artist || !$title) {
         echo json_encode(['error' => 'Parametri mancanti']);
         exit;
       }
 
+      // Il browse delle edizioni può richiedere alcune pagine
+      // MusicBrainz (1 richiesta al secondo): margine oltre i 30 s
+      // predefiniti, per non interrompere la risposta a metà.
+      @set_time_limit(90);
+
       require_once BASE_PATH . '/app/services/AlbumMetadataService.php';
       $service = new AlbumMetadataService();
-      $data    = $service->search($artist, $title, $year);
+      $data    = $service->search($artist, $title, $year, $currentMbid);
 
       // Cover
       if (empty($data['cover_local']) && !empty($data['cover'])) {
@@ -829,6 +846,84 @@ class AlbumController
       }
 
       // Preview
+      if (!empty($data['cover_local'])) {
+        $data['cover_preview'] = BASE_URL . '/public/uploads/' . $data['cover_local'];
+      } else {
+        $data['cover_preview'] = $data['cover'] ?? '';
+      }
+
+      echo json_encode($data);
+      exit;
+    } catch (Throwable $e) {
+      echo json_encode([
+        'error' => $e->getMessage()
+      ]);
+      exit;
+    }
+  }
+
+  // ----------------------------------------------------------
+  // POST /albums/fetch-edition
+  //
+  // Dati dell'edizione scelta nell'elenco delle varianti del form:
+  // MBID, tracklist, etichetta e cover di quella stampa. release_group
+  // e mbid arrivano dalla risposta di fetch-meta; il service verifica
+  // che l'MBID appartenga davvero al release-group indicato.
+  // ----------------------------------------------------------
+  private function fetchEdition(): void
+  {
+    ini_set('display_errors', 0);
+    error_reporting(0);
+
+    while (ob_get_level()) ob_end_clean();
+    ob_start();
+
+    header('Content-Type: application/json');
+
+    try {
+      if (
+        empty($_POST['csrf_token']) ||
+        empty($_SESSION['csrf_token']) ||
+        !hash_equals($_SESSION['csrf_token'], $_POST['csrf_token'])
+      ) {
+        echo json_encode(['error' => 'Token non valido']);
+        exit;
+      }
+
+      // Stessa convenzione di fetchMeta(): lock di sessione rilasciato
+      // dopo la verifica CSRF e prima delle chiamate esterne.
+      if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+      }
+
+      $uuid = '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/';
+      $releaseGroup = strtolower(trim($_POST['release_group'] ?? ''));
+      $mbid         = strtolower(trim($_POST['mbid'] ?? ''));
+
+      if (!preg_match($uuid, $releaseGroup) || !preg_match($uuid, $mbid)) {
+        echo json_encode(['error' => 'Parametri mancanti']);
+        exit;
+      }
+
+      @set_time_limit(90);
+
+      require_once BASE_PATH . '/app/services/AlbumMetadataService.php';
+      $service = new AlbumMetadataService();
+      $data    = $service->fetchEdition($releaseGroup, $mbid);
+
+      if (empty($data)) {
+        echo json_encode(['error' => 'Edizione non trovata']);
+        exit;
+      }
+
+      // Cover: stesso trattamento di fetchMeta()
+      if (empty($data['cover_local']) && !empty($data['cover'])) {
+        $local = $service->downloadCover($data['cover']);
+        if ($local) {
+          $data['cover_local'] = $local;
+        }
+      }
+
       if (!empty($data['cover_local'])) {
         $data['cover_preview'] = BASE_URL . '/public/uploads/' . $data['cover_local'];
       } else {
