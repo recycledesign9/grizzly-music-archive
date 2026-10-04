@@ -253,14 +253,14 @@ class Album
       $formatsChangedByUser = ($previousIds !== $submittedIds);
 
       if ($formatsChangedByUser) {
-        // L'utente ha davvero modificato i "Formati posseduti".
-        // Tutti i checkbox rimasti selezionati diventano manuali; questo
-        // permette, ad esempio, Vinile(scanner) + CD(manuale) e fa sì che
-        // Vinile resti posseduto anche se in futuro la cartella audio viene
-        // spostata sotto CD.
+        // L'utente ha davvero modificato i "Formati posseduti": da questo
+        // momento la selezione manuale diventa autorevole. I formati scanner
+        // precedenti vengono sganciati; quelli ancora selezionati saranno
+        // reinseriti/marcati come manuali qui sotto.
         $clear = $this->db->prepare("
             UPDATE album_formats
-            SET is_manual = 0
+            SET is_manual = 0,
+                is_scanner = 0
             WHERE album_id = :album_id
         ");
         $clear->execute([':album_id' => $albumId]);
@@ -268,7 +268,7 @@ class Album
         $ins = $this->db->prepare("
             INSERT INTO album_formats (album_id, format_id, is_manual, is_scanner)
             VALUES (:album_id, :format_id, 1, 0)
-            ON DUPLICATE KEY UPDATE is_manual = 1
+            ON DUPLICATE KEY UPDATE is_manual = 1, is_scanner = 0
         ");
 
         foreach ($submittedIds as $fid) {
@@ -321,6 +321,23 @@ class Album
     }
 
     try {
+      // Un formato dichiarato manualmente è autorevole. Non tentiamo neppure
+      // l'adozione legacy: i vecchi record non distinguibili con certezza da una
+      // scelta dell'utente devono essere trattati in modo conservativo.
+      $manual = $this->db->prepare("
+          SELECT COUNT(*)
+          FROM album_formats
+          WHERE album_id = :album_id
+            AND is_manual = 1
+      ");
+      $manual->execute([':album_id' => $albumId]);
+      if ((int)$manual->fetchColumn() > 0) {
+        if ($ownTransaction) {
+          $this->db->commit();
+        }
+        return;
+      }
+
       // Compatibilità con gli album scannerizzati PRIMA dell'introduzione
       // dei flag di provenienza. Se un album creato dallo scanner ha un solo
       // formato e nessun flag scanner, quella riga è con ragionevole certezza

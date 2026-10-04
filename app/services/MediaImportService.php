@@ -455,9 +455,14 @@ class MediaImportService
             }
         }
 
-        // --- 3) Formato dalla cartella antenata (default Digital) ---
-        $formatId   = $this->resolveFormatId($albumKey, $importDir);
-        $formatName = $this->formatNameById($formatId);
+        // --- 3) Formato dalla cartella antenata ---
+        // Se nessun antenato dichiara un formato, Digital resta il fallback per
+        // gli album nuovi ma NON viene considerato una classificazione autorevole
+        // per un album che esiste già.
+        $format      = $this->resolveFormat($albumKey, $importDir);
+        $formatId    = (int)$format['id'];
+        $formatExplicit = (bool)$format['explicit'];
+        $formatName  = $this->formatNameById($formatId);
 
         // --- 4) Cover + completamento metadati ---
         // Priorita' assoluta ai tag/file locali. Le API vengono interpellate UNA
@@ -587,7 +592,13 @@ class MediaImportService
             $albumId         = (int)$existing['id'];
             $entry['status'] = 'exists';
 
-            $albumModel->syncScannerFormat($albumId, $formatId);
+            // Su un album già presente aggiorniamo il formato scanner solo
+            // quando il path dichiara davvero CD/Vinile/Musicassetta/Digital.
+            // Cartelle generiche come complete/incoming usano Digital come fallback
+            // per gli album nuovi, ma non devono aggiungerlo a una scheda esistente.
+            if ($formatExplicit) {
+                $albumModel->syncScannerFormat($albumId, $formatId);
+            }
             $this->maybeFillAlbumMetadataIfMissing($albumId, $tagGenre, $tagLabel, $year, $externalMbid);
             $this->maybeSetCoverIfMissing($albumId, $coverSource, $externalCoverLocal, $externalCoverUrl);
 
@@ -755,10 +766,16 @@ class MediaImportService
     // ==========================================================
 
     /**
-     * Risale dalla cartella dell'album verso la root di import e restituisce
-     * l'id del primo formato antenato riconosciuto; 'Digital' come default.
+     * Risale dalla cartella dell'album verso la root di import.
+     *
+     * Ritorna sia l'id del formato sia la provenienza della decisione:
+     * - explicit=true  => un antenato del path dichiara davvero il formato;
+     * - explicit=false => nessun formato nel path, viene usato Digital come
+     *                     fallback iniziale per gli album nuovi.
+     *
+     * @return array{id:int,explicit:bool}
      */
-    private function resolveFormatId(string $albumDir, string $importDir): int
+    private function resolveFormat(string $albumDir, string $importDir): array
     {
         $map       = $this->formats();
         $importDir = rtrim($importDir, '/');
@@ -768,7 +785,10 @@ class MediaImportService
                && strpos($dir . '/', $importDir . '/') === 0) {
             $canon = $this->canonicalFormat(basename($dir));
             if ($canon !== null && isset($map[$canon])) {
-                return $map[$canon];
+                return [
+                    'id'       => (int)$map[$canon],
+                    'explicit' => true,
+                ];
             }
             $parent = dirname($dir);
             if ($parent === $dir) {
@@ -778,10 +798,17 @@ class MediaImportService
         }
 
         if (isset($map['digital'])) {
-            return $map['digital'];
+            return [
+                'id'       => (int)$map['digital'],
+                'explicit' => false,
+            ];
         }
+
         $first = reset($map);
-        return $first !== false ? (int)$first : 0;
+        return [
+            'id'       => $first !== false ? (int)$first : 0,
+            'explicit' => false,
+        ];
     }
 
     /**
