@@ -72,9 +72,10 @@ services:
   #   1. MySQL is healthy
   #   2. the app container has started
   #
-  # This makes the app the single initializer of the shared named volumes.
-  # The worker mounts those volumes with nocopy=true so Docker does not try
-  # to copy image contents into the same fresh volume concurrently.
+  # This makes the app the single initializer of the shared uploads/runtime
+  # volumes. Those two mounts use nocopy=true to avoid concurrent initialization.
+  # worker_state is different: it is private to the worker and must be initialized
+  # from the image so /var/lib/grizzly-worker keeps www-data ownership.
   worker:
     image: grizzly-music-archive:latest
 
@@ -118,12 +119,13 @@ services:
           nocopy: true
 
       # Persistent scanner state and lock.
-      # No files from the Docker image need to be copied into this volume.
+      # Do NOT use nocopy here: Docker must initialize this volume from the
+      # image so /var/lib/grizzly-worker keeps the www-data ownership prepared
+      # by the Dockerfile. Otherwise the fresh volume is root:root and the
+      # worker cannot create its lock/state files.
       - type: volume
         source: worker_state
         target: /var/lib/grizzly-worker
-        volume:
-          nocopy: true
 
       # Same read-only host view used by the web application
       # for external audio files.
