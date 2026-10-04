@@ -224,7 +224,7 @@ $cancelUrl = $isEdit
     <section class="grz-fsec grz-lookup" aria-labelledby="lookupHeading">
       <div class="grz-fsec__head">
         <h2 id="lookupHeading">Identifica il disco</h2>
-        <p>Artista e titolo bastano: cover, anno, etichetta, genere e tracklist arrivano dalle fonti. Se il disco esiste in più edizioni con tracklist diversa, puoi scegliere quella che possiedi.</p>
+        <p>Artista e titolo bastano: cover, anno, etichetta, genere e tracklist arrivano dalle fonti. Se il disco esiste in più edizioni con tracklist diversa, puoi scegliere quella che possiedi. Se il risultato non è il disco giusto, indica anche l'anno e ripeti la ricerca.</p>
       </div>
 
       <div class="grz-lookup__grid">
@@ -1039,6 +1039,15 @@ $cancelUrl = $isEdit
 
       const yearInput = document.getElementById('yearInput');
       const mbidField = document.getElementById('mbidInput');
+      // L'anno guida la scelta del disco solo se l'ha scritto l'utente.
+      // Un anno arrivato dalla ricerca precedente (marcatore "dalle
+      // fonti" visibile) descrive il disco trovato prima: inviarlo
+      // spingeva la nuova ricerca verso dischi di quell'anno (Weezer:
+      // 1994 dal Blue Album, poi "Weezer (The Green Album)" finiva sul
+      // 2008 perché nessun risultato era del 1994).
+      const yearSrcMark = form.querySelector('.grz-src[data-src="year"]');
+      const yearFromSource = !!(yearSrcMark && !yearSrcMark.hidden);
+      const yearToSend = (yearInput && !yearFromSource) ? yearInput.value : '';
       hideEditions();
       setBusy(true);
 
@@ -1047,7 +1056,7 @@ $cancelUrl = $isEdit
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'artist=' + encodeURIComponent(artist) +
             '&title=' + encodeURIComponent(title) +
-            '&year=' + encodeURIComponent(yearInput ? yearInput.value : '') +
+            '&year=' + encodeURIComponent(yearToSend) +
             '&mbid=' + encodeURIComponent(mbidField ? mbidField.value : '') +
             '&csrf_token=' + encodeURIComponent(csrf)
         })

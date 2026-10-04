@@ -12,7 +12,10 @@ class AlbumMetadataService
     // ignorate e ricostruite alla prima ricerca.
     // v2: titoli confrontati con tolleranza, varianti quasi identiche
     // unite, frammenti (singoli, estratti) esclusi dall'elenco.
-    private const EDITIONS_LOGIC_VERSION = 2;
+    // v3: un album doppio (White Album) resta l'originale anche quando
+    // esistono stampe a disco singolo che ne contengono solo una parte
+    // (Vol. 1 / Vol. 2); le stampe parziali non fanno comparire l'elenco.
+    private const EDITIONS_LOGIC_VERSION = 3;
 
     // Durata della cache delle edizioni: il catalogo di un album cambia
     // di rado, ma nuove ristampe vengono aggiunte a MusicBrainz nel tempo.
@@ -83,7 +86,9 @@ class AlbumMetadataService
         $result = $this->emptyResult($album);
 
         // ================= MUSICBRAINZ =================
-        $mb = $this->searchMusicBrainzRelease($artist, $album, $year);
+        // Il titolo originale serve a riconoscere un soprannome tra
+        // parentesi ("Weezer (The Green Album)"), che normalize() elimina.
+        $mb = $this->searchMusicBrainzRelease($artist, $album, $year, $albumRaw);
 
         if (!empty($mb)) {
             $result['title'] = $mb['title'] ?? $album;
@@ -517,8 +522,17 @@ class AlbumMetadataService
 
     // ================= MUSICBRAINZ =================
 
-    private function searchMusicBrainzRelease(string $artist, string $album, int $year = 0): array
+    private function searchMusicBrainzRelease(string $artist, string $album, int $year = 0, string $albumRaw = ''): array
     {
+        // 0 TITOLO CON SOPRANNOME — "Weezer (The Green Album)": il titolo
+        // ufficiale è "Weezer" e il soprannome è nella disambiguazione del
+        // release-group. Se trovato, si usa quel disco; altrimenti si
+        // prosegue con la ricerca normale, invariata.
+        $qualified = $this->searchByTitleQualifier($artist, $albumRaw !== '' ? $albumRaw : $album, $year);
+        if (!empty($qualified)) {
+            return $qualified;
+        }
+
         // 1 QUERY PRECISA — include anno se disponibile
         $query = 'release:"' . $album . '" AND artist:"' . $artist . '"';
         if ($year > 0) {
@@ -534,7 +548,7 @@ class AlbumMetadataService
         if (!empty($data['releases'])) {
             $this->resolvePreferredArtistCountry($data['releases']);
             $best = $this->pickBestRelease($data['releases'], $album, $year, $artist, $this->preferredArtistCountry);
-            if (!empty($best)) return $best;
+            if (!empty($best)) return $this->finishPick($best, $data['releases'], $album, $artist, $year, $albumRaw);
         }
 
         // 2 FALLBACK — stessi campi (artist/release) ma senza frase esatta
@@ -554,7 +568,7 @@ class AlbumMetadataService
         if (!empty($data['releases'])) {
             $this->resolvePreferredArtistCountry($data['releases']);
             $best = $this->pickBestRelease($data['releases'], $album, $year, $artist, $this->preferredArtistCountry);
-            if (!empty($best)) return $best;
+            if (!empty($best)) return $this->finishPick($best, $data['releases'], $album, $artist, $year, $albumRaw);
         }
 
         // 3 ULTIMA SPIAGGIA — ricerca libera, usata solo se le due
@@ -570,10 +584,236 @@ class AlbumMetadataService
         if (!empty($data['releases'])) {
             $this->resolvePreferredArtistCountry($data['releases']);
             $best = $this->pickBestRelease($data['releases'], $album, $year, $artist, $this->preferredArtistCountry);
-            if (!empty($best)) return $best;
+            if (!empty($best)) return $this->finishPick($best, $data['releases'], $album, $artist, $year, $albumRaw);
         }
 
         return [];
+    }
+
+    // ----------------------------------------------------------
+    // TITOLO CON SOPRANNOME TRA PARENTESI.
+    //
+    // MusicBrainz distingue gli album omonimi con il campo
+    // "disambiguation" del release-group: i dischi dei Weezer si chiamano
+    // tutti "Weezer" e la disambiguazione vale "Blue Album", "Green
+    // Album", "Red Album"... Chi scrive "Weezer (The Green Album)" usa il
+    // soprannome: la ricerca esatta non trova nulla e quella a parole
+    // sciolte restituisce i soliti dischi più recenti.
+    //
+    // Si interviene solo se il titolo termina con un testo tra parentesi
+    // che non indica un'edizione (deluxe, remaster, live...) e se esiste
+    // un release-group dell'artista con il titolo base e la
+    // disambiguazione corrispondente. In tutti gli altri casi restituisce
+    // [] e la ricerca procede come prima.
+    // ----------------------------------------------------------
+    private function searchByTitleQualifier(string $artist, string $album, int $year): array
+    {
+        if ($artist === '' || !preg_match('/^(.+?)\s*[\(\[]([^\)\]]+)[\)\]]\s*$/u', trim($album), $m)) {
+            return [];
+        }
+
+        $base      = trim($m[1]);
+        $qualifier = trim($m[2]);
+        if ($base === '' || $qualifier === '') {
+            return [];
+        }
+
+        return $this->findGroupByDisambiguation($artist, $base, $qualifier, $year);
+    }
+
+    // ----------------------------------------------------------
+    // Cerca tra i release-group dell'artista quello con titolo $base e
+    // disambiguazione corrispondente a $qualifier ("Green Album" per
+    // "The Green Album", "LP4" per "LP4"). Restituisce la release scelta
+    // da pickBestRelease() tra le stampe di quel disco, oppure [].
+    // ----------------------------------------------------------
+    private function findGroupByDisambiguation(string $artist, string $base, string $qualifier, int $year): array
+    {
+        $editionWords = '/deluxe|remaster|edition|version|anniversary|expanded|bonus|live|mono|stereo|reissue|demo|mix/i';
+        if (preg_match($editionWords, $qualifier)) {
+            return [];
+        }
+
+        $baseKey = preg_replace('/[^a-z0-9]+/', '', strtolower($base));
+        $qualKey = preg_replace('/^the/', '', preg_replace('/[^a-z0-9]+/', '', strtolower($qualifier)));
+        if ($baseKey === '' || strlen($qualKey) < 3) {
+            return [];
+        }
+
+        $query = 'releasegroup:"' . $base . '" AND artist:"' . $artist . '"';
+        $data  = $this->httpGetJson(
+            'https://musicbrainz.org/ws/2/release-group/?query=' . rawurlencode($query) . '&fmt=json&limit=25'
+        );
+        if (empty($data['release-groups'])) {
+            return [];
+        }
+
+        $matchId = '';
+        foreach ($data['release-groups'] as $rg) {
+            $id = (string)($rg['id'] ?? '');
+            if ($id === '' || !empty($rg['secondary-types'])) continue;
+            if (!$this->artistCreditMatches($rg, $artist)) continue;
+
+            $titleKey = preg_replace('/[^a-z0-9]+/', '', strtolower($rg['title'] ?? ''));
+            if ($titleKey !== $baseKey) continue;
+
+            $disKey = preg_replace('/^the/', '', preg_replace('/[^a-z0-9]+/', '', strtolower($rg['disambiguation'] ?? '')));
+            if ($disKey === '') continue;
+
+            // "greenalbum" e "greenalbum", oppure "green" dentro "greenalbum"
+            if ($disKey === $qualKey
+                || (strlen($disKey) >= 3 && strpos($qualKey, $disKey) !== false)
+                || (strlen($qualKey) >= 3 && strpos($disKey, $qualKey) !== false)
+            ) {
+                $matchId = $id;
+                break;
+            }
+        }
+
+        if ($matchId === '') {
+            return [];
+        }
+
+        $relData = $this->httpGetJson(
+            'https://musicbrainz.org/ws/2/release/?query=' . rawurlencode('rgid:' . $matchId)
+            . '&fmt=json&limit=25&inc=release-groups+labels+genres+media'
+        );
+        if (empty($relData['releases'])) {
+            return [];
+        }
+
+        $this->resolvePreferredArtistCountry($relData['releases']);
+
+        return $this->pickBestRelease($relData['releases'], $base, $year, $artist, $this->preferredArtistCountry);
+    }
+
+    // ----------------------------------------------------------
+    // Ultimi controlli sulla release scelta dalla ricerca.
+    //
+    // 1) Titolo cercato più lungo di quello trovato: "American Football
+    //    LP4" contro il titolo ufficiale "American Football". La parte in
+    //    più ("LP4") viene confrontata con la disambiguazione dei
+    //    release-group omonimi dell'artista, come per il soprannome tra
+    //    parentesi. Una richiesta in più, solo quando i titoli non
+    //    coincidono; i titoli con parentesi sono già passati dal passo 0.
+    // 2) Album omonimi senza indicazioni: il primo uscito.
+    // ----------------------------------------------------------
+    private function finishPick(array $best, array $releases, string $album, string $artist, int $year, string $albumRaw): array
+    {
+        $raw = $albumRaw !== '' ? $albumRaw : $album;
+
+        if (!preg_match('/[\(\[][^\)\]]+[\)\]]\s*$/u', trim($raw))) {
+            $userKey = preg_replace('/[^a-z0-9]+/', '', strtolower($raw));
+            $bestTitle = (string)($best['title'] ?? '');
+            $bestKey = preg_replace('/[^a-z0-9]+/', '', strtolower($bestTitle));
+
+            if ($bestKey !== '' && strlen($userKey) > strlen($bestKey) && strpos($userKey, $bestKey) === 0) {
+                $remainder = substr($userKey, strlen($bestKey));
+                $byDis = $this->findGroupByDisambiguation($artist, $bestTitle, $remainder, $year);
+                if (!empty($byDis)) {
+                    return $byDis;
+                }
+            }
+        }
+
+        return $this->preferEarliestHomonymousGroup($best, $releases, $album, $artist, $year);
+    }
+
+    // ----------------------------------------------------------
+    // ALBUM OMONIMI DELLO STESSO ARTISTA (Weezer, Peter Gabriel).
+    //
+    // La ricerca restituisce al massimo 10-15 release e, con titoli
+    // condivisi da più dischi, quelle del primo disco possono mancare del
+    // tutto: per Weezer / Weezer i 10 risultati contengono solo il Red
+    // Album (2008), il White Album (2016) e il Teal Album (2019), nessuna
+    // stampa del Blue Album (1994). Il punteggio non può scegliere un
+    // disco che non vede.
+    //
+    // Si interviene solo se: nessun anno indicato, e tra i risultati
+    // validi ci sono almeno due release-group diversi con il titolo
+    // esatto cercato. In quel caso una ricerca sui release-group
+    // dell'artista (stesso tipo, titolo esatto, nessun tipo secondario)
+    // individua il disco uscito per primo; se è diverso da quello scelto,
+    // si cercano le sue release e si sceglie tra queste con
+    // pickBestRelease(). Costo: due richieste in più, solo nei casi
+    // ambigui. Con l'anno indicato la scelta resta quella dell'utente.
+    // ----------------------------------------------------------
+    private function preferEarliestHomonymousGroup(array $best, array $releases, string $album, string $artist, int $year): array
+    {
+        if ($year > 0 || $artist === '') {
+            return $best;
+        }
+
+        $albumKey = preg_replace('/[^a-z0-9]+/', '', strtolower($album));
+        if ($albumKey === '') {
+            return $best;
+        }
+
+        $bestRg   = $best['release-group'] ?? [];
+        $bestRgId = (string)($bestRg['id'] ?? '');
+        $bestType = strtolower($bestRg['primary-type'] ?? '');
+        if ($bestRgId === '' || ($bestType !== 'album' && $bestType !== 'ep')) {
+            return $best;
+        }
+
+        // Release-group distinti, validi e con titolo esatto tra i risultati
+        $exactGroups = [];
+        foreach ($releases as $rel) {
+            $rg = $rel['release-group'] ?? [];
+            $id = (string)($rg['id'] ?? '');
+            if ($id === '' || !empty($rg['secondary-types'])) continue;
+            if (strtolower($rg['primary-type'] ?? '') !== $bestType) continue;
+            if (!$this->artistCreditMatches($rel, $artist)) continue;
+            $key = preg_replace('/[^a-z0-9]+/', '', strtolower($rel['title'] ?? ''));
+            if ($key !== $albumKey) continue;
+            $exactGroups[$id] = true;
+        }
+        if (count($exactGroups) < 2) {
+            return $best;
+        }
+
+        $query = 'releasegroup:"' . $album . '" AND artist:"' . $artist . '" AND primarytype:' . $bestType;
+        $data  = $this->httpGetJson(
+            'https://musicbrainz.org/ws/2/release-group/?query=' . rawurlencode($query) . '&fmt=json&limit=25'
+        );
+        if (empty($data['release-groups'])) {
+            return $best;
+        }
+
+        $earliestId   = '';
+        $earliestDate = '';
+        foreach ($data['release-groups'] as $rg) {
+            $id = (string)($rg['id'] ?? '');
+            if ($id === '' || !empty($rg['secondary-types'])) continue;
+            if (strtolower($rg['primary-type'] ?? '') !== $bestType) continue;
+            if (!$this->artistCreditMatches($rg, $artist)) continue;
+            $key = preg_replace('/[^a-z0-9]+/', '', strtolower($rg['title'] ?? ''));
+            if ($key !== $albumKey) continue;
+
+            $date = trim((string)($rg['first-release-date'] ?? ''));
+            if ($date === '') continue;
+            $sortDate = $this->sortableDate($date);
+            if ($earliestId === '' || strcmp($sortDate, $earliestDate) < 0) {
+                $earliestId   = $id;
+                $earliestDate = $sortDate;
+            }
+        }
+
+        if ($earliestId === '' || $earliestId === $bestRgId) {
+            return $best;
+        }
+
+        $relData = $this->httpGetJson(
+            'https://musicbrainz.org/ws/2/release/?query=' . rawurlencode('rgid:' . $earliestId)
+            . '&fmt=json&limit=25&inc=release-groups+labels+genres+media'
+        );
+        if (empty($relData['releases'])) {
+            return $best;
+        }
+
+        $earliestBest = $this->pickBestRelease($relData['releases'], $album, 0, $artist, $this->preferredArtistCountry);
+
+        return !empty($earliestBest) ? $earliestBest : $best;
     }
 
     private function pickBestRelease(
@@ -600,24 +840,59 @@ class AlbumMetadataService
         // Tipi di packaging che indicano edizioni speciali
         $avoidPackaging = ['box', 'box set', 'tin', 'deluxe'];
 
-        // Se non è stato fornito un anno, trova l'anno più vecchio tra le release
-        // valide (senza parole da evitare) — quella è quasi certamente l'originale
-        $oldestYear = null;
+        // Senza anno fornito, l'anno più vecchio serve a riconoscere la
+        // stampa originale. Prima era calcolato su TUTTE le release
+        // trovate, anche di dischi diversi: con un EP e un album omonimi
+        // (Christie Front Drive: EP Freewill 1994, album Caulfield 1996)
+        // l'EP prendeva +35 come "originale" e l'album solo +15, e vinceva
+        // l'EP. Ora i due ruoli sono separati:
+        //  - $rgOldest: anno più vecchio DENTRO ogni release-group, per
+        //    premiare la prima stampa rispetto alle ristampe dello stesso
+        //    disco;
+        //  - $typeOldest: anno più vecchio tra i release-group dello
+        //    stesso tipo, per preferire il primo album quando due album
+        //    hanno lo stesso titolo (Weezer 1994 rispetto al 2001).
+        // Contano solo le release che superano gli scarti hard qui sotto.
+        $rgOldest   = [];
+        $typeOldest = [];
         if ($year === 0) {
             foreach ($releases as $rel) {
-                if (empty($rel['date'])) continue;
-                $titleLow = strtolower($rel['title'] ?? '');
+                if (empty($rel['date']) || empty($rel['title'])) continue;
+                if ($this->isJapaneseMusicBrainzRelease($rel)) continue;
+                if ($artist !== '' && !$this->artistCreditMatches($rel, $artist)) continue;
+
+                $statusLow = strtolower(trim($rel['status'] ?? ''));
+                if ($statusLow !== '' && $statusLow !== 'official') continue;
+
+                $rgPre = $rel['release-group'] ?? [];
+                $ptPre = strtolower($rgPre['primary-type'] ?? '');
+                $stPre = array_map('strtolower', $rgPre['secondary-types'] ?? []);
+                if ($ptPre !== '' && $ptPre !== 'album' && $ptPre !== 'ep') continue;
+                if (!empty($stPre)) continue;
+
+                $titleLow = strtolower($rel['title']);
                 $isSpecial = false;
                 foreach ($avoidTitle as $w) {
                     if (strpos($titleLow, $w) !== false) { $isSpecial = true; break; }
                 }
                 if ($isSpecial) continue;
+
                 $y = (int)substr($rel['date'], 0, 4);
-                if ($y > 1900 && ($oldestYear === null || $y < $oldestYear)) {
-                    $oldestYear = $y;
+                if ($y <= 1900) continue;
+
+                $rgIdPre = (string)($rgPre['id'] ?? '');
+                if ($rgIdPre !== '' && (!isset($rgOldest[$rgIdPre]) || $y < $rgOldest[$rgIdPre])) {
+                    $rgOldest[$rgIdPre] = $y;
+                }
+                if (!isset($typeOldest[$ptPre]) || $y < $typeOldest[$ptPre]) {
+                    $typeOldest[$ptPre] = $y;
                 }
             }
         }
+
+        // Titolo cercato ridotto a lettere e cifre, per riconoscere il
+        // titolo esatto anche con punteggiatura diversa.
+        $albumKey = preg_replace('/[^a-z0-9]+/', '', $album);
 
         // FIX (In Rainbows): esiste almeno un candidato a DISCO SINGOLO
         // che supera gli scarti hard (artista, tipo release, non-giapponese)?
@@ -720,11 +995,16 @@ class AlbumMetadataService
             // Base: punteggio MusicBrainz nativo (0-100)
             $score = (float)($rel['score'] ?? 50);
 
-            // Leggera preferenza Album > EP: a parità di titolo (EP eponimo
-            // di un album) vince l'album; non basta a far vincere un album
-            // sbagliato su un EP col titolo esatto cercato.
+            // Preferenza Album > EP. Se il titolo dell'album coincide con
+            // quello cercato la preferenza è più forte (+20): è il caso di
+            // un EP e di un album omonimi, tipico dei dischi eponimi, dove
+            // chi cerca il titolo intende l'album. Con titolo non esatto
+            // resta la preferenza leggera (+8), che non basta a far
+            // vincere un album sbagliato su un EP con il titolo esatto
+            // cercato ("Jar of Flies").
             if ($primaryType === 'album') {
-                $score += 8;
+                $relKey = preg_replace('/[^a-z0-9]+/', '', $title);
+                $score += ($albumKey !== '' && $relKey === $albumKey) ? 20 : 8;
             }
 
             // Penalizza parole speciali nel titolo
@@ -787,13 +1067,26 @@ class AlbumMetadataService
                 } else {
                     $score -= 10;
                 }
-            } elseif ($oldestYear !== null && $relYear > 0) {
-                // Nessun anno fornito: premia la release più vicina all'anno più antico
-                $diff = abs($relYear - $oldestYear);
-                if ($diff === 0)     $score += 35; // è la più vecchia = originale
-                elseif ($diff <= 2) $score += 15;
-                elseif ($diff <= 5) $score += 0;
-                else                $score -= 20; // ristampa tardiva
+            } elseif ($relYear > 0) {
+                // Nessun anno fornito: premia la stampa più vicina alla
+                // prima uscita DELLO STESSO release-group (originale
+                // rispetto alle ristampe dello stesso disco).
+                $rgId = (string)($rg['id'] ?? '');
+                if (isset($rgOldest[$rgId])) {
+                    $diff = abs($relYear - $rgOldest[$rgId]);
+                    if ($diff === 0)     $score += 35; // è la più vecchia = originale
+                    elseif ($diff <= 2) $score += 15;
+                    elseif ($diff <= 5) $score += 0;
+                    else                $score -= 20; // ristampa tardiva
+                }
+
+                // Tra dischi diversi dello stesso tipo con lo stesso
+                // titolo, preferenza per quello uscito per primo.
+                if (isset($rgOldest[$rgId], $typeOldest[$primaryType])
+                    && $rgOldest[$rgId] === $typeOldest[$primaryType]
+                ) {
+                    $score += 20;
+                }
             }
 
             if ($score > $bestScore) {
@@ -1220,20 +1513,31 @@ class AlbumMetadataService
             return $b['release_count'] - $a['release_count'];
         });
 
-        // Variante proposta come originale. Se esiste una variante a
-        // disco singolo, quelle multi-disco (bonus disc, anniversari)
-        // non vengono proposte per prime, come in pickBestRelease().
-        $singleExists = false;
-        foreach ($groups as $g) {
-            if (!$g['multi_disc']) {
-                $singleExists = true;
-                break;
+        // Variante proposta come originale. Una variante multi-disco
+        // viene esclusa SOLO se contiene per intero una variante a disco
+        // singolo pubblicata in un anno PRECEDENTE, cioè se è l'album più
+        // un disco bonus uscito dopo (deluxe, anniversari). Un album
+        // doppio come il White Album resta candidato anche quando
+        // esistono stampe a disco singolo dello stesso anno che ne
+        // riportano solo una parte (Vol. 1 / Vol. 2): la regola
+        // precedente ("se esiste un disco singolo, niente multi-disco")
+        // proponeva come originale il Vol. 2 a 13 tracce.
+        $bonusVariant = [];
+        foreach ($groups as $gi => $g) {
+            if (!$g['multi_disc'] || $g['year'] === 0) continue;
+            foreach ($groups as $g2) {
+                if ($g2['multi_disc'] || $g2['year'] === 0 || $g2['year'] >= $g['year']) continue;
+                list($missing) = $this->diffTitleKeys($g2['title_keys'], $g['title_keys']);
+                if (empty($missing)) {
+                    $bonusVariant[$gi] = true;
+                    break;
+                }
             }
         }
 
         $defaultIdx = -1;
         foreach ($groups as $gi => $g) {
-            if ($singleExists && $g['multi_disc']) {
+            if (isset($bonusVariant[$gi])) {
                 continue;
             }
             if ($defaultIdx === -1) {
@@ -1315,8 +1619,17 @@ class AlbumMetadataService
             if ($g['release_count'] < self::EDITIONS_EXCEPTION_MIN_RELEASES) {
                 continue;
             }
-            list($missing) = $this->diffTitleKeys($defaultKeys, $g['title_keys']);
-            if (!empty($missing)) {
+            // Conta come caso limite una variante che SOSTITUISCE tracce
+            // (ne toglie e ne aggiunge: Slipknot, Purity -> Me Inside) o
+            // che ne toglie poche (brano ritirato da una ristampa). Una
+            // variante che ne toglie molte senza aggiungerne è una stampa
+            // parziale dell'album (White Album Vol. 1 / Vol. 2), non
+            // un'edizione alternativa.
+            list($missing, $extra) = $this->diffTitleKeys($defaultKeys, $g['title_keys']);
+            if (empty($missing)) {
+                continue;
+            }
+            if (!empty($extra) || count($missing) <= max(2, (int)floor(count($defaultKeys) * 0.25))) {
                 return true;
             }
         }
