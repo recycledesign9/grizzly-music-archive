@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/ExternalApiConfig.php';
+require_once __DIR__ . '/ImageOptimizer.php';
 
 /**
  * ArtistMetadataService
@@ -16,10 +17,12 @@ require_once __DIR__ . '/ExternalApiConfig.php';
  *   4) [fallback]   -> Wikipedia EN
  *   5) [fallback]   -> Last.fm artist.getInfo (bio inglese)
  *
- * IMMAGINE — catena a piu livelli per coprire anche i collage:
- *   a) Wikipedia pageimages (foto singole)
- *   b) Wikipedia REST summary thumbnail (pesca dove (a) fallisce)
- *   c) Wikidata P18 (file Wikimedia Commons)
+ * IMMAGINE — identita' prima del contenuto:
+ *   a) Deezer artist ID persistito, oppure derivato in modo verificato da
+ *      MusicBrainz e dagli album locali; poi lookup diretto /artist/{id}
+ *   b) Wikipedia/Wikimedia solo via Wikidata collegato al MusicBrainz
+ *      verificato (mai per semplice omonimia testuale)
+ *   c) se l'identita' resta ambigua: nessuna foto, non si indovina
  *
  * Compatibile PHP 7.4 (no match(), no union types).
  */
@@ -48,6 +51,19 @@ class ArtistMetadataService
     // v2: scarta le schede Wikipedia di album/singoli pescate per nome
     // quando il nome artista coincide col titolo di un'opera (Modern Nature).
     public const BIO_LOGIC_VERSION = 2;
+
+    /**
+     * Versione separata della logica immagine artista.
+     *
+     * Regola di progetto: un cambio nella pipeline delle immagini NON deve
+     * provocare un refetch della bio e NON deve sostituire automaticamente
+     * un'immagine gia' valida. Gli artisti senza immagine possono invece
+     * essere rivalidati in modo indipendente.
+     *
+     * v1: identita' Deezer persistente + risoluzione deterministica
+     * MusicBrainz -> Deezer ID -> /artist/{id}; nessun ranking per fan.
+     */
+    public const IMAGE_LOGIC_VERSION = 1;
 
     /**
      * v2: fix del 2026-07 — la discografia veniva letta da /release
@@ -153,21 +169,46 @@ class ArtistMetadataService
      *                                  Con array vuoto il comportamento è identico
      *                                  a prima (nessuna verifica).
      */
-    public function fetchByName(string $name, array $localAlbumTitles = []): array
-    {
+    public function fetchByName(
+        string $name,
+        array $localAlbumTitles = [],
+        string $knownMbArtistId = '',
+        string $knownDeezerArtistId = '',
+        bool $wantBio = true,
+        bool $wantImage = true
+    ): array {
         $result = $this->emptyResult();
         $name   = trim($name);
+
         if ($name === '') {
             return $result;
         }
 
-        // ---------- 1) MUSICBRAINZ : match + metadati ----------
-        $mb = $this->searchMusicBrainzArtist($name, $localAlbumTitles);
+        $knownMbArtistId     = $this->normalizeMusicBrainzId($knownMbArtistId);
+        $knownDeezerArtistId = $this->normalizeDeezerArtistId($knownDeezerArtistId);
 
-        // Estrae il flag di esito (vedi searchMusicBrainzArtist): indica
-        // se la RICERCA MusicBrainz è andata a buon fine, indipendentemente
-        // dal fatto che abbia trovato un match. Usato da ArtistController
-        // per decidere se la cache va marcata 'ok' o 'error' (da ritentare).
+        // ---------- 1) MUSICBRAINZ : identita' + metadati ----------
+        //
+        // Se l'MBID e' gia' salvato nel DB NON rifacciamo una ricerca per
+        // nome: un'identita' persistita e verificata e' piu' forte di
+        // qualunque ranking/fuzzy-search successivo.
+        //
+        // Se stiamo recuperando SOLO l'immagine e deezer_artist_id e' gia'
+        // persistito, non serve nemmeno interrogare MusicBrainz: l'identita'
+        // esterna e' gia' determinata e si va direttamente su /artist/{id}.
+        $needMusicBrainz = $wantBio
+            || ($wantImage && $knownDeezerArtistId === '');
+
+        if (!$needMusicBrainz && $knownMbArtistId !== '') {
+            $result['mb_artist_id'] = $knownMbArtistId;
+            $mb = ['_fetch_ok' => true];
+        } elseif ($knownMbArtistId !== '') {
+            $result['mb_artist_id'] = $knownMbArtistId;
+            $mb = $this->fetchMusicBrainzArtistById($knownMbArtistId);
+        } else {
+            $mb = $this->searchMusicBrainzArtist($name, $localAlbumTitles);
+        }
+
         $fetchOk = true;
         if (array_key_exists('_fetch_ok', $mb)) {
             $fetchOk = (bool) $mb['_fetch_ok'];
@@ -175,59 +216,98 @@ class ArtistMetadataService
         }
 
         $wikidataId = '';
-        if (!empty($mb)) {
-            $result['mb_artist_id'] = $mb['id'] ?? '';
-            $result['country']      = $mb['area']['name'] ?? ($mb['country'] ?? '');
 
-            if (!empty($mb['life-span']['begin'])) {
-                $result['active_from'] = (int) substr($mb['life-span']['begin'], 0, 4) ?: null;
+        if (!empty($mb['id'])) {
+            $resolvedMbid = $this->normalizeMusicBrainzId((string) $mb['id']);
+
+            // Con MBID gia' persistito non accettiamo MAI un'identita' diversa.
+            if ($knownMbArtistId === '' || hash_equals($knownMbArtistId, $resolvedMbid)) {
+                $result['mb_artist_id'] = $resolvedMbid;
+                $result['country']      = $mb['area']['name'] ?? ($mb['country'] ?? '');
+
+                if (!empty($mb['life-span']['begin'])) {
+                    $result['active_from'] = (int) substr($mb['life-span']['begin'], 0, 4) ?: null;
+                }
+                if (!empty($mb['life-span']['end'])) {
+                    $result['active_to'] = (int) substr($mb['life-span']['end'], 0, 4) ?: null;
+                }
+
+                $wikidataId = $this->extractWikidataId($mb['relations'] ?? []);
+            } else {
+                $fetchOk = false;
             }
-            if (!empty($mb['life-span']['end'])) {
-                $result['active_to'] = (int) substr($mb['life-span']['end'], 0, 4) ?: null;
+        }
+
+        // ---------- IMMAGINE: identita' Deezer deterministica ----------
+        $imageFetchOk = true;
+
+        if ($wantImage) {
+            $deezer = $this->resolveDeezerArtist(
+                $name,
+                $localAlbumTitles,
+                $mb['relations'] ?? [],
+                $knownDeezerArtistId,
+                $knownMbArtistId !== '' && !$fetchOk
+            );
+
+            $imageFetchOk = (bool) ($deezer['ok'] ?? true);
+
+            if (!empty($deezer['id'])) {
+                $result['deezer_artist_id'] = (string) $deezer['id'];
             }
 
-            $wikidataId = $this->extractWikidataId($mb['relations'] ?? []);
-        }
-
-        // ---------- IMMAGINE, fonte prioritaria: DEEZER ----------
-        // Foto quadrate e uniformi, API pubblica senza chiave.
-        // Il match sul nome è di uguaglianza esatta normalizzata
-        // per non pescare omonimi (lezione "Packaging"); in caso
-        // di mancato match si scende sulla catena Wikipedia/Wikidata.
-        $dz = $this->deezerArtistImage($name);
-        if ($dz !== '') {
-            $result['image_url']    = $dz;
-            $result['image_source'] = 'deezer';
-        }
-
-        // ---------- 2+3) WIKIPEDIA IT (intro completa + immagine) ----------
-        $wiki = $this->fetchWikipedia($wikidataId, $name, 'it');
-
-        // ---------- 4) FALLBACK WIKIPEDIA EN ----------
-        if (empty($wiki['extract'])) {
-            $wiki = $this->fetchWikipedia($wikidataId, $name, 'en');
-        }
-
-        if (!empty($wiki['extract'])) {
-            $result['bio']        = $this->trimBio($wiki['extract']);
-            $result['bio_source'] = 'wikipedia';
-            $result['bio_lang']   = $wiki['lang'];
-            $result['bio_url']    = $wiki['url'];
-            if ($result['image_url'] === '' && !empty($wiki['image'])) {
-                $result['image_url']    = $wiki['image'];
-                $result['image_source'] = 'wikimedia';
+            if (!empty($deezer['image_url'])) {
+                $result['image_url']    = (string) $deezer['image_url'];
+                $result['image_source'] = 'deezer';
             }
-            // memorizza il titolo/lingua pagina per i fallback immagine
-            $wikiTitle = $wiki['title'] ?? '';
-            $wikiLang  = $wiki['lang']  ?? 'it';
-        } else {
-            $wikiTitle = '';
-            $wikiLang  = 'it';
         }
 
-        // ---------- IMMAGINE: fallback in catena se ancora manca ----------
-        if ($result['image_url'] === '') {
-            // b) REST summary (pesca i casi dove pageimages e' vuoto, es. collage)
+        // ---------- 2+3) WIKIPEDIA IT / EN ----------
+        //
+        // Per la BIO conserviamo il fallback storico per nome. Per una FOTO,
+        // invece, Wikipedia e' accettata solo quando la pagina e' raggiunta
+        // dall'identita' Wikidata collegata al MusicBrainz gia' verificato.
+        // Un nome come Air/Palace/Fink non puo' mai scegliere una foto solo
+        // per omonimia testuale.
+        $needWikipedia = $wantBio
+            || ($wantImage
+                && $result['image_url'] === ''
+                && $wikidataId !== '');
+        $wiki          = [];
+        $wikiTitle     = '';
+        $wikiLang      = 'it';
+
+        if ($needWikipedia) {
+            $wiki = $this->fetchWikipedia($wikidataId, $name, 'it');
+
+            if (empty($wiki['extract'])) {
+                $wiki = $this->fetchWikipedia($wikidataId, $name, 'en');
+            }
+
+            if (!empty($wiki['extract'])) {
+                if ($wantBio) {
+                    $result['bio']        = $this->trimBio($wiki['extract']);
+                    $result['bio_source'] = 'wikipedia';
+                    $result['bio_lang']   = $wiki['lang'];
+                    $result['bio_url']    = $wiki['url'];
+                }
+
+                if ($wantImage
+                    && $wikidataId !== ''
+                    && $result['image_url'] === ''
+                    && !empty($wiki['image'])) {
+                    $result['image_url']    = $wiki['image'];
+                    $result['image_source'] = 'wikimedia';
+                }
+
+                $wikiTitle = $wiki['title'] ?? '';
+                $wikiLang  = $wiki['lang']  ?? 'it';
+            }
+        }
+
+        if ($wantImage
+            && $wikidataId !== ''
+            && $result['image_url'] === '') {
             if ($wikiTitle !== '') {
                 $img = $this->wikipediaSummaryImage($wikiTitle, $wikiLang);
                 if ($img !== '') {
@@ -236,24 +316,27 @@ class ArtistMetadataService
                 }
             }
         }
-        if ($result['image_url'] === '' && $wikidataId !== '') {
-            // c) Wikidata P18
+
+        if ($wantImage && $result['image_url'] === '' && $wikidataId !== '') {
             $p18 = $this->wikidataImage($wikidataId);
             if ($p18 !== '') {
                 $result['image_url']    = $p18;
                 $result['image_source'] = 'wikidata';
             }
         }
-        // ---------- NAZIONALITA: fallback da Wikidata se manca ----------
-        if ($result['country'] === '' && $wikidataId !== '') {
+
+        if ($wantImage && $result['image_url'] !== '') {
+            $imageFetchOk = true;
+        }
+
+        if ($wantBio && $result['country'] === '' && $wikidataId !== '') {
             $country = $this->wikidataCountry($wikidataId);
             if ($country !== '') {
                 $result['country'] = $country;
             }
         }
 
-        // ---------- 5) FALLBACK LAST.FM ----------
-        if ($result['bio'] === '') {
+        if ($wantBio && $result['bio'] === '') {
             $lf = $this->fetchLastFmBio($name, $result['mb_artist_id']);
             if (!empty($lf['bio'])) {
                 $result['bio']        = $this->trimBio($lf['bio']);
@@ -263,7 +346,8 @@ class ArtistMetadataService
             }
         }
 
-        $result['fetch_ok'] = $fetchOk;
+        $result['fetch_ok']       = $fetchOk;
+        $result['image_fetch_ok'] = $imageFetchOk;
 
         return $result;
     }
@@ -272,22 +356,50 @@ class ArtistMetadataService
     // MUSICBRAINZ
     // ============================================================
 
+    private function fetchMusicBrainzArtistById(string $mbid): array
+    {
+        $mbid = $this->normalizeMusicBrainzId($mbid);
+        if ($mbid === '') {
+            return ['_fetch_ok' => false];
+        }
+
+        $url  = 'https://musicbrainz.org/ws/2/artist/' . rawurlencode($mbid)
+              . '?inc=url-rels&fmt=json';
+        $resp = $this->httpGetJsonWithStatus($url);
+        usleep(self::MB_THROTTLE_US);
+
+        if (!$resp['ok']) {
+            return ['_fetch_ok' => false];
+        }
+
+        $data = $resp['data'];
+        if (empty($data['id'])) {
+            return ['_fetch_ok' => true];
+        }
+
+        $data['_fetch_ok'] = true;
+        return $data;
+    }
+
+    private function normalizeMusicBrainzId(string $mbid): string
+    {
+        $mbid = strtolower(trim($mbid));
+
+        return preg_match(
+            '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/',
+            $mbid
+        ) ? $mbid : '';
+    }
+
     private function searchMusicBrainzArtist(string $name, array $localAlbumTitles = []): array
     {
         $url = 'https://musicbrainz.org/ws/2/artist/'
             . '?query=' . urlencode('artist:"' . $name . '"')
             . '&fmt=json&limit=5';
 
-        // Il retry sui 503 transitori è centralizzato in
-        // httpGetJsonWithStatus(): un singolo throttling di MusicBrainz
-        // non fa più fallire la risoluzione (bug Supergrass/Pulp).
         $resp = $this->httpGetJsonWithStatus($url);
         usleep(self::MB_THROTTLE_US);
 
-        // Segnala se la RICERCA (non il lookup successivo) è andata a
-        // buon fine: è la chiamata portante, da cui dipende la decisione
-        // di fetchByName() se marcare la cache come confermata o da
-        // ritentare. Propagata via chiave interna, rimossa da fetchByName().
         $fetchOk = $resp['ok'];
         $data    = $resp['data'];
 
@@ -295,67 +407,54 @@ class ArtistMetadataService
             return ['_fetch_ok' => $fetchOk];
         }
 
-        // Raccoglie TUTTI i candidati sopra soglia (non solo il primo):
-        // per nomi ambigui ("Beck", "Bush", "Genesis"...) MusicBrainz può
-        // restituire più artisti omonimi con score alto e l'ordinamento
-        // del motore di ricerca non garantisce che il primo sia quello giusto.
         $candidates = [];
         foreach ($data['artists'] as $a) {
             $score = (int) ($a['score'] ?? 0);
-            if ($score >= self::MB_MIN_SCORE) {
+            if ($score >= self::MB_MIN_SCORE && !empty($a['id'])) {
                 $candidates[] = $a;
             }
         }
+
         if (empty($candidates)) {
             return ['_fetch_ok' => $fetchOk];
         }
 
-        // Disambiguazione: se c'è più di un candidato e conosciamo gli album
-        // locali dell'artista, vince il primo candidato che ha a catalogo
-        // (release-group MusicBrainz) almeno uno di quegli album.
-        $best = null;
-        if (count($candidates) > 1 && !empty($localAlbumTitles)) {
-            $normLocal = [];
-            foreach ($localAlbumTitles as $t) {
-                $n = $this->normalizeTitleForMatch((string) $t);
-                if ($n !== '') {
-                    $normLocal[] = $n;
-                }
-            }
-            if (!empty($normLocal)) {
-                foreach ($candidates as $a) {
-                    if (empty($a['id'])) {
-                        continue;
-                    }
-                    if ($this->artistOwnsLocalAlbum($a['id'], $normLocal)) {
-                        $best = $a;
-                        break;
-                    }
-                }
+        // Se abbiamo album locali, la loro presenza nel catalogo MB e'
+        // la prova d'identita' anche quando la ricerca ha restituito un solo
+        // candidato. Questo elimina l'ultimo affidamento implicito al ranking.
+        $normLocal = [];
+        foreach ($localAlbumTitles as $t) {
+            $n = $this->normalizeTitleForMatch((string) $t);
+            if ($n !== '') {
+                $normLocal[$n] = true;
             }
         }
 
-        // Fallback: comportamento storico (primo candidato sopra soglia).
-        // Copre candidato unico, archivio senza album verificabili su MB,
-        // o nessun match nella verifica.
-        if ($best === null) {
+        if (!empty($normLocal)) {
+            $matched = [];
+            $normLocalList = array_keys($normLocal);
+
+            foreach ($candidates as $a) {
+                if ($this->artistOwnsLocalAlbum((string) $a['id'], $normLocalList)) {
+                    $matched[] = $a;
+                }
+            }
+
+            // Zero prove o piu' prove compatibili = ambiguo. Non indovinare.
+            if (count($matched) !== 1) {
+                return ['_fetch_ok' => $fetchOk];
+            }
+
+            $best = $matched[0];
+        } elseif (count($candidates) === 1) {
+            // Compatibilita' per eventuali artisti senza album locale:
+            // accettiamo solo un unico candidato sopra soglia.
             $best = $candidates[0];
+        } else {
+            return ['_fetch_ok' => $fetchOk];
         }
 
-        if (!empty($best['id'])) {
-            $lookupUrl = 'https://musicbrainz.org/ws/2/artist/' . $best['id']
-                . '?inc=url-rels&fmt=json';
-            $full = $this->httpGetJson($lookupUrl);
-            usleep(self::MB_THROTTLE_US);
-            if (!empty($full['id'])) {
-                $full['score']     = $best['score'] ?? 0;
-                $full['_fetch_ok'] = true; // la ricerca primaria è comunque riuscita
-                return $full;
-            }
-        }
-
-        $best['_fetch_ok'] = true;
-        return $best;
+        return $this->fetchMusicBrainzArtistById((string) $best['id']);
     }
 
     /**
@@ -410,6 +509,34 @@ class ArtistMetadataService
             }
         }
         return '';
+    }
+
+    /**
+     * Restituisce tutti gli ID artista Deezer presenti nelle url-rels
+     * MusicBrainz, senza assumere che la relazione sia unica.
+     *
+     * @return string[]
+     */
+    private function extractDeezerArtistIds(array $relations): array
+    {
+        $ids = [];
+
+        foreach ($relations as $rel) {
+            $res = trim((string) ($rel['url']['resource'] ?? ''));
+            if ($res === '') {
+                continue;
+            }
+
+            if (preg_match(
+                '~^https?://(?:www\.)?deezer\.com/(?:[a-z]{2}/)?artist/(\d+)(?:[/?#]|$)~i',
+                $res,
+                $m
+            )) {
+                $ids[] = $m[1];
+            }
+        }
+
+        return array_values(array_unique($ids));
     }
 
     // ============================================================
@@ -629,86 +756,262 @@ class ArtistMetadataService
      * Nazionalita da Wikidata: prova P495 (country of origin) poi P17.
      */
     // ============================================================
-    // DEEZER (fallback immagine artista, nessuna API key richiesta)
+    // DEEZER — identita' artista persistente e deterministica
     // ============================================================
 
-    /**
-     * Cerca l'artista su Deezer e restituisce l'URL della foto in
-     * alta risoluzione, oppure '' se non trovato.
-     *
-     * Protezioni:
-     * - match di UGUAGLIANZA ESATTA sul nome normalizzato (minuscole,
-     *   spazi compattati): la ricerca Deezer è fuzzy e senza questo
-     *   controllo un artista di nicchia pescherebbe l'omonimo famoso;
-     * - scarto dell'immagine placeholder di default di Deezer,
-     *   riconoscibile dall'md5 vuoto nel percorso ('/artist//').
-     */
-    private function deezerArtistImage(string $name): string
+    private function normalizeDeezerArtistId(string $artistId): string
     {
-        $url  = 'https://api.deezer.com/search/artist?q=' . rawurlencode($name);
-        $data = $this->httpGetJson($url);
-
-        if (empty($data['data']) || !is_array($data['data'])) {
-            return '';
-        }
-
-        $wanted = $this->normalizeArtistName($name);
-
-        // Esamina solo i primi risultati: se il match esatto non è
-        // in cima, quasi certamente l'artista non è quello giusto.
-        $candidates = array_slice($data['data'], 0, 5);
-
-        // Tra TUTTI i match esatti di nome con una foto valida, scegli
-        // quello con più fan — NON il primo nell'ordine dell'API.
-        // L'ordine dell'API non è affidabile: per nomi comuni esistono
-        // più artisti con nome identico e foto reale (es. tre "Oasis":
-        // il gruppo con 4,6M fan, uno con 305, uno con 49) e l'omonimo
-        // minore può precedere quello vero, superando sia il check sul
-        // nome sia quelli sul placeholder. nb_fan è il discriminante
-        // che l'API fornisce già.
-        $bestImg  = '';
-        $bestFans = -1;
-
-        foreach ($candidates as $a) {
-            if (empty($a['name'])) {
-                continue;
-            }
-            if ($this->normalizeArtistName($a['name']) !== $wanted) {
-                continue;
-            }
-
-            $img = $a['picture_xl'] ?? ($a['picture_big'] ?? '');
-            if ($img === '') {
-                continue;
-            }
-            // Placeholder Deezer, caso 1: percorso con hash vuoto (/artist//...)
-            if (strpos($img, '/artist//') !== false) {
-                continue;
-            }
-            // Placeholder Deezer, caso 2: hash = md5('') = d41d8cd98f00b204e9800998ecf8427e.
-            // Deezer lo usa come "nessuna foto" per artisti omonimi minori che a
-            // volte precedono nei risultati l'artista vero (es. un "David Bowie"
-            // con 441 fan senza foto, prima del vero David Bowie con 2,4M fan).
-            // Senza questo controllo il codice accetta il placeholder come se
-            // fosse una foto reale e lo scarica in locale.
-            if (strpos($img, '/d41d8cd98f00b204e9800998ecf8427e/') !== false) {
-                continue;
-            }
-
-            $fans = (int) ($a['nb_fan'] ?? 0);
-            if ($fans > $bestFans) {
-                $bestFans = $fans;
-                $bestImg  = $img;
-            }
-        }
-
-        return $bestImg;
+        $artistId = trim($artistId);
+        return preg_match('/^\d+$/', $artistId) ? $artistId : '';
     }
 
     /**
-     * Normalizzazione nome artista per confronto: minuscole, trim,
-     * spazi multipli compattati.
+     * @return array{id:string,image_url:string,ok:bool}
      */
+    private function resolveDeezerArtist(
+        string $artistName,
+        array $localAlbumTitles,
+        array $mbRelations,
+        string $knownDeezerArtistId = '',
+        bool $musicBrainzUnavailableForKnownIdentity = false
+    ): array {
+        $empty = ['id' => '', 'image_url' => '', 'ok' => true];
+
+        $knownDeezerArtistId = $this->normalizeDeezerArtistId($knownDeezerArtistId);
+
+        if ($knownDeezerArtistId !== '') {
+            $direct = $this->deezerArtistById($knownDeezerArtistId);
+            if (!$direct['ok']) {
+                return ['id' => $knownDeezerArtistId, 'image_url' => '', 'ok' => false];
+            }
+            return [
+                'id'        => $knownDeezerArtistId,
+                'image_url' => $direct['image_url'],
+                'ok'        => true,
+            ];
+        }
+
+        if ($musicBrainzUnavailableForKnownIdentity) {
+            return ['id' => '', 'image_url' => '', 'ok' => false];
+        }
+
+        $deezerIds = $this->extractDeezerArtistIds($mbRelations);
+
+        if (count($deezerIds) === 1) {
+            $id     = $deezerIds[0];
+            $direct = $this->deezerArtistById($id);
+
+            if (!$direct['ok']) {
+                return ['id' => $id, 'image_url' => '', 'ok' => false];
+            }
+
+            return ['id' => $id, 'image_url' => $direct['image_url'], 'ok' => true];
+        }
+
+        if (count($deezerIds) > 1) {
+            $resolved = $this->deezerArtistIdFromLocalAlbums(
+                $artistName,
+                $localAlbumTitles,
+                $deezerIds
+            );
+
+            if (!$resolved['ok']) {
+                return ['id' => '', 'image_url' => '', 'ok' => false];
+            }
+
+            if ($resolved['id'] === '') {
+                return $empty;
+            }
+
+            $direct = $this->deezerArtistById($resolved['id']);
+            if (!$direct['ok']) {
+                return ['id' => $resolved['id'], 'image_url' => '', 'ok' => false];
+            }
+
+            return [
+                'id'        => $resolved['id'],
+                'image_url' => $direct['image_url'],
+                'ok'        => true,
+            ];
+        }
+
+        $resolved = $this->deezerArtistIdFromLocalAlbums(
+            $artistName,
+            $localAlbumTitles
+        );
+
+        if (!$resolved['ok']) {
+            return ['id' => '', 'image_url' => '', 'ok' => false];
+        }
+
+        if ($resolved['id'] !== '') {
+            $direct = $this->deezerArtistById($resolved['id']);
+            if (!$direct['ok']) {
+                return ['id' => $resolved['id'], 'image_url' => '', 'ok' => false];
+            }
+
+            return [
+                'id'        => $resolved['id'],
+                'image_url' => $direct['image_url'],
+                'ok'        => true,
+            ];
+        }
+
+        // Nessuna relazione MusicBrainz e nessun album locale ha prodotto
+        // un ID univoco: NON usare una search per solo nome. Gli omonimi
+        // renderebbero il mapping non deterministico; passa ai fallback
+        // Wikipedia/Wikidata.
+        return $empty;
+    }
+
+    /**
+     * @return array{image_url:string,ok:bool}
+     */
+    private function deezerArtistById(string $artistId): array
+    {
+        $artistId = $this->normalizeDeezerArtistId($artistId);
+        if ($artistId === '') {
+            return ['image_url' => '', 'ok' => true];
+        }
+
+        $resp = $this->httpGetJsonOneShot(
+            'https://api.deezer.com/artist/' . rawurlencode($artistId)
+        );
+
+        if (!$resp['ok']) {
+            return ['image_url' => '', 'ok' => false];
+        }
+
+        $data = $resp['data'];
+        $img  = (string) ($data['picture_xl'] ?? ($data['picture_big'] ?? ''));
+
+        return [
+            'image_url' => $this->isValidDeezerArtistImage($img) ? $img : '',
+            'ok'        => true,
+        ];
+    }
+
+    /**
+     * @param string[] $localAlbumTitles
+     * @param string[] $allowedIds
+     * @return array{id:string,ok:bool}
+     */
+    private function deezerArtistIdFromLocalAlbums(
+        string $artistName,
+        array $localAlbumTitles,
+        array $allowedIds = []
+    ): array {
+        $wantedArtist = $this->normalizeArtistName($artistName);
+
+        if ($wantedArtist === '' || empty($localAlbumTitles)) {
+            return ['id' => '', 'ok' => true];
+        }
+
+        $allowed = [];
+        foreach ($allowedIds as $id) {
+            $id = $this->normalizeDeezerArtistId((string) $id);
+            if ($id !== '') {
+                $allowed[$id] = true;
+            }
+        }
+
+        $evidence = [];
+        $checked  = 0;
+
+        foreach ($localAlbumTitles as $albumTitle) {
+            $albumTitle = trim((string) $albumTitle);
+            if ($albumTitle === '') {
+                continue;
+            }
+
+            $checked++;
+            if ($checked > 3) {
+                break;
+            }
+
+            $wantedTitle = $this->normalizeTitleForMatch($albumTitle);
+            if ($wantedTitle === '') {
+                continue;
+            }
+
+            $queries = [
+                'artist:"' . $artistName . '" album:"' . $albumTitle . '"',
+                $artistName . ' ' . $albumTitle,
+            ];
+
+            $matches = [];
+
+            foreach ($queries as $query) {
+                $resp = $this->httpGetJsonOneShot(
+                    'https://api.deezer.com/search/album?q=' . rawurlencode($query)
+                    . '&limit=10'
+                );
+
+                if (!$resp['ok']) {
+                    return ['id' => '', 'ok' => false];
+                }
+
+                $data = $resp['data'];
+
+                foreach ($data['data'] ?? [] as $album) {
+                    $aName = (string) ($album['artist']['name'] ?? '');
+                    $aId   = $this->normalizeDeezerArtistId((string) ($album['artist']['id'] ?? ''));
+                    $title = (string) ($album['title'] ?? '');
+
+                    if ($aName === '' || $aId === '' || $title === '') {
+                        continue;
+                    }
+
+                    if ($this->normalizeArtistName($aName) !== $wantedArtist) {
+                        continue;
+                    }
+
+                    if ($this->normalizeTitleForMatch($title) !== $wantedTitle) {
+                        continue;
+                    }
+
+                    if (!empty($allowed) && !isset($allowed[$aId])) {
+                        continue;
+                    }
+
+                    $matches[$aId] = true;
+                }
+
+                // Appena una query converge su un solo ID abbiamo una prova
+                // sufficiente; la query semplice serve solo come fallback.
+                if (count($matches) === 1) {
+                    break;
+                }
+            }
+
+            if (count($matches) === 1) {
+                $id = (string) array_key_first($matches);
+                $evidence[$id] = true;
+            }
+        }
+
+        return count($evidence) === 1
+            ? ['id' => (string) array_key_first($evidence), 'ok' => true]
+            : ['id' => '', 'ok' => true];
+    }
+
+    private function isValidDeezerArtistImage(string $img): bool
+    {
+        if ($img === '') {
+            return false;
+        }
+
+        if (strpos($img, '/artist//') !== false) {
+            return false;
+        }
+
+        if (strpos($img, '/d41d8cd98f00b204e9800998ecf8427e/') !== false) {
+            return false;
+        }
+
+        return true;
+    }
+
     private function normalizeArtistName(string $n): string
     {
         $n = mb_strtolower(trim($n));
@@ -754,14 +1057,12 @@ class ArtistMetadataService
 
     private function fetchLastFmBio(string $name, string $mbid = ''): array
     {
-        $apiKey = ExternalApiConfig::getLastFmKey();
-
-        if ($apiKey === '') {
+        if (ExternalApiConfig::getLastFmKey() === '') {
             return ['bio' => '', 'url' => ''];
         }
 
         $url = 'https://ws.audioscrobbler.com/2.0/?method=artist.getinfo'
-            . '&api_key=' . $apiKey
+            . '&api_key=' . ExternalApiConfig::getLastFmKey()
             . '&format=json&lang=en';
 
         if ($mbid !== '') {
@@ -837,7 +1138,7 @@ class ArtistMetadataService
      *   1) Cover Art Archive (release-group front-250);
      *   2) Deezer search album — SOLO con match di uguaglianza esatta
      *      normalizzata su artista E titolo (stessa disciplina
-     *      anti-omonimi di deezerArtistImage, lezione "Packaging").
+     *      anti-omonimi della risoluzione artista, lezione "Packaging").
      *      Copre i casi (rari ma reali, es. Santo Niente) in cui CAA
      *      non ha proprio nessuna immagine per l'album: 404 sul
      *      release-group significa che NESSUNA release del gruppo ha
@@ -962,7 +1263,7 @@ class ArtistMetadataService
      * match di uguaglianza esatta normalizzata su artista E titolo:
      * la ricerca Deezer è fuzzy e senza questa disciplina un album di
      * nicchia pescherebbe l'omonimo sbagliato (stessa lezione
-     * "Packaging" di deezerArtistImage). normalizeTitleForMatch toglie
+     * "Packaging" della risoluzione artista). normalizeTitleForMatch toglie
      * anche le annotazioni tra parentesi, quindi "Album (Remastered)"
      * su Deezer matcha "Album" della discografia MusicBrainz.
      *
@@ -1492,17 +1793,19 @@ class ArtistMetadataService
     private function emptyResult(): array
     {
         return [
-            'mb_artist_id' => '',
-            'bio'          => '',
-            'bio_source'   => '',
-            'bio_lang'     => '',
-            'bio_url'      => '',
-            'image_url'    => '',
-            'image_source' => '',
-            'country'      => '',
-            'active_from'  => null,
-            'active_to'    => null,
-            'fetch_ok'     => true,
+            'mb_artist_id'     => '',
+            'deezer_artist_id' => '',
+            'bio'              => '',
+            'bio_source'       => '',
+            'bio_lang'         => '',
+            'bio_url'          => '',
+            'image_url'        => '',
+            'image_source'     => '',
+            'country'          => '',
+            'active_from'      => null,
+            'active_to'        => null,
+            'fetch_ok'         => true,
+            'image_fetch_ok'   => true,
         ];
     }
 
@@ -1528,6 +1831,33 @@ class ArtistMetadataService
         }
         $json = json_decode($raw, true);
         return is_array($json) ? $json : [];
+    }
+
+    /**
+     * GET JSON singolo con stato HTTP, usato per Deezer.
+     *
+     * @return array{ok:bool,data:array}
+     */
+    private function httpGetJsonOneShot(string $url): array
+    {
+        $res    = $this->httpGetBinaryWithStatus($url, 'application/json');
+        $status = (int) $res['status'];
+        $raw    = (string) $res['bytes'];
+
+        if ($status === 0 || $status === 429 || $status >= 500 || $raw === '') {
+            return ['ok' => false, 'data' => []];
+        }
+
+        $json = json_decode($raw, true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'data' => []];
+        }
+
+        if ($status >= 400 || isset($json['error'])) {
+            return ['ok' => false, 'data' => $json];
+        }
+
+        return ['ok' => true, 'data' => $json];
     }
 
     /**

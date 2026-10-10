@@ -30,6 +30,185 @@ class Artist {
         return $row ? (int)$row['id'] : null;
     }
 
+
+    // Lookup in sola lettura per MBID MusicBrainz artista.
+    public function findByMbid(string $mbid): ?int {
+        $mbid = $this->normalizeArtistMbid($mbid);
+        if ($mbid === '') return null;
+
+        $stmt = $this->db->prepare("SELECT id FROM artists WHERE mb_artist_id = :mbid LIMIT 1");
+        $stmt->execute([':mbid' => $mbid]);
+        $row = $stmt->fetch();
+
+        return $row ? (int)$row['id'] : null;
+    }
+
+    // Lookup in sola lettura per ID artista Deezer persistito.
+    public function findByDeezerId(string $deezerArtistId): ?int {
+        $deezerArtistId = $this->normalizeDeezerArtistId($deezerArtistId);
+        if ($deezerArtistId === '') return null;
+
+        $stmt = $this->db->prepare("
+            SELECT id
+            FROM artists
+            WHERE deezer_artist_id = :deezer_id
+            LIMIT 1
+        ");
+        $stmt->execute([':deezer_id' => $deezerArtistId]);
+        $row = $stmt->fetch();
+
+        return $row ? (int)$row['id'] : null;
+    }
+
+    // Risolve un artista senza scrivere nulla:
+    //  1) MBID MusicBrainz, se disponibile;
+    //  2) nome, ma solo se non contraddice un MBID già salvato.
+    //
+    // Serve al controllo duplicati degli album: alias diversi dello stesso
+    // artista ("Beatles" / "The Beatles") devono convergere sullo stesso id
+    // quando MusicBrainz fornisce la stessa identità.
+    public function findByIdentity(string $name, string $mbArtistId = ''): ?int {
+        $name = trim($name);
+        $mbid = $this->normalizeArtistMbid($mbArtistId);
+
+        if ($mbid !== '') {
+            $byMbid = $this->findByMbid($mbid);
+            if ($byMbid !== null) {
+                return $byMbid;
+            }
+
+            if ($name === '') {
+                return null;
+            }
+
+            $stmt = $this->db->prepare("
+                SELECT id, mb_artist_id
+                FROM artists
+                WHERE name = :name
+                LIMIT 1
+            ");
+            $stmt->execute([':name' => $name]);
+            $row = $stmt->fetch();
+
+            if (!$row) {
+                return null;
+            }
+
+            $storedMbid = $this->normalizeArtistMbid((string)($row['mb_artist_id'] ?? ''));
+
+            // Nome già presente ma senza MBID: è un candidato valido e verrà
+            // arricchito SOLO dopo che il salvataggio ha superato i controlli.
+            if ($storedMbid === '') {
+                return (int)$row['id'];
+            }
+
+            // Stesso nome e stesso MBID: stessa identità.
+            if (hash_equals($storedMbid, $mbid)) {
+                return (int)$row['id'];
+            }
+
+            // Stesso nome ma MBID differente: possibile omonimo. Non fondere.
+            return null;
+        }
+
+        return $this->findByName($name);
+    }
+
+    // Collega un MBID a un artista esistente solo se la colonna è vuota e
+    // l'MBID non appartiene già a un altro record. Mai sovrascrivere
+    // un'identità MusicBrainz già salvata.
+    public function attachMbidIfEmpty(int $artistId, string $mbArtistId): void {
+        $mbid = $this->normalizeArtistMbid($mbArtistId);
+        if ($artistId <= 0 || $mbid === '') return;
+
+        $owner = $this->findByMbid($mbid);
+        if ($owner !== null && $owner !== $artistId) {
+            return;
+        }
+
+        $stmt = $this->db->prepare("
+            UPDATE artists
+            SET mb_artist_id = :mbid
+            WHERE id = :id
+              AND (mb_artist_id IS NULL OR mb_artist_id = '')
+        ");
+        $stmt->execute([
+            ':mbid' => $mbid,
+            ':id'   => $artistId,
+        ]);
+    }
+
+    // Sostituzione ESPLICITA di un mapping Deezer gia' persistito.
+    // Da usare solo in procedure di riparazione verificate: il flusso
+    // automatico usa sempre attachDeezerIdIfEmpty() e non cambia identita'.
+    public function setDeezerIdVerified(int $artistId, string $deezerArtistId): bool {
+        $deezerArtistId = $this->normalizeDeezerArtistId($deezerArtistId);
+        if ($artistId <= 0 || $deezerArtistId === '') return false;
+
+        $owner = $this->findByDeezerId($deezerArtistId);
+        if ($owner !== null && $owner !== $artistId) {
+            return false;
+        }
+
+        $stmt = $this->db->prepare("
+            UPDATE artists
+            SET deezer_artist_id = :deezer_id
+            WHERE id = :id
+        ");
+        $stmt->execute([
+            ':deezer_id' => $deezerArtistId,
+            ':id'        => $artistId,
+        ]);
+
+        return true;
+    }
+
+    // Collega l'ID Deezer a un artista solo se la colonna e' vuota.
+    // Un mapping gia' persistito non viene mai cambiato automaticamente.
+    // La UNIQUE KEY sul DB impedisce inoltre che lo stesso Deezer ID venga
+    // associato a due artisti locali differenti.
+    public function attachDeezerIdIfEmpty(int $artistId, string $deezerArtistId): bool {
+        $deezerArtistId = $this->normalizeDeezerArtistId($deezerArtistId);
+        if ($artistId <= 0 || $deezerArtistId === '') return false;
+
+        $current = $this->getById($artistId);
+        if (!$current) return false;
+
+        $stored = $this->normalizeDeezerArtistId(
+            (string)($current['deezer_artist_id'] ?? '')
+        );
+
+        // Mapping gia' persistito: e' valido solo se coincide.
+        if ($stored !== '') {
+            return hash_equals($stored, $deezerArtistId);
+        }
+
+        $owner = $this->findByDeezerId($deezerArtistId);
+        if ($owner !== null && $owner !== $artistId) {
+            return false;
+        }
+
+        $stmt = $this->db->prepare("
+            UPDATE artists
+            SET deezer_artist_id = :deezer_id
+            WHERE id = :id
+              AND (deezer_artist_id IS NULL OR deezer_artist_id = '')
+        ");
+        $stmt->execute([
+            ':deezer_id' => $deezerArtistId,
+            ':id'        => $artistId,
+        ]);
+
+        $fresh = $this->getById($artistId);
+        return $fresh
+            && hash_equals(
+                $deezerArtistId,
+                $this->normalizeDeezerArtistId(
+                    (string)($fresh['deezer_artist_id'] ?? '')
+                )
+            );
+    }
+
     // Aggiorna la GRAFIA del nome di un artista esistente (maiuscole,
     // accenti, spazi). Chiamato solo da AlbumController::save() in
     // modifica, quando il nome digitato risolve già a questo artista
@@ -51,17 +230,77 @@ class Artist {
         $stmt->execute([':name' => $name, ':id' => $artistId]);
     }
 
-    public function findOrCreate(string $name): int {
+    public function findOrCreate(string $name, string $mbArtistId = ''): int {
         $name = trim($name);
-        $stmt = $this->db->prepare("SELECT id FROM artists WHERE name = :name LIMIT 1");
-        $stmt->execute([':name' => $name]);
-        $row = $stmt->fetch();
-        if ($row) return (int)$row['id'];
+        $mbid = $this->normalizeArtistMbid($mbArtistId);
 
-        $slug = strtolower(preg_replace('/[^a-z0-9]+/i', '-', iconv('UTF-8','ASCII//TRANSLIT', $name)));
-        $stmt = $this->db->prepare("INSERT INTO artists (name, slug) VALUES (:name, :slug)");
-        $stmt->execute([':name' => $name, ':slug' => $slug]);
+        $existingId = $this->findByIdentity($name, $mbid);
+        if ($existingId !== null) {
+            if ($mbid !== '') {
+                $this->attachMbidIfEmpty($existingId, $mbid);
+            }
+            return $existingId;
+        }
+
+        $slugBase = strtolower((string)preg_replace(
+            '/[^a-z0-9]+/i',
+            '-',
+            (string)iconv('UTF-8', 'ASCII//TRANSLIT', $name)
+        ));
+        $slugBase = trim($slugBase, '-');
+        if ($slugBase === '') {
+            $slugBase = 'artist';
+        }
+
+        $slug = $this->uniqueArtistSlug($slugBase, $mbid);
+
+        $stmt = $this->db->prepare("
+            INSERT INTO artists (name, slug, mb_artist_id)
+            VALUES (:name, :slug, :mbid)
+        ");
+        $stmt->execute([
+            ':name' => $name,
+            ':slug' => $slug,
+            ':mbid' => $mbid !== '' ? $mbid : null,
+        ]);
+
         return (int)$this->db->lastInsertId();
+    }
+
+    private function normalizeArtistMbid(string $mbid): string {
+        $mbid = strtolower(trim($mbid));
+
+        return preg_match(
+            '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/',
+            $mbid
+        ) ? $mbid : '';
+    }
+
+    private function normalizeDeezerArtistId(string $deezerArtistId): string {
+        $deezerArtistId = trim($deezerArtistId);
+        return preg_match('/^\d+$/', $deezerArtistId) ? $deezerArtistId : '';
+    }
+
+    // Lo slug resta quello storico quando è libero. Il suffisso viene usato
+    // solo nel raro caso di due artisti omonimi con MBID differenti.
+    private function uniqueArtistSlug(string $base, string $mbid = ''): string {
+        $candidate = $base;
+        $suffix = $mbid !== ''
+            ? substr(str_replace('-', '', $mbid), 0, 8)
+            : 'artist';
+
+        $n = 1;
+        while (true) {
+            $stmt = $this->db->prepare("SELECT 1 FROM artists WHERE slug = :slug LIMIT 1");
+            $stmt->execute([':slug' => $candidate]);
+
+            if (!$stmt->fetchColumn()) {
+                return $candidate;
+            }
+
+            $candidate = $base . '-' . $suffix . ($n > 1 ? '-' . $n : '');
+            $n++;
+        }
     }
 
     // Album dell'artista (scheda unica): una riga per album con
@@ -195,34 +434,31 @@ class Artist {
     }
 
     // ----------------------------------------------------------
-    // Salva i metadati recuperati dalle API esterne.
-    // Aggiorna solo le colonne passate (whitelist), niente DROP.
+    // METADATI ARTISTA — BIO e IMMAGINE hanno cache indipendenti.
     // ----------------------------------------------------------
-    // $status: 'ok' se la ricerca MusicBrainz è andata a buon fine
-    // (anche con bio/immagine non trovate: è un "non trovato" confermato),
-    // 'error' se la chiamata a MusicBrainz è proprio fallita (rete/timeout):
-    // in quel caso needsBioRefetch() la ritenterà da sola dopo un cooldown,
-    // invece di restare vuota per sempre. $version va confrontato con
-    // ArtistMetadataService::BIO_LOGIC_VERSION.
-    public function updateMeta(int $id, array $data, string $status = 'ok', int $version = 0): void {
+
+    /**
+     * Salva SOLO identita' MusicBrainz + bio + metadati anagrafici.
+     * Non tocca mai image_* / deezer_artist_id.
+     */
+    public function updateBioMeta(
+        int $id,
+        array $data,
+        string $status = 'ok',
+        int $version = 0
+    ): void {
+        if (!empty($data['mb_artist_id'])) {
+            $this->attachMbidIfEmpty($id, (string)$data['mb_artist_id']);
+        }
+
         $allowed = [
-            'mb_artist_id', 'bio', 'bio_source', 'bio_lang', 'bio_url',
-            'image_url', 'image_local', 'image_source',
+            'bio', 'bio_source', 'bio_lang', 'bio_url',
             'country', 'active_from', 'active_to',
         ];
 
-        // Leggiamo i valori attuali per non sovrascrivere un dato buono già
-        // presente con un vuoto: un fetch fallito o senza risultati non deve
-        // MAI cancellare quello che c'era prima (stesso principio già in uso
-        // in AlbumMetadataService per le tracklist: si può solo migliorare o
-        // pareggiare, mai peggiorare). Riguarda soprattutto gli artisti del
-        // seed demo, che arrivano con una bio scritta a mano ma senza
-        // bio_fetched_at: il primo fetch live, se fallisce, non deve
-        // spazzarla via.
         $current = $this->getById($id) ?: [];
-
-        $set    = [];
-        $params = [':id' => $id];
+        $set     = [];
+        $params  = [':id' => $id];
 
         foreach ($allowed as $col) {
             if (!array_key_exists($col, $data)) {
@@ -234,21 +470,15 @@ class Artist {
                 && $current[$col] !== null
                 && $current[$col] !== '';
 
-            // Nuovo valore vuoto ma ne esiste già uno buono: non tocchiamo
-            // la colonna, teniamo quello che c'era.
+            // Un fetch vuoto/fallito non cancella mai un dato gia' buono.
             if ($newValue === null && $hasCurrentValue) {
                 continue;
             }
 
-            $set[]           = "`$col` = :$col";
+            $set[]            = "`$col` = :$col";
             $params[":$col"] = $newValue;
         }
 
-        // Marca SEMPRE tentativo + esito + versione, anche se nessun campo
-        // dati è cambiato (es. tentativo fallito senza nulla da salvare):
-        // serve al retry-cooldown e al version bump. Se non lo facessimo,
-        // un fallimento non lascerebbe traccia e verrebbe ritentato ad ogni
-        // singola visita della pagina, invece che dopo un cooldown.
         $set[] = "`bio_fetched_at` = NOW()";
         $set[] = "`bio_status` = :bio_status";
         $set[] = "`bio_fetch_version` = :bio_fetch_version";
@@ -258,6 +488,120 @@ class Artist {
         $sql = "UPDATE artists SET " . implode(', ', $set) . " WHERE id = :id";
         $stmt = $this->db->prepare($sql);
         $stmt->execute($params);
+    }
+
+    /**
+     * Salva SOLO identita' Deezer + immagine e relativa cache.
+     *
+     * $allowReplace=false e' la guardia anti-regressione fondamentale:
+     * una foto gia' presente (locale o remota) non viene sostituita da un
+     * normale refetch automatico. La sostituzione e' ammessa solo da una
+     * procedura esplicita di riparazione verificata.
+     */
+    public function updateImageMeta(
+        int $id,
+        array $data,
+        string $status = 'ok',
+        int $version = 0,
+        bool $allowReplace = false
+    ): void {
+        $ownsTransaction = !$this->db->inTransaction();
+
+        if ($ownsTransaction) {
+            $this->db->beginTransaction();
+        }
+
+        try {
+            if (!empty($data['deezer_artist_id'])) {
+                $identitySaved = $allowReplace
+                    ? $this->setDeezerIdVerified($id, (string)$data['deezer_artist_id'])
+                    : $this->attachDeezerIdIfEmpty($id, (string)$data['deezer_artist_id']);
+
+                // Se il Deezer ID appartiene gia' a un altro artista locale o
+                // contraddice un mapping persistito, non salviamo neppure la foto.
+                if (!$identitySaved) {
+                    throw new RuntimeException(
+                        'Deezer artist identity conflict for artist #' . $id
+                    );
+                }
+            }
+
+            $current = $this->getById($id) ?: [];
+
+            $hasCurrentImage =
+                !empty($current['image_local'])
+                || !empty($current['image_url']);
+
+            $set    = [];
+            $params = [':id' => $id];
+
+            if ($allowReplace || !$hasCurrentImage) {
+                foreach (['image_url', 'image_local', 'image_source'] as $col) {
+                    if (!array_key_exists($col, $data)) {
+                        continue;
+                    }
+
+                    $newValue = ($data[$col] === '' ? null : $data[$col]);
+
+                    if (!$allowReplace) {
+                        $hasCurrentValue = array_key_exists($col, $current)
+                            && $current[$col] !== null
+                            && $current[$col] !== '';
+
+                        if ($newValue === null && $hasCurrentValue) {
+                            continue;
+                        }
+                    }
+
+                    $set[]            = "`$col` = :$col";
+                    $params[":$col"] = $newValue;
+                }
+            }
+
+            $set[] = "`image_fetched_at` = NOW()";
+            $set[] = "`image_status` = :image_status";
+            $set[] = "`image_fetch_version` = :image_fetch_version";
+            $params[':image_status']        = $status;
+            $params[':image_fetch_version'] = $version;
+
+            $sql = "UPDATE artists SET " . implode(', ', $set) . " WHERE id = :id";
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute($params);
+
+            if ($ownsTransaction) {
+                $this->db->commit();
+            }
+        } catch (Throwable $e) {
+            if ($ownsTransaction && $this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $e;
+        }
+    }
+
+    /**
+     * Compatibilita' con eventuali chiamanti storici.
+     * Nuovo codice: usare updateBioMeta() e updateImageMeta() separatamente.
+     */
+    public function updateMeta(
+        int $id,
+        array $data,
+        string $status = 'ok',
+        int $version = 0
+    ): void {
+        $this->updateBioMeta($id, $data, $status, $version);
+
+        // Compatibilita' soltanto: non marchiare una cache immagine come
+        // "tentata" se il chiamante storico stava aggiornando solo la bio.
+        $hasImagePayload =
+            array_key_exists('deezer_artist_id', $data)
+            || array_key_exists('image_url', $data)
+            || array_key_exists('image_local', $data)
+            || array_key_exists('image_source', $data);
+
+        if ($hasImagePayload) {
+            $this->updateImageMeta($id, $data, $status, 1, false);
+        }
     }
 
     // ----------------------------------------------------------
@@ -328,6 +672,26 @@ class Artist {
             $artist['bio_status']        ?? null,
             $artist['bio_fetch_version'] ?? 0,
             $currentVersion
+        );
+    }
+
+    public function needsImageRefetch(array $artist, int $currentVersion): bool {
+        // Immagine gia' valida: MAI sostituirla automaticamente per un
+        // semplice version bump. Le correzioni di immagini esistenti passano
+        // da una riparazione esplicita (updateImageMeta(..., true)).
+        if (!empty($artist['image_local']) || !empty($artist['image_url'])) {
+            return false;
+        }
+
+        // Se non esiste alcuna immagine, il miss confermato viene rivalidato
+        // dopo 7 giorni; gli errori transitori restano sul cooldown standard.
+        return $this->needsRefetch(
+            $artist['image_fetched_at']    ?? null,
+            $artist['image_status']        ?? null,
+            $artist['image_fetch_version'] ?? 0,
+            $currentVersion,
+            180,
+            7
         );
     }
 

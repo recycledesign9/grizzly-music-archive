@@ -68,24 +68,16 @@ class ArtistController
   }
 
   // ----------------------------------------------------------
-  // ENDPOINT AJAX: recupera bio + immagine da fonti esterne.
-  // Chiamato dalla view solo se la bio non è ancora stata cercata.
-  // GET /index.php?route=artists/fetch-meta/{id}
-  // Risposta JSON: { ok, bio, bio_source, bio_lang, bio_url,
-  //                  image, country, active_from, active_to }
+  // ENDPOINT AJAX: recupera bio e/o immagine da fonti esterne.
+  // Le due cache sono indipendenti: un fix immagine non rifetcha la bio
+  // e un fix bio non sostituisce una foto gia' valida.
   // ----------------------------------------------------------
   private function fetchMeta(?int $id): void
   {
-    // FONDAMENTALE: rilascia SUBITO il lock di sessione. Questo endpoint
-    // fa I/O esterno lento (MusicBrainz, Last.fm, download immagine):
-    // senza questa riga terrebbe bloccata OGNI altra richiesta dell'app
-    // (navigazione, AJAX, player) finché non ha finito.
-    // Convenzione di progetto per tutti gli endpoint con I/O esterno.
     if (session_status() === PHP_SESSION_ACTIVE) {
       session_write_close();
     }
 
-    // Output JSON pulito
     while (ob_get_level()) {
       ob_end_clean();
     }
@@ -106,63 +98,83 @@ class ArtistController
 
       require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
 
-      // Rifetch solo se: mai tentato, oppure la logica di fetch è
-      // cambiata (version bump), oppure l'ultimo tentativo è fallito ed
-      // è passato il cooldown — vedi Artist::needsBioRefetch(). In tutti
-      // gli altri casi (incluso "cercato ma non trovato") serviamo la cache.
-      if (!$this->artistModel->needsBioRefetch($artist, ArtistMetadataService::BIO_LOGIC_VERSION)) {
+      $needBio = $this->artistModel->needsBioRefetch(
+        $artist,
+        ArtistMetadataService::BIO_LOGIC_VERSION
+      );
+
+      $needImage = $this->artistModel->needsImageRefetch(
+        $artist,
+        ArtistMetadataService::IMAGE_LOGIC_VERSION
+      );
+
+      if (!$needBio && !$needImage) {
         echo json_encode($this->metaPayload($artist));
         return;
       }
 
       $service = new ArtistMetadataService();
 
-      // Titoli degli album locali dell'artista: usati dal service per
-      // disambiguare artisti omonimi su MusicBrainz (es. "Beck").
-      $localTitles = array_column($this->artistModel->getAlbums($id), 'title');
+      $localTitles = array_column(
+        $this->artistModel->getAlbums($id),
+        'title'
+      );
 
-      $meta = $service->fetchByName($artist['name'], $localTitles);
+      $meta = $service->fetchByName(
+        (string)$artist['name'],
+        $localTitles,
+        (string)($artist['mb_artist_id'] ?? ''),
+        (string)($artist['deezer_artist_id'] ?? ''),
+        $needBio,
+        $needImage
+      );
 
-      // Indica se la ricerca MusicBrainz è andata a buon fine (vedi
-      // ArtistMetadataService::fetchByName). Se è fallita per un errore
-      // di rete/timeout marchiamo 'error': verrà ritentata da sola dopo
-      // un cooldown, invece di restare vuota per sempre.
-      $fetchOk = (bool) ($meta['fetch_ok'] ?? true);
-      unset($meta['fetch_ok']);
+      $fetchOk      = (bool)($meta['fetch_ok'] ?? true);
+      $imageFetchOk = (bool)($meta['image_fetch_ok'] ?? true);
+      unset($meta['fetch_ok'], $meta['image_fetch_ok']);
 
-      // FIX REGRESSIONE DISCOGRAFIA (Supergrass/Pulp): la ricerca artista
-      // su MusicBrainz può fallire (503 intermittente sull'endpoint
-      // /artist/?query) mentre bio (Wikipedia) e foto (Deezer) riescono.
-      // In quel caso $meta['mb_artist_id'] arriva VUOTO e, senza questa
-      // guardia, sovrascriveva un MBID già valido con NULL: da lì la
-      // discografia usciva sempre vuota (fetchDiscography esce subito se
-      // mb_artist_id è vuoto) e ogni visita ripeteva il ciclo.
-      //  1) Se il fetch non ha prodotto un MBID ma nel DB ce n'è già uno
-      //     valido, si conserva quello vecchio invece di azzerarlo.
-      //  2) Se dopo questo l'MBID è ancora vuoto, lo status resta 'error'
-      //     a prescindere dall'esito bio, così il retry continua finché
-      //     MusicBrainz non risponde e l'MBID viene finalmente catturato.
+      // Identita' MusicBrainz gia' persistita: mai cancellarla per un
+      // errore transitorio del lookup.
       if (empty($meta['mb_artist_id']) && !empty($artist['mb_artist_id'])) {
         $meta['mb_artist_id'] = $artist['mb_artist_id'];
       }
 
-      // Download immagine in locale (best-effort)
-      if (!empty($meta['image_url'])) {
-        $local = $service->downloadImage($meta['image_url']);
-        if ($local) {
-          $meta['image_local'] = $local;
+      if ($needBio) {
+        $bioStatus = $fetchOk ? 'ok' : 'error';
+
+        if (empty($meta['mb_artist_id'])) {
+          $bioStatus = 'error';
         }
+
+        $this->artistModel->updateBioMeta(
+          $id,
+          $meta,
+          $bioStatus,
+          ArtistMetadataService::BIO_LOGIC_VERSION
+        );
       }
 
-      $status = $fetchOk ? 'ok' : 'error';
-      // Senza MBID la scheda è incompleta (niente discografia): tieni lo
-      // stato su 'error' così needsBioRefetch ritenta dopo il cooldown.
-      if (empty($meta['mb_artist_id'])) {
-        $status = 'error';
-      }
-      $this->artistModel->updateMeta($id, $meta, $status, ArtistMetadataService::BIO_LOGIC_VERSION);
+      if ($needImage) {
+        // Download locale solo quando la cache immagine richiede davvero
+        // un fetch. Non si scarica nulla durante un semplice refresh bio.
+        if (!empty($meta['image_url'])) {
+          $local = $service->downloadImage($meta['image_url']);
+          if ($local) {
+            $meta['image_local'] = $local;
+          }
+        }
 
-      // Ricarica per servire i path definitivi
+        $imageStatus = $imageFetchOk ? 'ok' : 'error';
+
+        $this->artistModel->updateImageMeta(
+          $id,
+          $meta,
+          $imageStatus,
+          ArtistMetadataService::IMAGE_LOGIC_VERSION,
+          false
+        );
+      }
+
       $fresh = $this->artistModel->getById($id);
       echo json_encode($this->metaPayload($fresh));
     } catch (Throwable $e) {
