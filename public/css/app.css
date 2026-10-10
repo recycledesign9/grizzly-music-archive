@@ -4921,19 +4921,29 @@ a.badge-format:hover {
   gap: 12px;
 }
 @container (min-width: 474px) {
-  .grz-archive-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .grz-archive-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 @container (min-width: 636px) {
-  .grz-archive-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grz-archive-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 @container (min-width: 960px) {
-  .grz-archive-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .grz-archive-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
 }
 @container (min-width: 1284px) {
-  .grz-archive-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+  .grz-archive-grid {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
 }
 @container (min-width: 1932px) {
-  .grz-archive-grid { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  .grz-archive-grid {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+  }
 }
 
 .grz-archive-tile {
@@ -8533,6 +8543,17 @@ body.grz-dashboard-page .sticky-player {
   background: rgba(14, 14, 14, 0.985);
 }
 
+/* Archivio griglia — ottimizzazione scroll */
+.grz-archive-grid .grz-tile-badges .badge-format {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.grz-archive-grid .grz-tile-tracks {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(0, 0, 0, 0.72);
+}
 /* ============================================================
    FORM DISCO — riquadro cover (segnaposto  caricamento)
    Un solo quadrato: vuoto mostra il vinile dei token e le
@@ -9282,7 +9303,11 @@ html[data-bs-theme="light"] .grz-cover__empty .grz-vinyl {
   position: absolute;
   inset: 0;
   z-index: -1;
-  background: linear-gradient(90deg, rgba(0, 0, 0, 0) 0%, var(--bs-body-bg) 75%);
+  background: linear-gradient(
+    90deg,
+    rgba(0, 0, 0, 0) 0%,
+    var(--bs-body-bg) 75%
+  );
   opacity: 0.85;
 }
 .grz-daypick__cover {
@@ -9380,7 +9405,11 @@ html[data-bs-theme="light"] .grz-cover__empty .grz-vinyl {
     width: 100%;
   }
   .grz-daypick::after {
-    background: linear-gradient(180deg, rgba(0, 0, 0, 0) 0%, var(--bs-body-bg) 60%);
+    background: linear-gradient(
+      180deg,
+      rgba(0, 0, 0, 0) 0%,
+      var(--bs-body-bg) 60%
+    );
   }
 }
 
@@ -9501,7 +9530,11 @@ html[data-bs-theme="light"] .grz-cover__empty .grz-vinyl {
   scroll-snap-align: start;
 }
 .grz-anniv__list.has-more {
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 calc(100% - 36px),
+    transparent
+  );
   mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent);
 }
 /* Una colonna sola: la card non è più accanto, altezza fissa. */
@@ -9554,7 +9587,12 @@ html[data-bs-theme="light"] .grz-cover__empty .grz-vinyl {
   #tracklistPlayer .track-item > .d-flex > .flex-grow-1 > .grz-trk-fmt {
     margin-left: auto;
   }
-  #tracklistPlayer .track-item > .d-flex > .flex-grow-1 > .grz-trk-fmt + .text-muted.small {
+  #tracklistPlayer
+    .track-item
+    > .d-flex
+    > .flex-grow-1
+    > .grz-trk-fmt
+    + .text-muted.small {
     margin-left: 0 !important;
   }
 }
