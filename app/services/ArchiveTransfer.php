@@ -34,10 +34,15 @@ class ArchiveTransfer
      * v1: formati come colonna albums.format_id (schede separate)
      * v2: formati multipli nella tabella ponte album_formats
      * v3: percorsi libreria external/ignored portabili (@library/...)
+     * v4: albums.mb_release_group per l'identita' logica MusicBrainz
+     * v5: artists.deezer_artist_id + cache immagine indipendente
+     *     (image_fetched_at, image_status, image_fetch_version)
+     *
      * L'import accetta anche gli archivi precedenti: per gli archivi v1 la tabella ponte
-     * viene ricostruita dalla colonna legacy (vedi import()).
+     * viene ricostruita dalla colonna legacy (vedi import()); per v1-v4 le immagini
+     * artista gia' presenti vengono marcate come baseline valida della cache v1.
      */
-    private const FORMAT_VERSION = 3;
+    private const FORMAT_VERSION = 5;
 
     /** Prefisso interno usato nello ZIP per i path relativi alla media_scan_path. */
     private const PORTABLE_LIBRARY_PREFIX = '@library/';
@@ -583,6 +588,24 @@ class ArchiveTransfer
             throw new RuntimeException('Archivio non valido: dati illeggibili.');
         }
 
+        // Archivi storici privi di __format vengono trattati come v1.
+        // Un archivio creato da una versione FUTURA non va importato alla
+        // cieca: insertRows() usa le colonne presenti nel payload e una
+        // colonna sconosciuta al DB corrente farebbe fallire il restore
+        // dopo aver gia' iniziato a sostituire i dati.
+        $incomingFormat = isset($payload['__format']) ? (int)$payload['__format'] : 1;
+        if ($incomingFormat < 1) {
+            $zip->close();
+            throw new RuntimeException('Archivio non valido: versione formato non riconosciuta.');
+        }
+        if ($incomingFormat > self::FORMAT_VERSION) {
+            $zip->close();
+            throw new RuntimeException(
+                'Archivio creato da una versione piu recente di Grizzly '
+                . '(formato v' . $incomingFormat . '; supportato fino a v' . self::FORMAT_VERSION . ').'
+            );
+        }
+
         // Settings specifiche della macchina di destinazione: non devono
         // essere sovrascritte dal backup importato.
         $localServerSettings = $this->readLocalServerSettings();
@@ -627,6 +650,57 @@ class ArchiveTransfer
                 ");
                 $counts['album_formats'] = (int)$this->db
                     ->query('SELECT COUNT(*) FROM album_formats')->fetchColumn();
+            }
+
+            // Retrocompatibilita' archivi v1-v4:
+            // prima del formato v5 non esistevano deezer_artist_id e la cache
+            // immagine indipendente. Gli URL/file immagine, pero', erano gia'
+            // parte della riga artists e dello ZIP. Se li importassimo lasciando
+            // i nuovi default (status=none/version=0), una foto valida risulterebbe
+            // semanticamente "mai risolta". La marchiamo quindi come baseline
+            // valida SENZA rifetch e SENZA inventare un Deezer ID.
+            if (
+                $incomingFormat < 5
+                && $this->tableExists('artists')
+                && $this->columnExists('artists', 'image_fetched_at')
+                && $this->columnExists('artists', 'image_status')
+                && $this->columnExists('artists', 'image_fetch_version')
+            ) {
+                $this->db->exec("
+                    UPDATE artists
+                    SET
+                        image_fetched_at = COALESCE(
+                            image_fetched_at,
+                            bio_fetched_at,
+                            created_at,
+                            CURRENT_TIMESTAMP
+                        ),
+                        image_status = 'ok',
+                        image_fetch_version = 1
+                    WHERE
+                        (image_local IS NOT NULL AND image_local <> '')
+                        OR (image_url IS NOT NULL AND image_url <> '')
+                ");
+
+                $this->db->exec("
+                    UPDATE artists
+                    SET
+                        image_status = 'none',
+                        image_fetch_version = 0
+                    WHERE
+                        (image_local IS NULL OR image_local = '')
+                        AND (image_url IS NULL OR image_url = '')
+                ");
+
+                // La v3 della bio e' esistita solo nella patch sperimentale
+                // scartata prima della finalizzazione del formato v5.
+                if ($this->columnExists('artists', 'bio_fetch_version')) {
+                    $this->db->exec("
+                        UPDATE artists
+                        SET bio_fetch_version = 2
+                        WHERE bio_fetch_version > 2
+                    ");
+                }
             }
 
             // Ripristina le settings specifiche del server di destinazione.
@@ -780,6 +854,26 @@ class ArchiveTransfer
               AND table_name   = :t
         ');
         $stmt->execute([':t' => $table]);
+        return (bool)$stmt->fetchColumn();
+    }
+
+    /**
+     * Verifica l'esistenza di una colonna senza usare SHOW ... LIKE,
+     * mantenendo la compatibilita' con prepared statement nativi PDO.
+     */
+    private function columnExists(string $table, string $column): bool
+    {
+        $stmt = $this->db->prepare('
+            SELECT COUNT(*)
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name   = :t
+              AND column_name  = :c
+        ');
+        $stmt->execute([
+            ':t' => $table,
+            ':c' => $column,
+        ]);
         return (bool)$stmt->fetchColumn();
     }
 
