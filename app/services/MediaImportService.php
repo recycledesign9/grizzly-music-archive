@@ -1955,13 +1955,19 @@ class MediaImportService
                 //
                 // Regola conservativa:
                 //   - anno identico;
-                //   - tracklist identica per numero/titoli/ordine;
+                //   - tracklist completa e associabile 1:1 in modo affidabile;
+                //     il match letterale resta il segnale piu' forte, ma una
+                //     variante editoriale del titolo non deve scartare un album
+                //     quando tutte le tracce sono comunque abbinate;
                 //   - inoltre deve coincidere il titolo-base OPPURE il release-group.
                 //
                 // Questo copre alias reali dello stesso album (es. "The Beatles"
-                // / "The White Album") senza rendere il release-group, da solo,
-                // una prova sufficiente di identita'.
-                $structuralIdentity = $strictTrackMatch
+                // / "The White Album") e tracklist manuali piu' descrittive,
+                // senza rendere il release-group, da solo, una prova sufficiente
+                // di identita'.
+                $structuralTrackMatch = $strictTrackMatch || $fullTrackMatch;
+
+                $structuralIdentity = $structuralTrackMatch
                     && $yearDiff !== null
                     && $yearDiff === 0
                     && ($sameTitleBase || $sameGroupCandidate);
