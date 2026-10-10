@@ -11,7 +11,7 @@ class Track
     public function getByAlbum(int $albumId): array
     {
         $stmt = $this->db->prepare("
-            SELECT t.*, af.filename AS audio_filename, af.id AS audio_file_id
+            SELECT t.*, af.filename AS audio_filename, af.id AS audio_file_id, af.filesize AS audio_filesize
             FROM tracks t
             LEFT JOIN audio_files af ON af.track_id = t.id
             WHERE t.album_id = :album_id

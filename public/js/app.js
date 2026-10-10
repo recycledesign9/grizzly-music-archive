@@ -148,7 +148,7 @@ const Player = (function () {
         playingIcon.remove();
       }
 
-      var posSpan = li.querySelector('.text-muted.small');
+      var posSpan = li.querySelector('.track-index-cell .track-num') || li.querySelector('.text-muted.small');
       if (posSpan && posSpan.dataset.origText) {
         posSpan.textContent = posSpan.dataset.origText;
         delete posSpan.dataset.origText;
@@ -235,7 +235,7 @@ const Player = (function () {
         slot.style.display = 'none';
       }
 
-      const albumNum = !slot ? li.querySelector('.text-muted.small') : null;
+      const albumNum = !slot ? (li.querySelector('.track-index-cell .track-num') || li.querySelector('.text-muted.small')) : null;
       if (albumNum && albumNum.dataset.origText) {
         albumNum.textContent = albumNum.dataset.origText;
         delete albumNum.dataset.origText;

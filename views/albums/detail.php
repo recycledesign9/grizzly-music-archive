@@ -109,6 +109,56 @@ $audioTitle = $albumHasAudio
   : ($tracksWithAudio > 0
     ? $tracksWithAudio . ' di ' . $totalTracks . ' tracce con audio'
     : 'Nessun file audio caricato');
+
+// Formato dei file audio (dall'estensione del file): dato tecnico
+// della testata, distinto dalle pillole del supporto (Vinile, CD,
+// Digital). Stessa regola in JS (refreshTracklistMenuState) per
+// aggiornarlo dopo le rimozioni audio senza ricaricare la pagina.
+if (!function_exists('trackAudioExt')) {
+  function trackAudioExt(array $t): string
+  {
+    return empty($t['audio_filename'])
+      ? ''
+      : strtolower((string)pathinfo((string)$t['audio_filename'], PATHINFO_EXTENSION));
+  }
+}
+if (!function_exists('audioFormatLabel')) {
+  function audioFormatLabel(array $exts): string
+  {
+    $exts = array_values(array_unique(array_filter($exts)));
+    usort($exts, function ($a, $b) {
+      $rank = ['flac' => 0, 'mp3' => 1];
+      $ra = $rank[$a] ?? 2;
+      $rb = $rank[$b] ?? 2;
+      return $ra === $rb ? strcmp($a, $b) : $ra - $rb;
+    });
+    return strtoupper(implode(' + ', $exts));
+  }
+}
+if (!function_exists('audioFileSizeLabel')) {
+  function audioFileSizeLabel($bytes): string
+  {
+    $bytes = (int)$bytes;
+    if ($bytes <= 0) return '';
+    if ($bytes >= 1048576) return number_format($bytes / 1048576, 1, ',', '') . ' MB';
+    return number_format($bytes / 1024, 0, ',', '') . ' KB';
+  }
+}
+$audioExts = [];
+foreach ($tracks as $t) {
+  $ext = trackAudioExt($t);
+  if ($ext !== '') $audioExts[] = $ext;
+}
+$audioFmtLabel = audioFormatLabel($audioExts);
+$audioFmtMixed = count(array_unique($audioExts)) > 1;
+$audioFmtNote  = '';
+if ($audioFmtLabel !== '') {
+  if ($tracksWithAudio < $totalTracks) {
+    $audioFmtNote = $tracksWithAudio . ' di ' . $totalTracks;
+  } elseif ($audioFmtLabel === 'FLAC') {
+    $audioFmtNote = 'lossless';
+  }
+}
 ?>
 <script>
   window.__album = <?= json_encode([
@@ -279,6 +329,14 @@ $audioTitle = $albumHasAudio
               <span id="tracksAudioFact" title="<?= htmlspecialchars($audioTitle, ENT_QUOTES) ?>">
                 <i id="tracksAudioIcon" class="bi <?= $albumHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?>"></i>
                 <?= $totalTracks ?> <?= $totalTracks === 1 ? 'traccia' : 'tracce' ?>
+              </span>
+            <?php endif; ?>
+            <?php if ($totalTracks > 0): ?>
+              <!-- Formato dei file audio: nascosto se non c'è audio,
+                   aggiornato da refreshTracklistMenuState() -->
+              <span id="audioFormatFact" class="album-hero-audiofmt"<?= $audioFmtLabel === '' ? ' hidden' : '' ?>
+                title="Formato dei file audio">
+                <i class="bi bi-file-earmark-music"></i><span class="album-hero-audiofmt__label"><?= htmlspecialchars($audioFmtLabel) ?></span><span class="album-hero-audiofmt__note"><?= htmlspecialchars($audioFmtNote) ?></span>
               </span>
             <?php endif; ?>
             <?php if ($album['label_name']): ?>
@@ -473,7 +531,7 @@ $audioTitle = $albumHasAudio
       <div class="card shadow-sm">
         <ul class="list-group list-group-flush" id="tracklistPlayer" data-player-context="album:<?= (int)$album['id'] ?>">
           <?php foreach ($tracks as $t): ?>
-            <li class="list-group-item track-item py-2" data-track-id="<?= (int)$t['id'] ?>">
+            <li class="list-group-item track-item py-2" data-track-id="<?= (int)$t['id'] ?>"<?= trackAudioExt($t) !== '' ? ' data-audio-format="' . htmlspecialchars(trackAudioExt($t)) . '"' : '' ?>>
               <div class="d-flex align-items-center gap-3">
                 <span class="text-muted small track-index-cell<?= !empty($t['audio_file_id']) ? ' has-cb' : '' ?>" style="min-width:1.8rem;text-align:right">
                   <span class="track-num"><?= $t['position'] ?></span>
@@ -489,6 +547,9 @@ $audioTitle = $albumHasAudio
                       title="Riproduci <?= htmlspecialchars($t['title'], ENT_QUOTES) ?>"><?= htmlspecialchars($t['title']) ?></button>
                   <?php else: ?>
                     <span class="fw-semibold"><?= htmlspecialchars($t['title']) ?></span>
+                  <?php endif; ?>
+                  <?php if ($audioFmtMixed && trackAudioExt($t) !== ''): ?>
+                    <span class="grz-trk-fmt" title="Formato del file audio"><?= htmlspecialchars(strtoupper(trackAudioExt($t))) ?></span>
                   <?php endif; ?>
                   <?php if ($t['duration_sec']): ?>
                     <span class="text-muted small ms-2">
@@ -586,7 +647,7 @@ $audioTitle = $albumHasAudio
                         <li class="track-audio-menu-item">
                           <a class="dropdown-item"
                             href="<?= MediaPathResolver::getDownloadUrl($t['audio_filename']) ?>" download>
-                            <i class="bi bi-download" aria-hidden="true"></i>Scarica file audio
+                            <i class="bi bi-download" aria-hidden="true"></i>Scarica <?= htmlspecialchars(strtoupper(trackAudioExt($t))) ?><?php $sz = audioFileSizeLabel($t['audio_filesize'] ?? 0); ?><?php if ($sz !== ''): ?><span class="grz-dl-size"><?= $sz ?></span><?php endif; ?>
                           </a>
                         </li>
                         <?php if (!empty($t['audio_file_id'])): ?>
@@ -2643,6 +2704,40 @@ $audioTitle = $albumHasAudio
         fact.title = full ? 'Tutte le tracce hanno audio' :
           (withAudio > 0 ? (withAudio + ' di ' + total + ' tracce con audio') :
             'Nessun file audio caricato');
+      }
+
+      // Formato dei file audio: stessa regola del PHP (in testa alla
+      // view). Conta solo le righe che hanno ancora il file, cioè con
+      // .btn-delete-audio, leggendo il formato da data-audio-format.
+      var fmtFact = document.getElementById('audioFormatFact');
+      var exts = [];
+      for (var k = 0; k < items.length; k++) {
+        var fmt = items[k].dataset.audioFormat;
+        var stillHas = !!items[k].querySelector('.btn-delete-audio');
+        var tag = items[k].querySelector('.grz-trk-fmt');
+        if (tag && !stillHas) tag.remove();
+        if (fmt && stillHas && exts.indexOf(fmt) === -1) exts.push(fmt);
+      }
+      exts.sort(function(a, b) {
+        var rank = { flac: 0, mp3: 1 };
+        var ra = rank[a] !== undefined ? rank[a] : 2;
+        var rb = rank[b] !== undefined ? rank[b] : 2;
+        return ra === rb ? (a < b ? -1 : a > b ? 1 : 0) : ra - rb;
+      });
+      // Formati non più misti: le sigle nelle righe non servono più
+      if (exts.length < 2) {
+        list.querySelectorAll('.grz-trk-fmt').forEach(function(t) { t.remove(); });
+      }
+      if (fmtFact) {
+        var fmtLabel = exts.join(' + ').toUpperCase();
+        fmtFact.hidden = fmtLabel === '';
+        var lbl = fmtFact.querySelector('.album-hero-audiofmt__label');
+        var note = fmtFact.querySelector('.album-hero-audiofmt__note');
+        if (lbl) lbl.textContent = fmtLabel;
+        if (note) {
+          note.textContent = withAudio < total ? (withAudio + ' di ' + total) :
+            (fmtLabel === 'FLAC' ? 'lossless' : '');
+        }
       }
 
       // Esci dalla selezione solo se non resta più audio da gestire.
