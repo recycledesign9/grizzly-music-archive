@@ -340,13 +340,18 @@ class MediaImportService
             }
         }
 
-        $tracks         = [];
+        $trackCandidates = [];
         $tagArtist      = '';
         $tagAlbumArtist = '';
         $tagAlbum       = '';
         $tagGenre       = '';
         $tagLabel       = '';
         $tagYear        = null;
+        $tagReleaseMbid = '';
+        $tagReleaseGroup = '';
+        // MBID dell'album artist: raccogliamo tutti i valori distinti visti
+        // nelle tracce e lo consideriamo affidabile solo se e' unico.
+        $tagArtistMbids = [];
         $embeddedCover  = null;
 
         foreach ($files as $f) {
@@ -362,15 +367,18 @@ class MediaImportService
                 $trackNum = $this->trackNumberFromFilename(basename($f['abs']));
             }
 
-            $title = $meta['title'] !== '' ? $meta['title'] : $this->titleFromFilename(basename($f['abs']));
+            $filenameTitle = $this->titleFromFilename(basename($f['abs']));
+            $metaAlbum     = $this->cleanRepeatedParentheticalTitle($meta['album']);
+            $title         = $this->chooseScannedTrackTitle($meta['title'], $filenameTitle, $metaAlbum);
 
-            $tracks[] = [
-                'abs'      => $f['abs'],
-                'disc'     => $disc ? $disc : 1,
-                'num'      => $trackNum === null ? 0 : $trackNum,
-                'title'    => $title,
-                'duration' => $meta['duration'],
-                'ext'      => strtolower(pathinfo($f['abs'], PATHINFO_EXTENSION)),
+            $trackCandidates[] = [
+                'abs'            => $f['abs'],
+                'disc'           => $disc ? $disc : 1,
+                'num'            => $trackNum === null ? 0 : $trackNum,
+                'title'          => $title,
+                'filename_title' => $filenameTitle,
+                'duration'       => $meta['duration'],
+                'ext'            => strtolower(pathinfo($f['abs'], PATHINFO_EXTENSION)),
             ];
 
             if ($tagAlbumArtist === '' && $meta['albumartist'] !== '') {
@@ -379,8 +387,8 @@ class MediaImportService
             if ($tagArtist === '' && $meta['artist'] !== '') {
                 $tagArtist = $meta['artist'];
             }
-            if ($tagAlbum === '' && $meta['album'] !== '') {
-                $tagAlbum = $meta['album'];
+            if ($tagAlbum === '' && $metaAlbum !== '') {
+                $tagAlbum = $metaAlbum;
             }
             if ($tagGenre === '' && $meta['genre'] !== '') {
                 $tagGenre = $meta['genre'];
@@ -391,10 +399,28 @@ class MediaImportService
             if ($tagYear === null && $meta['year'] !== null) {
                 $tagYear = $meta['year'];
             }
+            if ($tagReleaseMbid === '' && !empty($meta['mbid'])) {
+                $tagReleaseMbid = strtolower(trim((string)$meta['mbid']));
+            }
+            if ($tagReleaseGroup === '' && !empty($meta['release_group'])) {
+                $tagReleaseGroup = strtolower(trim((string)$meta['release_group']));
+            }
+            if (!empty($meta['artist_mbid'])) {
+                $artistMbid = strtolower(trim((string)$meta['artist_mbid']));
+                if ($this->isUuid($artistMbid)) {
+                    $tagArtistMbids[$artistMbid] = true;
+                }
+            }
             if ($embeddedCover === null && $meta['picture'] !== null) {
                 $embeddedCover = $meta['picture'];
             }
         }
+
+        // Un MP3 e un FLAC con lo stesso identico nome-base nella stessa
+        // directory rappresentano due encoding della stessa traccia. Lo scanner
+        // ne mantiene uno solo e preferisce FLAC, senza cancellare alcun file
+        // sorgente e senza dedupliche globali per hash.
+        $tracks = $this->deduplicateTrackCandidates($trackCandidates);
 
         usort($tracks, function ($a, $b) {
             if ($a['disc'] !== $b['disc']) {
@@ -409,6 +435,13 @@ class MediaImportService
         // --- 2) Campi album con fallback e motivi di revisione ---
         $folder  = $this->parseFolderName(basename($albumKey));
         $reasons = [];
+
+        $tagArtistMbid = count($tagArtistMbids) === 1
+            ? (string)array_key_first($tagArtistMbids)
+            : '';
+        if (count($tagArtistMbids) > 1) {
+            $reasons[] = 'MBID artista incoerente nei tag';
+        }
 
         $artist = $tagAlbumArtist !== '' ? $tagAlbumArtist : $tagArtist;
         if ($artist === '') {
@@ -428,6 +461,7 @@ class MediaImportService
         if ($title === '') {
             $title = basename($albumKey);
         }
+        $title = $this->cleanRepeatedParentheticalTitle($title);
 
         $year = $tagYear !== null ? $tagYear : $folder['year'];
         if ($year === null) {
@@ -448,7 +482,9 @@ class MediaImportService
                 $artist = (string)$sourceLinkedAlbum['artist_name'];
             }
             if (!empty($sourceLinkedAlbum['title'])) {
-                $title = (string)$sourceLinkedAlbum['title'];
+                // Mantiene la correzione manuale, ma non propaga l'artefatto
+                // scanner esatto "Titolo (Titolo)" gia' persistito.
+                $title = $this->cleanRepeatedParentheticalTitle((string)$sourceLinkedAlbum['title']);
             }
             if ($year === null && !empty($sourceLinkedAlbum['year'])) {
                 $year = (int)$sourceLinkedAlbum['year'];
@@ -474,9 +510,14 @@ class MediaImportService
         $externalMeta     = [];
         $externalCoverLocal = null;
         $externalCoverUrl   = null;
-        $externalMbid       = null;
+        $externalMbid       = $this->isUuid($tagReleaseMbid) ? $tagReleaseMbid : null;
+        $externalMbidFromTags = $externalMbid !== null;
+        $externalReleaseGroup = $this->isUuid($tagReleaseGroup) ? $tagReleaseGroup : null;
+        $externalArtistMbid   = $this->isUuid($tagArtistMbid) ? $tagArtistMbid : null;
+        $externalMetadataAttempted = false;
 
         if ($tagGenre === '' || $tagLabel === '' || $coverSource['type'] === 'none') {
+            $externalMetadataAttempted = true;
             $externalMeta = $this->fetchExternalMetadata(
                 $artist,
                 $title,
@@ -498,8 +539,27 @@ class MediaImportService
                 }
             }
 
-            if (!empty($externalMeta['mbid'])) {
-                $externalMbid = trim((string)$externalMeta['mbid']);
+            // I tag embedded descrivono la release realmente presente nei file
+            // e hanno priorita' sul risultato generico della ricerca API.
+            // L'API completa soltanto un'identita' mancante: non deve sostituire
+            // un MBID/release-group esplicito scritto nei file.
+            if ($externalMbid === null && !empty($externalMeta['mbid'])) {
+                $apiMbid = strtolower(trim((string)$externalMeta['mbid']));
+                if ($this->isUuid($apiMbid)) {
+                    $externalMbid = $apiMbid;
+                }
+            }
+            if ($externalReleaseGroup === null && !empty($externalMeta['release_group'])) {
+                $rg = strtolower(trim((string)$externalMeta['release_group']));
+                if ($this->isUuid($rg)) {
+                    $externalReleaseGroup = $rg;
+                }
+            }
+            if ($externalArtistMbid === null && !empty($externalMeta['artist_mbid'])) {
+                $apiArtistMbid = strtolower(trim((string)$externalMeta['artist_mbid']));
+                if ($this->isUuid($apiArtistMbid)) {
+                    $externalArtistMbid = $apiArtistMbid;
+                }
             }
 
             if ($coverSource['type'] === 'none') {
@@ -508,6 +568,38 @@ class MediaImportService
                 } elseif (!empty($externalMeta['cover'])) {
                     $externalCoverUrl = trim((string)$externalMeta['cover']);
                 }
+            }
+        }
+
+        // Ricerca MusicBrainz leggera SOLO per l'identita'. Viene usata se
+        // manca il release-group oppure se manca l'MBID artista e il nome non
+        // corrisponde gia' a un artista locale. Quest'ultimo caso e' quello che
+        // impedisce alias come "Beatles" / "The Beatles" di creare due artisti.
+        // Se il normale fallback metadata e' gia' stato eseguito, non ripetiamo
+        // la stessa chiamata: search() restituisce gia' artist_mbid.
+        $artistModel = new Artist();
+        $artistFoundByName = ($sourceLinkedAlbum === null)
+            ? $artistModel->findByName($artist)
+            : null;
+        $needArtistIdentity = $externalArtistMbid === null && $artistFoundByName === null;
+        $needAlbumIdentity  = $externalReleaseGroup === null;
+
+        if (($needAlbumIdentity || $needArtistIdentity)
+            && $sourceLinkedAlbum === null
+            && !$externalMetadataAttempted) {
+            $identity = $this->fetchExternalIdentity($artist, $title, $year);
+            if ($externalMbid === null && !empty($identity['mbid']) && $this->isUuid((string)$identity['mbid'])) {
+                $externalMbid = strtolower(trim((string)$identity['mbid']));
+            }
+            if ($externalReleaseGroup === null
+                && !empty($identity['release_group'])
+                && $this->isUuid((string)$identity['release_group'])) {
+                $externalReleaseGroup = strtolower(trim((string)$identity['release_group']));
+            }
+            if ($externalArtistMbid === null
+                && !empty($identity['artist_mbid'])
+                && $this->isUuid((string)$identity['artist_mbid'])) {
+                $externalArtistMbid = strtolower(trim((string)$identity['artist_mbid']));
             }
         }
 
@@ -539,7 +631,8 @@ class MediaImportService
             'errors'         => [],
         ];
 
-        $artistModel = new Artist();
+        // $artistModel e' gia' stato istanziato sopra per decidere se serve
+        // il lookup identita' MusicBrainz senza introdurre chiamate inutili.
         $albumModel  = new Album();
         $trackModel  = new Track();
 
@@ -550,17 +643,54 @@ class MediaImportService
                 $existing = $albumModel->getById((int)$sourceLinkedAlbum['id']);
             }
             if (!$existing) {
-                $artistId = $artistModel->findByName($artist);
-                $existing = $artistId ? $albumModel->findDuplicate($artistId, $title) : null;
+                $artistId = $artistModel->findByIdentity(
+                    $artist,
+                    $externalArtistMbid !== null ? $externalArtistMbid : ''
+                );
+                $existing = $artistId
+                    ? $this->findScannerAlbumCandidate($artistId, $artist, $title, $year, $externalMbid, $externalReleaseGroup, $externalMbidFromTags, $tracks)
+                    : null;
             }
             $entry['status'] = $existing ? 'exists' : 'planned';
 
-            foreach ($tracks as $t) {
+            // Il dry-run deve simulare anche la precedenza degli audio managed.
+            // In precedenza controllava solo source_path+mtime+size e quindi un
+            // album gia' presente con upload managed veniva mostrato come
+            // "audio: +N /0 skip", anche se l'import reale li avrebbe saltati.
+            // Questo rendeva il report diagnostico fuorviante.
+            $dryTrackMap = [];
+            $dryAlbumId = 0;
+            if ($existing && !empty($existing['id'])) {
+                $dryAlbumId = (int)$existing['id'];
+                $dryExistingTracks = $this->uniqueTrackRows($trackModel->getByAlbum($dryAlbumId));
+                $dryTrackMap = $this->matchExistingTracks($tracks, $dryExistingTracks);
+            }
+
+            foreach ($tracks as $idx => $t) {
                 if ($this->audioState($importDir, $t['abs']) === 'present') {
                     $entry['audio_skipped']++;
-                } else {
-                    $entry['audio_imported']++; // verrebbe importato
+                    continue;
                 }
+
+                if ($dryAlbumId > 0 && isset($dryTrackMap[$idx])) {
+                    $preview = $this->previewExistingTrackAudioAction(
+                        $importDir,
+                        $dryAlbumId,
+                        (int)$dryTrackMap[$idx],
+                        $t['abs']
+                    );
+
+                    if ($preview === 'skipped') {
+                        $entry['audio_skipped']++;
+                        continue;
+                    }
+                    if ($preview === 'deferred') {
+                        $entry['audio_deferred']++;
+                        continue;
+                    }
+                }
+
+                $entry['audio_imported']++; // verrebbe importato/indicizzato
             }
             return $entry;
         }
@@ -580,8 +710,20 @@ class MediaImportService
         }
 
         if (!$existing) {
-            $artistId = $artistModel->findOrCreate($artist);
-            $existing = $albumModel->findDuplicate($artistId, $title);
+            $artistId = $artistModel->findOrCreate(
+                $artist,
+                $externalArtistMbid !== null ? $externalArtistMbid : ''
+            );
+            $existing = $this->findScannerAlbumCandidate(
+                $artistId,
+                $artist,
+                $title,
+                $year,
+                $externalMbid,
+                $externalReleaseGroup,
+                $externalMbidFromTags,
+                $tracks
+            );
         }
 
         if ($existing) {
@@ -599,8 +741,40 @@ class MediaImportService
             if ($formatExplicit) {
                 $albumModel->syncScannerFormat($albumId, $formatId);
             }
-            $this->maybeFillAlbumMetadataIfMissing($albumId, $tagGenre, $tagLabel, $year, $externalMbid);
+
+            $sameMbIdentity = false;
+            if ($externalReleaseGroup !== null && !empty($existing['mb_release_group'])) {
+                $sameMbIdentity = hash_equals(
+                    strtolower((string)$existing['mb_release_group']),
+                    strtolower($externalReleaseGroup)
+                );
+            } elseif ($externalMbid !== null && !empty($existing['mbid'])) {
+                $sameMbIdentity = hash_equals(
+                    strtolower((string)$existing['mbid']),
+                    strtolower($externalMbid)
+                );
+            }
+
+            if ($sameMbIdentity
+                && $year !== null && !empty($existing['year']) && (int)$existing['year'] !== (int)$year) {
+                $yearNote = 'release-group coincidente ma anno differente (archivio '
+                    . (int)$existing['year'] . ', scanner ' . (int)$year . ')';
+                $entry['review_note'] = $this->appendReviewText($entry['review_note'], $yearNote);
+                $this->setReview($albumId, $yearNote);
+            }
+
+            $this->maybeFillAlbumMetadataIfMissing($albumId, $tagGenre, $tagLabel, $year, $externalMbid, $externalReleaseGroup);
             $this->maybeSetCoverIfMissing($albumId, $coverSource, $externalCoverLocal, $externalCoverUrl);
+
+            // Ripara solo artefatti inequivocabili prodotti dallo scanner:
+            // album "X (X)" e titoli traccia contenenti due volte il titolo album.
+            // Le tracce vengono ricostruite dal loro audio external gia' collegato
+            // tramite track_id, senza fuzzy matching.
+            $fixedAlbumTitle = $this->repairScannerAlbumTitle($albumId);
+            if ($fixedAlbumTitle !== null) {
+                $entry['title'] = $fixedAlbumTitle;
+            }
+            $this->repairScannerTrackTitlesFromExternal($albumId);
 
             $existingTracks = $this->uniqueTrackRows($trackModel->getByAlbum($albumId));
 
@@ -710,6 +884,13 @@ class MediaImportService
                 $this->setReview($albumId, $entry['review_note']);
             }
 
+            // Cleanup negativo soltanto a riconciliazione conclusa. Se ci sono
+            // tracce non abbinate o sorgenti DEFER, non si elimina nulla:
+            // preserva il lifecycle V2.2 e il caso RECONCILE_TEST/EndSerenading.
+            if ($unmatched === 0 && $entry['audio_deferred'] === 0) {
+                $this->pruneMissingExternalAudio($albumId, $parts, $tracks);
+            }
+
             return $entry;
         }
 
@@ -730,6 +911,7 @@ class MediaImportService
             'cover_url'   => $coverUrl,
             'cover_local' => $coverLocal,
             'mbid'        => $externalMbid,
+            'mb_release_group' => $externalReleaseGroup,
         ]);
 
         // Tabella ponte dei formati + marcatura revisione.
@@ -954,10 +1136,11 @@ class MediaImportService
         string $genreName,
         string $labelName,
         ?int $year,
-        ?string $mbid
+        ?string $mbid,
+        ?string $releaseGroup
     ): void {
         $stmt = $this->db->prepare(
-            "SELECT genre_id, label_id, year, mbid FROM albums WHERE id = :id LIMIT 1"
+            "SELECT genre_id, label_id, year, mbid, mb_release_group FROM albums WHERE id = :id LIMIT 1"
         );
         $stmt->execute([':id' => $albumId]);
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -992,6 +1175,11 @@ class MediaImportService
         if (empty($row['mbid']) && $mbid !== null && trim($mbid) !== '') {
             $sets[] = 'mbid = :mbid';
             $params[':mbid'] = trim($mbid);
+        }
+
+        if (empty($row['mb_release_group']) && $releaseGroup !== null && $this->isUuid($releaseGroup)) {
+            $sets[] = 'mb_release_group = :mb_release_group';
+            $params[':mb_release_group'] = strtolower(trim($releaseGroup));
         }
 
         if (!empty($sets)) {
@@ -1035,6 +1223,7 @@ class MediaImportService
         $map = [];
         $byPosition = [];
         $byTitle = [];
+        $usedTrackIds = [];
 
         foreach ($existingTracks as $row) {
             $id = isset($row['id']) ? (int)$row['id'] : 0;
@@ -1056,41 +1245,109 @@ class MediaImportService
             }
         }
 
-        $sameTrackCount = count($scannedTracks) === count($existingTracks);
-        $singleDisc = true;
-        foreach ($scannedTracks as $track) {
-            if (isset($track['disc']) && (int)$track['disc'] > 1) {
-                $singleDisc = false;
-                break;
-            }
-        }
-
         foreach ($scannedTracks as $idx => $track) {
             $position = $idx + 1;
-            $scanTitle = $this->normTrackTitle(isset($track['title']) ? (string)$track['title'] : '');
             $scanTrackNum = isset($track['num']) ? (int)$track['num'] : 0;
+            $scanTitle = isset($track['title']) ? (string)$track['title'] : '';
+            $fileTitle = isset($track['filename_title']) ? (string)$track['filename_title'] : '';
 
+            // 1) Posizione/numero coerenti + titolo sufficientemente simile.
+            // Stessa soglia minima usata dal caricamento in blocco della UI:
+            // sotto 0.30 un numero uguale NON basta a collegare due tracce.
             if (isset($byPosition[$position])) {
                 $candidate = $byPosition[$position];
-                $candidateTitle = $this->normTrackTitle(isset($candidate['title']) ? (string)$candidate['title'] : '');
-                if ($scanTitle !== '' && $candidateTitle !== '' && $scanTitle === $candidateTitle) {
-                    $map[$idx] = (int)$candidate['id'];
-                    continue;
-                }
+                $candidateId = (int)$candidate['id'];
 
-                // Fallback conservativo: per album a disco singolo, con lo stesso
-                // numero di tracce e numerazione esplicita 01..N, la posizione e'
-                // sufficiente anche se il filename/tag contiene un suffisso extra
-                // (es. "Cold or Hot [Disky Smashin]"). Questo evita track_id NULL
-                // senza affidarsi a un fuzzy match sui titoli.
-                if ($sameTrackCount && $singleDisc && $scanTrackNum > 0 && $scanTrackNum === $position) {
-                    $map[$idx] = (int)$candidate['id'];
-                    continue;
+                if (!isset($usedTrackIds[$candidateId])
+                    && ($scanTrackNum <= 0 || $scanTrackNum === $position)) {
+                    $candidateTitle = isset($candidate['title']) ? (string)$candidate['title'] : '';
+                    $scoreTag  = $this->trackTitleSimilarity($scanTitle, $candidateTitle);
+                    $scoreFile = $this->trackTitleSimilarity($fileTitle, $candidateTitle);
+                    $score     = max($scoreTag, $scoreFile);
+
+                    $overlap = max(
+                        $this->trackTitleTokenOverlap($scanTitle, $candidateTitle),
+                        $this->trackTitleTokenOverlap($fileTitle, $candidateTitle)
+                    );
+
+                    // Filename puramente numerico / titolo non disponibile:
+                    // conserva il comportamento storico solo quando non esiste
+                    // alcun testo significativo da confrontare.
+                    // "Track 01" o un numero non sono titoli significativi.
+                    $hasMeaningfulTitle = !$this->isGenericTrackTitle($scanTitle)
+                        || !$this->isGenericTrackTitle($fileTitle);
+
+                    // Il solo Levenshtein >=0.30 puo' produrre falsi positivi
+                    // ("Glorious Day" vs "Holiday"). Richiediamo anche almeno
+                    // meta' dei token del titolo piu corto in comune.
+                    $safeTitleMatch = $score >= 0.30 && $overlap >= 0.50;
+
+                    if ((!$hasMeaningfulTitle && $scanTrackNum === $position) || $safeTitleMatch) {
+                        $map[$idx] = $candidateId;
+                        $usedTrackIds[$candidateId] = true;
+                        continue;
+                    }
                 }
             }
 
-            if ($scanTitle !== '' && isset($byTitle[$scanTitle]) && count($byTitle[$scanTitle]) === 1) {
-                $map[$idx] = (int)$byTitle[$scanTitle][0];
+            // 2) Titolo normalizzato esatto e univoco.
+            $exactKeys = [];
+            foreach ([$scanTitle, $fileTitle] as $rawTitle) {
+                $key = $this->normTrackTitle($rawTitle);
+                if ($key !== '') {
+                    $exactKeys[$key] = true;
+                }
+            }
+
+            $matchedExact = false;
+            foreach (array_keys($exactKeys) as $key) {
+                if (!isset($byTitle[$key]) || count($byTitle[$key]) !== 1) {
+                    continue;
+                }
+                $candidateId = (int)$byTitle[$key][0];
+                if (isset($usedTrackIds[$candidateId])) {
+                    continue;
+                }
+
+                $map[$idx] = $candidateId;
+                $usedTrackIds[$candidateId] = true;
+                $matchedExact = true;
+                break;
+            }
+            if ($matchedExact) {
+                continue;
+            }
+
+            // 3) Fallback fuzzy solo su un match chiaramente forte e univoco.
+            // 0.70 e' la soglia "ok" gia' usata dal modale di upload massivo.
+            $bestId = null;
+            $bestScore = 0.0;
+            $secondScore = 0.0;
+
+            foreach ($existingTracks as $candidate) {
+                $candidateId = isset($candidate['id']) ? (int)$candidate['id'] : 0;
+                if ($candidateId <= 0 || isset($usedTrackIds[$candidateId])) {
+                    continue;
+                }
+
+                $candidateTitle = isset($candidate['title']) ? (string)$candidate['title'] : '';
+                $score = max(
+                    $this->trackTitleSimilarity($scanTitle, $candidateTitle),
+                    $this->trackTitleSimilarity($fileTitle, $candidateTitle)
+                );
+
+                if ($score > $bestScore) {
+                    $secondScore = $bestScore;
+                    $bestScore = $score;
+                    $bestId = $candidateId;
+                } elseif ($score > $secondScore) {
+                    $secondScore = $score;
+                }
+            }
+
+            if ($bestId !== null && $bestScore >= 0.70 && ($bestScore - $secondScore) >= 0.05) {
+                $map[$idx] = $bestId;
+                $usedTrackIds[$bestId] = true;
             }
         }
 
@@ -1214,6 +1471,582 @@ class MediaImportService
         return trim((string)$title);
     }
 
+    private function trackTitleSimilarity(string $a, string $b): float
+    {
+        $na = $this->normTrackTitleForSimilarity($a);
+        $nb = $this->normTrackTitleForSimilarity($b);
+
+        if ($na === '' || $nb === '') {
+            return 0.0;
+        }
+        if ($na === $nb) {
+            return 1.0;
+        }
+
+        $dist = levenshtein($na, $nb);
+        $maxLen = max(strlen($na), strlen($nb));
+        if ($maxLen <= 0) {
+            return 1.0;
+        }
+
+        $score = 1.0 - ($dist / $maxLen);
+
+        // Suffissi descrittivi (remix, edition, label note...) non devono
+        // annullare un titolo che contiene integralmente l'altro.
+        $shorter = strlen($na) <= strlen($nb) ? $na : $nb;
+        $longer  = strlen($na) > strlen($nb) ? $na : $nb;
+        if ($shorter !== '' && strpos($longer, $shorter) !== false) {
+            $score = max($score, strlen($shorter) / max(1, strlen($longer)));
+        }
+
+        return max(0.0, min(1.0, $score));
+    }
+
+    private function trackTitleTokenOverlap(string $a, string $b): float
+    {
+        $na = $this->normTrackTitleForSimilarity($a);
+        $nb = $this->normTrackTitleForSimilarity($b);
+
+        if ($na === '' || $nb === '') {
+            return 0.0;
+        }
+
+        $ta = array_values(array_unique(array_filter(explode(' ', $na), 'strlen')));
+        $tb = array_values(array_unique(array_filter(explode(' ', $nb), 'strlen')));
+
+        if (empty($ta) || empty($tb)) {
+            return 0.0;
+        }
+
+        $common = array_intersect($ta, $tb);
+        return count($common) / min(count($ta), count($tb));
+    }
+
+    private function normTrackTitleForSimilarity(string $title): string
+    {
+        $title = trim($title);
+        if ($title === '') {
+            return '';
+        }
+
+        if (function_exists('iconv')) {
+            $ascii = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $title);
+            if ($ascii !== false) {
+                $title = $ascii;
+            }
+        }
+
+        $title = strtolower($title);
+        $title = preg_replace('/\.(mp3|flac|wav|aac|ogg)$/i', '', $title);
+        $title = preg_replace('/[^a-z0-9]+/', ' ', (string)$title);
+        $title = preg_replace('/\s+/', ' ', (string)$title);
+        return trim((string)$title);
+    }
+
+    /**
+     * MP3 e FLAC con identico nome-base nella stessa directory sono due encoding
+     * della stessa traccia. Lo scanner preferisce FLAC ma non cancella file.
+     */
+    private function deduplicateTrackCandidates(array $candidates): array
+    {
+        $out = [];
+        $indexByKey = [];
+
+        foreach ($candidates as $candidate) {
+            $abs = isset($candidate['abs']) ? (string)$candidate['abs'] : '';
+            if ($abs === '') {
+                continue;
+            }
+
+            $dir  = str_replace('\\', '/', dirname($abs));
+            $stem = pathinfo(basename($abs), PATHINFO_FILENAME);
+            $stemKey = function_exists('mb_strtolower')
+                ? mb_strtolower($stem, 'UTF-8')
+                : strtolower($stem);
+
+            $key = $dir . "\0" . $stemKey;
+
+            if (!isset($indexByKey[$key])) {
+                $indexByKey[$key] = count($out);
+                $out[] = $candidate;
+                continue;
+            }
+
+            $idx = $indexByKey[$key];
+            $current = $out[$idx];
+
+            if ($this->audioFormatPriority((string)($candidate['ext'] ?? ''))
+                > $this->audioFormatPriority((string)($current['ext'] ?? ''))) {
+                $out[$idx] = $candidate;
+            }
+        }
+
+        return array_values($out);
+    }
+
+    private function audioFormatPriority(string $ext): int
+    {
+        $ext = strtolower(trim($ext));
+        if ($ext === 'flac') {
+            return 20;
+        }
+        if ($ext === 'mp3') {
+            return 10;
+        }
+        return 0;
+    }
+
+    /**
+     * Mantiene i tag come fonte primaria, ma se il TITLE incorpora ripetutamente
+     * il titolo album (artefatto osservato su alcuni file) usa il filename pulito.
+     */
+
+    private function chooseScannedTrackTitle(string $tagTitle, string $filenameTitle, string $albumTitle): string
+
+    {
+
+        $tagTitle      = trim($tagTitle);
+
+        $filenameTitle = trim($filenameTitle);
+
+        $albumTitle    = trim($albumTitle);
+
+
+        if ($tagTitle === '') {
+
+            return $filenameTitle;
+
+        }
+
+        if ($filenameTitle === '') {
+
+            return $tagTitle;
+
+        }
+
+
+        $tagNorm  = $this->normTrackTitle($tagTitle);
+
+        $fileNorm = $this->normTrackTitle($filenameTitle);
+
+        if ($tagNorm !== '' && $tagNorm === $fileNorm) {
+
+            return $tagTitle;
+
+        }
+
+
+        $albumNorm = $this->normTrackTitle($this->cleanRepeatedParentheticalTitle($albumTitle));
+
+        $baseNorm  = $this->baseFilenameTitleForComparison($filenameTitle);
+
+
+        // Caso osservato: "Track (Album) (Album)" oppure "Track (Album)".
+
+        // Richiediamo anche che il titolo del filename inizi con la stessa parte
+
+        // significativa della traccia, cosi' un tag scorretto non fa scegliere un
+
+        // filename non correlato.
+
+        if ($albumNorm !== '' && $baseNorm !== ''
+
+            && strpos($tagNorm, $baseNorm) === 0
+
+            && strpos($tagNorm, $albumNorm) !== false) {
+
+            return $filenameTitle;
+
+        }
+
+
+        return $tagTitle;
+
+    }
+
+    /**
+     * Parte significativa del titolo filename, senza eventuali qualificatori
+     * finali tra parentesi/quadro. Usata solo per confronti conservativi.
+     */
+    private function baseFilenameTitleForComparison(string $title): string
+    {
+        $base = trim($title);
+        if ($base === '') {
+            return '';
+        }
+
+        $base = preg_replace('/(?:\s*[\(\[][\s\S]*?[\)\]])+\s*$/u', '', $base);
+        $base = trim((string)$base);
+        if ($base === '') {
+            $base = trim($title);
+        }
+
+        return $this->normTrackTitle($base);
+    }
+
+
+    /**
+     * Corregge esclusivamente il pattern "Titolo (Titolo)".
+     */
+
+    private function cleanRepeatedParentheticalTitle(string $title): string
+
+    {
+
+        $title = trim($title);
+
+        if ($title === '' || substr($title, -1) !== ')') {
+
+            return $title;
+
+        }
+
+
+        $pos = strrpos($title, ' (');
+
+        if ($pos === false) {
+
+            return $title;
+
+        }
+
+
+        $prefix = trim(substr($title, 0, $pos));
+
+        $inside = trim(substr($title, $pos + 2, -1));
+
+        if ($prefix !== '' && $this->normTrackTitle($prefix) === $this->normTrackTitle($inside)) {
+
+            return $prefix;
+
+        }
+
+
+        return $title;
+
+    }
+
+    /**
+     * Lookup specifico dello scanner. source_path viene risolto prima di
+     * entrare qui; poi MBID release esatto, release-group come supporto e
+     * titolo/anno/tracklist come conferma conservativa.
+     */
+    /** Titolo album senza la parte finale tra parentesi, ridotto a lettere e cifre. */
+    private function scannerAlbumBaseKey(string $title): string
+    {
+        $t = trim($title);
+        $t = preg_replace('/\s*[\(\[][^\)\]]*[\)\]]\s*$/u', '', $t) ?? $t;
+        $t = function_exists('mb_strtolower') ? mb_strtolower($t, 'UTF-8') : strtolower($t);
+        return (string)preg_replace('/[^\pL\pN]+/u', '', $t);
+    }
+
+    /** Titoli che non identificano il brano: "Track 01", "Traccia 3", "05". */
+    private function isGenericTrackTitle(string $title): bool
+    {
+        $t = $this->normTrackTitle($title);
+        return $t === ''
+            || (bool)preg_match('/^(track|traccia|pista|piste|titel)?\s*\d+$/u', $t);
+    }
+
+    /**
+     * Verifica conservativa usata per l'identita' album quando il release MBID
+     * non coincide. In questo fallback la tracklist e' una condizione obbligatoria:
+     * stesso numero di tracce, stessi titoli normalizzati, stesso ordine.
+     *
+     * Le durate non fanno parte dell'identita': release/API diverse possono
+     * riportare arrotondamenti o valori differenti per la stessa sequenza.
+     */
+    private function scannerTracklistsExactlyEquivalent(array $scannedTracks, array $existingTracks): bool
+    {
+        $scannedTracks = array_values($scannedTracks);
+        $existingTracks = array_values($existingTracks);
+
+        $count = count($scannedTracks);
+        if ($count === 0 || $count !== count($existingTracks)) {
+            return false;
+        }
+
+        for ($i = 0; $i < $count; $i++) {
+            $scannedTitle = $this->normTrackTitle((string)($scannedTracks[$i]['title'] ?? ''));
+            $existingTitle = $this->normTrackTitle((string)($existingTracks[$i]['title'] ?? ''));
+
+            if ($scannedTitle === '' || $existingTitle === '' || $scannedTitle !== $existingTitle) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function findScannerAlbumCandidate(
+        int $artistId,
+        string $artistName,
+        string $title,
+        ?int $year,
+        ?string $mbid,
+        ?string $releaseGroup,
+        bool $mbidFromTags,
+        array $scannedTracks
+    ): ?array {
+        if ($artistId <= 0 || trim($title) === '') {
+            return null;
+        }
+
+        $mbid = strtolower(trim((string)$mbid));
+        if (!$this->isUuid($mbid)) {
+            $mbid = '';
+        }
+
+        $releaseGroup = strtolower(trim((string)$releaseGroup));
+        if (!$this->isUuid($releaseGroup)) {
+            $releaseGroup = '';
+        }
+
+        $candidates = [];
+        $seenIds = [];
+
+        // Release-group: amplia il set di candidate ma NON decide da solo.
+        // Dati reali verificati: release diverse possono condividere lo stesso
+        // gruppo (Marlene Kuntz, OK Computer/OKNOTOK).
+        if ($releaseGroup !== '') {
+            $rgStmt = $this->db->prepare("
+                SELECT id, artist_id, title, year, mbid, mb_release_group
+                FROM albums
+                WHERE artist_id = :artist_id
+                  AND mb_release_group = :release_group
+                ORDER BY id ASC
+            ");
+            $rgStmt->execute([
+                ':artist_id'     => $artistId,
+                ':release_group' => $releaseGroup,
+            ]);
+            foreach ($rgStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $id = (int)($row['id'] ?? 0);
+                if ($id > 0 && !isset($seenIds[$id])) {
+                    $seenIds[$id] = true;
+                    $candidates[] = $row;
+                }
+            }
+        }
+
+        $titleBaseKey = $this->scannerAlbumBaseKey($title);
+        $stmt = $this->db->prepare("
+            SELECT id, artist_id, title, year, mbid, mb_release_group
+            FROM albums
+            WHERE artist_id = :artist_id
+            ORDER BY id ASC
+        ");
+        $stmt->execute([':artist_id' => $artistId]);
+
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $id = (int)($row['id'] ?? 0);
+            if ($id <= 0 || isset($seenIds[$id])) {
+                continue;
+            }
+            if ($titleBaseKey === ''
+                || $this->scannerAlbumBaseKey((string)($row['title'] ?? '')) !== $titleBaseKey) {
+                continue;
+            }
+            $seenIds[$id] = true;
+            $candidates[] = $row;
+        }
+
+        if ($mbid !== '') {
+            $m = $this->db->prepare("
+                SELECT id, artist_id, title, year, mbid, mb_release_group
+                FROM albums
+                WHERE artist_id = :artist_id
+                  AND mbid = :mbid
+                ORDER BY id ASC
+                LIMIT 2
+            ");
+            $m->execute([
+                ':artist_id' => $artistId,
+                ':mbid'      => $mbid,
+            ]);
+            foreach ($m->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $id = (int)($row['id'] ?? 0);
+                if ($id > 0 && !isset($seenIds[$id])) {
+                    $seenIds[$id] = true;
+                    $candidates[] = $row;
+                }
+            }
+        }
+
+        if (empty($candidates)) {
+            return null;
+        }
+
+        $ranked = [];
+
+        foreach ($candidates as $row) {
+            $candidateId = (int)$row['id'];
+            $candidateYear = !empty($row['year']) ? (int)$row['year'] : null;
+
+            $candidateMbid = strtolower(trim((string)($row['mbid'] ?? '')));
+            if (!$this->isUuid($candidateMbid)) {
+                $candidateMbid = '';
+            }
+            $candidateGroup = strtolower(trim((string)($row['mb_release_group'] ?? '')));
+            if (!$this->isUuid($candidateGroup)) {
+                $candidateGroup = '';
+            }
+
+            $exactRelease = $mbid !== ''
+                && $candidateMbid !== ''
+                && hash_equals($mbid, $candidateMbid);
+            $sameGroupCandidate = $releaseGroup !== ''
+                && $candidateGroup !== ''
+                && hash_equals($releaseGroup, $candidateGroup);
+
+            if (!$exactRelease
+                && $releaseGroup !== ''
+                && $candidateGroup !== ''
+                && !$sameGroupCandidate) {
+                continue;
+            }
+
+            $sameTitleBase = $titleBaseKey !== ''
+                && $this->scannerAlbumBaseKey((string)($row['title'] ?? '')) === $titleBaseKey;
+
+            $trackStmt = $this->db->prepare("
+                SELECT id, position, title
+                FROM tracks
+                WHERE album_id = :album_id
+                ORDER BY position ASC, id ASC
+            ");
+            $trackStmt->execute([':album_id' => $candidateId]);
+            $existingTracks = $trackStmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $trackRatio = null;
+            $trackCountRatio = null;
+            $fullTrackMatch = false;
+            $strictTrackMatch = $this->scannerTracklistsExactlyEquivalent($scannedTracks, $existingTracks);
+            if (!empty($existingTracks) && !empty($scannedTracks)) {
+                $map = $this->matchExistingTracks($scannedTracks, $existingTracks);
+                $existingCount = count($existingTracks);
+                $scannedCount = count($scannedTracks);
+                $minCount = min($existingCount, $scannedCount);
+                $maxCount = max($existingCount, $scannedCount);
+                if ($minCount > 0) {
+                    $matched = count($map);
+                    $required = $minCount <= 2 ? $minCount : (int)ceil($minCount * 0.60);
+                    $trackRatio = $matched / $minCount;
+                    $trackCountRatio = $maxCount > 0 ? ($minCount / $maxCount) : null;
+                    $fullTrackMatch = $existingCount === $scannedCount
+                        && $matched === $existingCount;
+                    if (!$exactRelease && $matched < $required) {
+                        continue;
+                    }
+                }
+            }
+
+            $yearDiff = ($year !== null && $candidateYear !== null)
+                ? abs($year - $candidateYear)
+                : null;
+            $differentKnownRelease = $mbid !== ''
+                && $candidateMbid !== ''
+                && !$exactRelease;
+
+            if (!$exactRelease) {
+                // Qualunque fallback diverso dal release MBID esatto deve essere
+                // confermato dai dati locali reali. Il fatto che il MBID provenga
+                // dai tag o dal lookup API non puo' scavalcare anno/tracklist.
+                //
+                // Regola conservativa:
+                //   - anno identico;
+                //   - tracklist identica per numero/titoli/ordine;
+                //   - inoltre deve coincidere il titolo-base OPPURE il release-group.
+                //
+                // Questo copre alias reali dello stesso album (es. "The Beatles"
+                // / "The White Album") senza rendere il release-group, da solo,
+                // una prova sufficiente di identita'.
+                $structuralIdentity = $strictTrackMatch
+                    && $yearDiff !== null
+                    && $yearDiff === 0
+                    && ($sameTitleBase || $sameGroupCandidate);
+
+                if (!$structuralIdentity) {
+                    continue;
+                }
+
+                // Se entrambi i release-group sono noti e diversi, non unire.
+                if ($releaseGroup !== '' && $candidateGroup !== '' && !$sameGroupCandidate) {
+                    continue;
+                }
+            }
+
+            $score = 1.0;
+            if ($exactRelease) {
+                $score += 1000.0;
+            } elseif ($sameGroupCandidate) {
+                $score += 50.0;
+            }
+            if ($strictTrackMatch) {
+                $score += 100.0;
+            } elseif ($fullTrackMatch) {
+                $score += 80.0;
+            } elseif ($trackRatio !== null) {
+                $score += 40.0 * $trackRatio;
+                if ($trackCountRatio !== null) {
+                    $score += 10.0 * $trackCountRatio;
+                }
+            }
+            if ($yearDiff === 0) {
+                $score += 20.0;
+            } elseif ($yearDiff === 1) {
+                $score += 10.0;
+            }
+            if ($sameTitleBase) {
+                $score += 5.0;
+            }
+            if ($this->normTrackTitle((string)($row['title'] ?? ''))
+                === $this->normTrackTitle($title)) {
+                $score += 1.0;
+            }
+
+            $ranked[] = [
+                'row'                     => $row,
+                'score'                   => $score,
+                'full_track_match'        => $fullTrackMatch,
+                'strict_track_match'      => $strictTrackMatch,
+                'exact_release'           => $exactRelease,
+                'different_known_release' => $differentKnownRelease,
+            ];
+        }
+
+        if (empty($ranked)) {
+            return null;
+        }
+
+        usort($ranked, function ($a, $b) {
+            if (abs((float)$a['score'] - (float)$b['score']) < 0.0001) {
+                return (int)$a['row']['id'] <=> (int)$b['row']['id'];
+            }
+            return ($a['score'] < $b['score']) ? 1 : -1;
+        });
+
+        if (count($ranked) > 1
+            && abs((float)$ranked[0]['score'] - (float)$ranked[1]['score']) < 0.0001) {
+            if ($ranked[0]['exact_release'] && $ranked[1]['exact_release']) {
+                return $ranked[0]['row'];
+            }
+            if ($ranked[0]['different_known_release']
+                || $ranked[1]['different_known_release']) {
+                return null;
+            }
+            if (!empty($ranked[0]['strict_track_match']) && empty($ranked[1]['strict_track_match'])) {
+                return $ranked[0]['row'];
+            }
+            if ($ranked[0]['full_track_match'] && $ranked[1]['full_track_match']) {
+                return $ranked[0]['row'];
+            }
+            return null;
+        }
+
+        return $ranked[0]['row'];
+    }
+
     /**
      * Cerca un album gia' collegato ad almeno uno dei file scansionati tramite
      * source_path. Se i path puntano a piu' album diversi non prende decisioni.
@@ -1293,6 +2126,76 @@ class MediaImportService
         return $stmt->fetchColumn() !== false;
     }
 
+
+    /**
+     * Simula in sola lettura la decisione di reconcileExistingTrackAudio().
+     * Serve esclusivamente al dry-run per mantenere il report coerente con
+     * l'import reale senza modificare alcun record.
+     *
+     * @return string|null 'skipped' | 'deferred' | 'imported' | null
+     */
+    private function previewExistingTrackAudioAction(
+        string $importDir,
+        int $albumId,
+        int $trackId,
+        string $srcAbs
+    ): ?string {
+        // Se il source_path e' gia' noto, sara' importAudioFile() a decidere tra
+        // skip e aggiornamento. audioState() ha gia' gestito il caso invariato.
+        if ($this->audioSourcePathExists($importDir, $srcAbs)) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare("
+            SELECT album_id, source_path, storage_type
+            FROM audio_files
+            WHERE track_id = :track_id
+            ORDER BY id DESC
+        ");
+        $stmt->execute([':track_id' => $trackId]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        if (!$rows) {
+            return null;
+        }
+
+        $hasManaged = false;
+        $hasLiveExternal = false;
+        $hasDeadExternal = false;
+
+        foreach ($rows as $row) {
+            $storage = (string)($row['storage_type'] ?? 'managed');
+            if ($storage !== 'external') {
+                $hasManaged = true;
+                continue;
+            }
+
+            if ((int)($row['album_id'] ?? 0) !== $albumId) {
+                continue;
+            }
+
+            $oldDbPath = trim((string)($row['source_path'] ?? ''));
+            $runtime = $oldDbPath !== '' ? $this->sourcePathForRuntime($oldDbPath) : '';
+            if ($runtime !== '' && is_file($runtime) && is_readable($runtime)) {
+                $hasLiveExternal = true;
+            } else {
+                $hasDeadExternal = true;
+            }
+        }
+
+        // Stessa precedenza dell'import reale: managed vince sempre.
+        if ($hasManaged) {
+            return 'skipped';
+        }
+        if ($hasLiveExternal) {
+            return 'deferred';
+        }
+        if ($hasDeadExternal) {
+            return 'imported';
+        }
+
+        return null;
+    }
 
     /**
      * Gestisce un nuovo candidato audio per una traccia gia' esistente.
@@ -1548,6 +2451,340 @@ class MediaImportService
     }
 
 
+
+    /**
+     * Corregge "Titolo (Titolo)" solo per album marcati needs_review dallo scanner.
+     * Ritorna il titolo corretto quando ha modificato il DB, altrimenti null.
+     */
+    private function repairScannerAlbumTitle(int $albumId): ?string
+    {
+        if ($albumId <= 0) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare("
+            SELECT title, needs_review
+            FROM albums
+            WHERE id = :id
+            LIMIT 1
+        ");
+        $stmt->execute([':id' => $albumId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$row || (int)($row['needs_review'] ?? 0) !== 1) {
+            return null;
+        }
+
+        $current = trim((string)($row['title'] ?? ''));
+        $clean   = $this->cleanRepeatedParentheticalTitle($current);
+
+        if ($clean === '' || $clean === $current) {
+            return null;
+        }
+
+        $upd = $this->db->prepare("UPDATE albums SET title = :title WHERE id = :id AND needs_review = 1");
+        $upd->execute([
+            ':title' => $clean,
+            ':id'    => $albumId,
+        ]);
+
+        return $clean;
+    }
+
+    /**
+     * Ripara titoli track scanner contaminati dal titolo album usando il nome
+     * dell'audio external gia' collegato alla stessa track_id.
+     *
+     * Non interviene se:
+     * - l'album non e' needs_review;
+     * - la traccia ha almeno un audio managed;
+     * - gli external puntano a nomi-file logici differenti;
+     * - il titolo corrente non contiene almeno due volte il titolo album.
+     */
+
+    private function repairScannerTrackTitlesFromExternal(int $albumId): void
+
+    {
+
+        if ($albumId <= 0) {
+
+            return;
+
+        }
+
+
+        $albumStmt = $this->db->prepare("SELECT needs_review, title FROM albums WHERE id = :id LIMIT 1");
+
+        $albumStmt->execute([':id' => $albumId]);
+
+        $album = $albumStmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$album || (int)($album['needs_review'] ?? 0) !== 1) {
+
+            return;
+
+        }
+
+
+        $albumDbTitle = $this->cleanRepeatedParentheticalTitle((string)($album['title'] ?? ''));
+
+        $albumNorm = $this->normTrackTitle($albumDbTitle);
+
+        if ($albumNorm === '') {
+
+            return;
+
+        }
+
+
+        $stmt = $this->db->prepare("
+
+            SELECT t.id AS track_id, t.title, af.storage_type, af.original_name
+
+            FROM tracks t
+
+            LEFT JOIN audio_files af ON af.track_id = t.id
+
+            WHERE t.album_id = :album_id
+
+            ORDER BY t.position, af.id
+
+        ");
+
+        $stmt->execute([':album_id' => $albumId]);
+
+
+        $byTrack = [];
+
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+
+            $trackId = (int)($row['track_id'] ?? 0);
+
+            if ($trackId <= 0) {
+
+                continue;
+
+            }
+
+
+            if (!isset($byTrack[$trackId])) {
+
+                $byTrack[$trackId] = [
+
+                    'title'   => (string)($row['title'] ?? ''),
+
+                    'managed' => false,
+
+                    'titles'  => [],
+
+                ];
+
+            }
+
+
+            $storage = (string)($row['storage_type'] ?? '');
+
+            if ($storage !== '' && $storage !== 'external') {
+
+                $byTrack[$trackId]['managed'] = true;
+
+                continue;
+
+            }
+
+            if ($storage !== 'external') {
+
+                continue;
+
+            }
+
+
+            $name = trim((string)($row['original_name'] ?? ''));
+
+            if ($name === '') {
+
+                continue;
+
+            }
+
+
+            $candidate = $this->titleFromFilename($name);
+
+            $key = $this->normTrackTitle($candidate);
+
+            if ($key !== '') {
+
+                $byTrack[$trackId]['titles'][$key] = $candidate;
+
+            }
+
+        }
+
+
+        $upd = $this->db->prepare("UPDATE tracks SET title = :title WHERE id = :id AND album_id = :album_id");
+
+
+        foreach ($byTrack as $trackId => $info) {
+
+            if ($info['managed'] || count($info['titles']) !== 1) {
+
+                continue;
+
+            }
+
+
+            $current = trim((string)$info['title']);
+
+            $expected = (string)reset($info['titles']);
+
+            if ($current === '' || $expected === '') {
+
+                continue;
+
+            }
+
+
+            $currentNorm  = $this->normTrackTitle($current);
+
+            $expectedNorm = $this->normTrackTitle($expected);
+
+            if ($currentNorm === $expectedNorm) {
+
+                continue;
+
+            }
+
+
+            $baseNorm = $this->baseFilenameTitleForComparison($expected);
+
+            if ($baseNorm === '' || strpos($currentNorm, $baseNorm) !== 0) {
+
+                continue;
+
+            }
+
+
+            // Il caso Hooverphonic contiene due copie complete del titolo album.
+
+            // Una sola occorrenza potrebbe invece essere intenzionale: non toccarla.
+
+            if (substr_count($currentNorm, $albumNorm) < 2) {
+
+                continue;
+
+            }
+
+
+            $upd->execute([
+
+                ':title'    => $expected,
+
+                ':id'       => $trackId,
+
+                ':album_id' => $albumId,
+
+            ]);
+
+        }
+
+    }
+
+    /**
+     * Elimina soltanto record audio external realmente scomparsi dal filesystem,
+     * e soltanto quando tutte le directory dell'album sono ancora disponibili.
+     * Non cancella mai file fisici e non tocca storage_type=managed.
+     */
+    private function pruneMissingExternalAudio(int $albumId, array $parts, array $tracks): int
+    {
+        if ($albumId <= 0 || empty($parts)) {
+            return 0;
+        }
+
+        $albumDirs = [];
+        foreach ($parts as $part) {
+            $dir = isset($part['dir']) ? (string)$part['dir'] : '';
+            $dir = rtrim(str_replace('\\', '/', $dir), '/');
+
+            if ($dir === '' || !is_dir($dir) || !is_readable($dir)) {
+                return 0;
+            }
+
+            $albumDirs[] = $dir;
+        }
+
+        // Snapshot instabile: se un file appena scansionato e' gia' sparito,
+        // non fare cleanup in questa esecuzione.
+        foreach ($tracks as $track) {
+            $abs = isset($track['abs']) ? (string)$track['abs'] : '';
+            if ($abs === '' || !is_file($abs) || !is_readable($abs)) {
+                return 0;
+            }
+        }
+
+        $stmt = $this->db->prepare("
+            SELECT id, source_path
+            FROM audio_files
+            WHERE album_id = :album_id
+              AND storage_type = 'external'
+              AND source_path IS NOT NULL
+              AND source_path <> ''
+            ORDER BY id ASC
+        ");
+        $stmt->execute([':album_id' => $albumId]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $staleIds = [];
+
+        foreach ($rows as $row) {
+            $runtime = $this->sourcePathForRuntime((string)$row['source_path']);
+            $runtime = str_replace('\\', '/', $runtime);
+
+            if ($runtime !== '' && is_file($runtime)) {
+                continue;
+            }
+
+            $belongsToAlbum = false;
+            foreach ($albumDirs as $dir) {
+                if ($runtime === $dir || strpos($runtime, $dir . '/') === 0) {
+                    $belongsToAlbum = true;
+                    break;
+                }
+            }
+
+            if (!$belongsToAlbum) {
+                continue;
+            }
+
+            // Parent non disponibile = possibile mount/path temporaneamente offline.
+            $parent = dirname($runtime);
+            if (!is_dir($parent) || !is_readable($parent)) {
+                return 0;
+            }
+
+            $id = (int)($row['id'] ?? 0);
+            if ($id > 0) {
+                $staleIds[] = $id;
+            }
+        }
+
+        if (empty($staleIds)) {
+            return 0;
+        }
+
+        $placeholders = implode(',', array_fill(0, count($staleIds), '?'));
+        $sql = "DELETE FROM audio_files
+                WHERE storage_type = 'external'
+                  AND album_id = ?
+                  AND id IN ($placeholders)";
+
+        $params = array_merge([$albumId], $staleIds);
+        $del = $this->db->prepare($sql);
+        $del->execute($params);
+
+        return $del->rowCount();
+    }
+
+
     private function appendReviewText(string $current, string $extra): string
     {
         $current = trim($current);
@@ -1701,6 +2938,27 @@ class MediaImportService
      * Usa lo stesso servizio metadati del form manuale come fallback.
      * Nessuna eccezione esterna deve bloccare l'import dell'album.
      */
+    private function fetchExternalIdentity(string $artist, string $title, ?int $year): array
+    {
+        try {
+            if (!class_exists('AlbumMetadataService')) {
+                $file = BASE_PATH . '/app/services/AlbumMetadataService.php';
+                if (is_file($file)) {
+                    require_once $file;
+                }
+            }
+            if (!class_exists('AlbumMetadataService')) {
+                return [];
+            }
+
+            $service = new AlbumMetadataService();
+            $data = $service->identifyRelease($artist, $title, $year === null ? 0 : $year);
+            return is_array($data) ? $data : [];
+        } catch (Throwable $e) {
+            return [];
+        }
+    }
+
     private function fetchExternalMetadata(
         string $artist,
         string $title,
@@ -2014,6 +3272,9 @@ class MediaImportService
             'track'       => null,
             'disc'        => null,
             'duration'    => null,
+            'mbid'        => '',
+            'release_group' => '',
+            'artist_mbid' => '',
             'picture'     => null,
         ];
 
@@ -2049,6 +3310,20 @@ class MediaImportService
         $out['track'] = $this->parseLeadingInt($this->firstComment($c, ['track_number', 'tracknumber', 'track']));
         $out['disc']  = $this->parseLeadingInt($this->firstComment($c, ['part_of_a_set', 'discnumber', 'disc_number', 'disc']));
 
+        // Tag Picard / MusicBrainz comuni in FLAC/Vorbis e ID3 TXXX.
+        $out['mbid'] = strtolower($this->firstComment($c, [
+            'musicbrainz_albumid', 'musicbrainz_releaseid', 'musicbrainz_release_id'
+        ]));
+        $out['release_group'] = strtolower($this->firstComment($c, [
+            'musicbrainz_releasegroupid', 'musicbrainz_release_group_id', 'musicbrainz_releasegroup_id'
+        ]));
+        $out['artist_mbid'] = $this->singleMusicBrainzArtistId($c, [
+            'musicbrainz_albumartistid',
+            'musicbrainz_albumartist_id',
+            'musicbrainz_album_artistid',
+            'musicbrainz_album_artist_id',
+        ]);
+
         if (isset($info['playtime_seconds']) && $info['playtime_seconds'] > 0) {
             $d = (int)round($info['playtime_seconds']);
             $out['duration'] = $d > 65535 ? 65535 : $d; // colonna duration_sec smallint
@@ -2079,9 +3354,48 @@ class MediaImportService
         return '';
     }
 
+
+    /**
+     * Estrae MUSICBRAINZ_ALBUMARTISTID dai commenti getID3 senza scegliere
+     * arbitrariamente il primo valore nelle collaborazioni multi-artista.
+     * Ritorna l'UUID solo se tutti i tag contengono una singola identita'
+     * MusicBrainz distinta; con zero o piu' artisti ritorna stringa vuota.
+     */
+    private function singleMusicBrainzArtistId(array $comments, array $keys): string
+    {
+        $ids = [];
+        $uuidPattern = '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i';
+
+        foreach ($keys as $key) {
+            if (!isset($comments[$key])) {
+                continue;
+            }
+
+            $values = is_array($comments[$key]) ? $comments[$key] : [$comments[$key]];
+            foreach ($values as $value) {
+                if (preg_match_all($uuidPattern, (string)$value, $matches)) {
+                    foreach ($matches[0] as $id) {
+                        $ids[strtolower($id)] = true;
+                    }
+                }
+            }
+        }
+
+        if (count($ids) !== 1) {
+            return '';
+        }
+
+        return (string)array_key_first($ids);
+    }
+
     // ==========================================================
     // PARSING NOMI E UTILITY
     // ==========================================================
+
+    private function isUuid(string $value): bool
+    {
+        return (bool)preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', trim($value));
+    }
 
     private function parseYear(string $raw): ?int
     {
