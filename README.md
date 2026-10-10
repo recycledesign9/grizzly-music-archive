@@ -205,6 +205,40 @@ docker compose down -v     # stop AND delete all data (full reset)
 docker compose up -d       # start again
 ```
 
+### Upgrade from 0.4.0 to 0.5.0
+
+Grizzly Music Archive 0.5.0 introduces database changes for MusicBrainz release-group identity and persistent artist image identity/cache data.
+
+Existing **0.4.0 installations** must apply the 0.5.0 database migration after updating the application.
+
+First update the repository and rebuild the containers:
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+Then apply the database migration:
+
+```bash
+docker compose exec -T db sh -c \
+  'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"' \
+  < docker/db/migrations/grizzly_0.5.0_migration.sql
+```
+
+The migration upgrades an existing 0.4.0 database to the 0.5.0 schema while preserving the existing archive, artists, albums, covers and audio data.
+
+The migration is designed to be safe to run again if necessary.
+
+> **Fresh installations do not need to run migration files manually.**
+> `docker/db/01_schema.sql` already contains the current database structure and is imported automatically when the database volume is created.
+
+After the migration, verify that all containers are running:
+
+```bash
+docker compose ps
+```
+
 ---
 
 ## 🔑 API Keys (optional)
@@ -301,7 +335,7 @@ You can use any local hostname you like, for example `grizzly.local`, `grizzly.a
 
 ## 🛠 Local Development (without Docker)
 
-Requirements: PHP 8.1+, MySQL 8.0 or MariaDB 10.6+, Apache with `mod_rewrite`.
+Requirements: PHP 7.4+, MySQL 8.0 or MariaDB 10.6+, Apache with `mod_rewrite`.
 
 ```bash
 # 1. Import the database
@@ -347,8 +381,11 @@ grizzly-music-archive/
 │   ├── apache/
 │   │   └── vhost.conf           < Apache virtual host configuration
 │   └── db/
-│       ├── 01_schema.sql        < Database structure
-│       └── 02_seed.sql          < Demo data (safe to publish)
+│       ├── 01_schema.sql        < Current database structure for fresh installs
+│       ├── 02_seed.sql          < Demo data (safe to publish)
+│       └── migrations/
+│           ├── grizzly_0.4.0_migration.sql
+│           └── grizzly_0.5.0_migration.sql
 ├── public/
 │   ├── uploads/
 │   │   ├── covers/              < Cover images (gitignored)
