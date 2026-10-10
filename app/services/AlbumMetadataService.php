@@ -94,6 +94,10 @@ class AlbumMetadataService
             $result['title'] = $mb['title'] ?? $album;
             $result['year']  = !empty($mb['date']) ? substr($mb['date'], 0, 4) : '';
             $result['mbid']  = $mb['id'] ?? '';
+            $result['artist_mbid'] = $this->artistMbidFromCredit($mb);
+            // Identita' logica dell'album: il release-group resta valido anche
+            // se la tracklist viene poi completata/sostituita da Discogs o Last.fm.
+            $result['release_group'] = (string)($mb['release-group']['id'] ?? '');
 
             // Genere da MusicBrainz release-group. MusicBrainz non
             // garantisce l'ordine dell'array genres: topGenreName()
@@ -331,10 +335,39 @@ class AlbumMetadataService
         // finale arriva da Discogs o Last.fm non sono più confrontabili
         // con quella applicata e non vengono proposte.
         if (!$isMbValid) {
-            unset($result['editions'], $result['editions_partial'], $result['release_group']);
+            unset($result['editions'], $result['editions_partial']);
         }
 
         return $result;
+    }
+
+    // ----------------------------------------------------------
+    // Identificazione MusicBrainz leggera per lo scanner.
+    // Restituisce release MBID + release-group senza browse delle edizioni,
+    // cover o fallback Discogs/Last.fm. Serve solo come identita' forte.
+    // ----------------------------------------------------------
+    public function identifyRelease(string $artist, string $album, int $year = 0): array
+    {
+        $artistRaw = trim($artist);
+        $albumRaw  = trim($album);
+        $artistNorm = $this->normalize($artistRaw);
+        $albumNorm  = $this->normalize($albumRaw);
+
+        if ($artistNorm === '' || $albumNorm === '') {
+            return ['mbid' => '', 'artist_mbid' => '', 'release_group' => '', 'year' => ''];
+        }
+
+        $mb = $this->searchMusicBrainzRelease($artistNorm, $albumNorm, $year, $albumRaw);
+        if (empty($mb)) {
+            return ['mbid' => '', 'artist_mbid' => '', 'release_group' => '', 'year' => ''];
+        }
+
+        return [
+            'mbid'          => (string)($mb['id'] ?? ''),
+            'artist_mbid'   => $this->artistMbidFromCredit($mb),
+            'release_group' => (string)($mb['release-group']['id'] ?? ''),
+            'year'          => !empty($mb['date']) ? substr((string)$mb['date'], 0, 4) : '',
+        ];
     }
 
     // ----------------------------------------------------------
@@ -421,6 +454,8 @@ class AlbumMetadataService
             'title'       => $album,
             'year'        => '',
             'mbid'        => '',
+            'artist_mbid' => '',
+            'release_group' => '',
             'cover'       => '',
             'cover_local' => '',
             'genre'       => '',
@@ -674,17 +709,56 @@ class AlbumMetadataService
             return [];
         }
 
-        $relData = $this->httpGetJson(
-            'https://musicbrainz.org/ws/2/release/?query=' . rawurlencode('rgid:' . $matchId)
-            . '&fmt=json&limit=25&inc=release-groups+labels+genres+media'
-        );
-        if (empty($relData['releases'])) {
+        $groupReleases = $this->releasesOfGroup($matchId);
+        if (empty($groupReleases)) {
             return [];
         }
 
-        $this->resolvePreferredArtistCountry($relData['releases']);
+        $this->resolvePreferredArtistCountry($groupReleases);
 
-        return $this->pickBestRelease($relData['releases'], $base, $year, $artist, $this->preferredArtistCountry);
+        return $this->pickBestRelease($groupReleases, $base, $year, $artist, $this->preferredArtistCountry);
+    }
+
+    // ----------------------------------------------------------
+    // Release di un release-group tramite BROWSE (elenco diretto).
+    //
+    // Prima si usava la ricerca "rgid:<id>": l'indice di ricerca di
+    // MusicBrainz restituiva zero risultati per il Green Album dei
+    // Weezer (rgid 923d5ba6-…, verificato con curl il 05/10/2026) pur
+    // esistendo il release-group, e la ricerca ripiegava sul Blue
+    // Album. Il browse non passa dall'indice di ricerca.
+    //
+    // Il browse non restituisce "score" e "media-count": vengono
+    // aggiunti qui perche' pickBestRelease() li usa (punteggio neutro
+    // uguale per tutte, numero di dischi dal campo media).
+    // ----------------------------------------------------------
+    private function releasesOfGroup(string $rgId): array
+    {
+        $rgId = strtolower(trim($rgId));
+        if (!$this->isUuid($rgId)) {
+            return [];
+        }
+
+        $data = $this->httpGetJson(
+            'https://musicbrainz.org/ws/2/release?release-group=' . $rgId
+            . '&inc=release-groups+labels+media+artist-credits&fmt=json&limit=100'
+        );
+        if (empty($data['releases']) || !is_array($data['releases'])) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($data['releases'] as $rel) {
+            if (!is_array($rel)) continue;
+            if (!isset($rel['score'])) {
+                $rel['score'] = 100;
+            }
+            if (!isset($rel['media-count'])) {
+                $rel['media-count'] = max(1, count($rel['media'] ?? []));
+            }
+            $out[] = $rel;
+        }
+        return $out;
     }
 
     // ----------------------------------------------------------
@@ -803,15 +877,12 @@ class AlbumMetadataService
             return $best;
         }
 
-        $relData = $this->httpGetJson(
-            'https://musicbrainz.org/ws/2/release/?query=' . rawurlencode('rgid:' . $earliestId)
-            . '&fmt=json&limit=25&inc=release-groups+labels+genres+media'
-        );
-        if (empty($relData['releases'])) {
+        $groupReleases = $this->releasesOfGroup($earliestId);
+        if (empty($groupReleases)) {
             return $best;
         }
 
-        $earliestBest = $this->pickBestRelease($relData['releases'], $album, 0, $artist, $this->preferredArtistCountry);
+        $earliestBest = $this->pickBestRelease($groupReleases, $album, 0, $artist, $this->preferredArtistCountry);
 
         return !empty($earliestBest) ? $earliestBest : $best;
     }
@@ -1096,6 +1167,28 @@ class AlbumMetadataService
         }
 
         return $best ?? [];
+    }
+
+    // MBID dell'artista accreditato sulla release scelta.
+    // Lo usiamo solo se l'artist-credit contiene una singola identità
+    // MusicBrainz distinta: nelle collaborazioni multi-artista restituiamo
+    // stringa vuota per evitare merge automatici pericolosi.
+    private function artistMbidFromCredit(array $entity): string
+    {
+        $ids = [];
+
+        foreach (($entity['artist-credit'] ?? []) as $credit) {
+            $id = strtolower(trim((string)($credit['artist']['id'] ?? '')));
+            if ($this->isUuid($id)) {
+                $ids[$id] = true;
+            }
+        }
+
+        if (count($ids) !== 1) {
+            return '';
+        }
+
+        return (string)array_key_first($ids);
     }
 
     // Ricava una sola volta il paese principale dell'artista usando

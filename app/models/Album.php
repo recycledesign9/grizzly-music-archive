@@ -600,10 +600,10 @@ class Album
     $sql = "
             INSERT INTO albums
                 (artist_id, genre_id, label_id, format_id, title, slug,
-                 year, `condition`, copies, notes, cover_url, cover_local, mbid)
+                 year, `condition`, copies, notes, cover_url, cover_local, mbid, mb_release_group)
             VALUES
                 (:artist_id, :genre_id, :label_id, :format_id, :title, :slug,
-                 :year, :condition, :copies, :notes, :cover_url, :cover_local, :mbid)
+                 :year, :condition, :copies, :notes, :cover_url, :cover_local, :mbid, :mb_release_group)
         ";
     $stmt = $this->db->prepare($sql);
     $stmt->execute([
@@ -620,6 +620,7 @@ class Album
       ':cover_url'   => $data['cover_url']   ?: null,
       ':cover_local' => $data['cover_local'] ?: null,
       ':mbid'        => $data['mbid']        ?: null,
+      ':mb_release_group' => !empty($data['mb_release_group']) ? $data['mb_release_group'] : null,
     ]);
     return (int)$this->db->lastInsertId();
   }
@@ -642,7 +643,8 @@ class Album
                 notes       = :notes,
                 cover_url   = :cover_url,
                 cover_local = :cover_local,
-                mbid        = :mbid
+                mbid        = :mbid,
+                mb_release_group = :mb_release_group
             WHERE id = :id
         ";
     $stmt = $this->db->prepare($sql);
@@ -659,6 +661,7 @@ class Album
       ':cover_url'   => $data['cover_url']   ?: null,
       ':cover_local' => $data['cover_local'] ?: null,
       ':mbid'        => $data['mbid']        ?: null,
+      ':mb_release_group' => !empty($data['mb_release_group']) ? $data['mb_release_group'] : null,
       ':id'          => $id,
     ]);
   }

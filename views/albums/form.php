@@ -118,10 +118,18 @@ $artistNameValue = isset($old['artist_name'])
   : ($album['artist_name'] ?? '');
 
 $artistDisplayValue = $artistNameValue;
+$currentArtistMbid = trim((string)($old['artist_mbid'] ?? ''));
+
 if ($currentArtistId) {
   $artistIdx = array_search($currentArtistId, array_map('intval', array_column($artists, 'id')), true);
   if ($artistIdx !== false && isset($artists[$artistIdx]['name'])) {
     $artistDisplayValue = $artists[$artistIdx]['name'];
+
+    // In modifica (o dopo una validazione fallita) porta nel form anche
+    // l'identità MusicBrainz già nota dell'artista selezionato.
+    if ($currentArtistMbid === '') {
+      $currentArtistMbid = trim((string)($artists[$artistIdx]['mb_artist_id'] ?? ''));
+    }
   }
 }
 
@@ -237,13 +245,18 @@ $cancelUrl = $isEdit
           <select name="artist_id" id="artistSelect" style="display:none" aria-hidden="true" tabindex="-1">
             <option value="">— Nuovo artista —</option>
             <?php foreach ($artists as $ar): ?>
-              <option value="<?= (int)$ar['id'] ?>" <?= ($currentArtistId === (int)$ar['id']) ? 'selected' : '' ?>>
+              <option
+                value="<?= (int)$ar['id'] ?>"
+                data-mbid="<?= htmlspecialchars((string)($ar['mb_artist_id'] ?? ''), ENT_QUOTES, 'UTF-8') ?>"
+                <?= ($currentArtistId === (int)$ar['id']) ? 'selected' : '' ?>>
                 <?= htmlspecialchars($ar['name'], ENT_QUOTES, 'UTF-8') ?>
               </option>
             <?php endforeach; ?>
           </select>
           <input type="hidden" name="artist_name" id="artistNameInput"
             value="<?= htmlspecialchars($artistNameValue, ENT_QUOTES, 'UTF-8') ?>">
+          <input type="hidden" name="artist_mbid" id="artistMbidInput"
+            value="<?= htmlspecialchars($currentArtistMbid, ENT_QUOTES, 'UTF-8') ?>">
 
           <div class="artist-autocomplete-wrap" style="position:relative">
             <input
@@ -483,6 +496,11 @@ $cancelUrl = $isEdit
         <input type="hidden" name="cover_url" id="coverUrlInput" value="<?= formVal('cover_url', $album, $old) ?>">
         <input type="hidden" name="cover_local_new" id="coverLocalNew" value="<?= formVal('cover_local_new', $album, $old) ?>">
         <input type="hidden" name="mbid" id="mbidInput" value="<?= formVal('mbid', $album, $old) ?>">
+        <input type="hidden" name="mb_release_group" id="mbReleaseGroupInput" value="<?= formVal('mb_release_group', $album, $old) ?>">
+        <!-- 1 soltanto quando l'utente sceglie esplicitamente una release
+             dall'elenco Edizioni. Un MBID applicato automaticamente dalla
+             ricerca metadata resta 0 e non autorizza da solo una nuova scheda. -->
+        <input type="hidden" name="mb_release_explicit" id="mbReleaseExplicitInput" value="<?= !empty($old['mb_release_explicit']) ? '1' : '0' ?>">
       </section>
 
     </div>
@@ -993,6 +1011,24 @@ $cancelUrl = $isEdit
         if (mbidInput) mbidInput.value = data.mbid;
       }
 
+      // L'identità dell'artista deve seguire SEMPRE l'ultimo lookup:
+      // se MusicBrainz non la restituisce, azzeriamo il valore precedente
+      // invece di lasciare un MBID stale associato a un altro nome.
+      const artistMbidInput = document.getElementById('artistMbidInput');
+      if (artistMbidInput) artistMbidInput.value = data.artist_mbid || '';
+
+      const mbReleaseGroupInput = document.getElementById('mbReleaseGroupInput');
+      if (mbReleaseGroupInput) {
+        // Una nuova risposta MusicBrainz deve sostituire anche l'identita'
+        // logica precedente; niente release-group stale dopo una nuova ricerca.
+        mbReleaseGroupInput.value = data.release_group || '';
+      }
+      // L'MBID scelto automaticamente dal lookup NON equivale a una scelta
+      // esplicita di edizione dell'utente. MusicBrainz puo' restituire una
+      // release diversa della stessa opera a chiamate diverse.
+      const mbReleaseExplicitInput = document.getElementById('mbReleaseExplicitInput');
+      if (mbReleaseExplicitInput) mbReleaseExplicitInput.value = '0';
+
       if (data.label) {
         setLabel(data.label);
         markSource('label', true);
@@ -1265,7 +1301,7 @@ $cancelUrl = $isEdit
           setEditionsBusy(false);
           if (frame) frame.classList.remove('is-loading');
           if (data.error) throw new Error(data.error);
-          applyEdition(data);
+          applyEdition(data, true);
           editionState.applied = idx;
           updateEditionsHead(editionState.partial);
           if (msg) msg.textContent = '';
@@ -1285,9 +1321,13 @@ $cancelUrl = $isEdit
     // solo se il riquadro è vuoto o contiene ancora tracce arrivate
     // dalle fonti e non modificate a mano; altrimenti passa dalla
     // conferma "Sostituisci tracklist", come nella ricerca.
-    function applyEdition(data) {
+    function applyEdition(data, explicitChoice) {
       const mbidInput = document.getElementById('mbidInput');
       if (mbidInput && data.mbid) mbidInput.value = data.mbid;
+      const mbReleaseGroupInput = document.getElementById('mbReleaseGroupInput');
+      if (mbReleaseGroupInput && data.release_group) mbReleaseGroupInput.value = data.release_group;
+      const mbReleaseExplicitInput = document.getElementById('mbReleaseExplicitInput');
+      if (mbReleaseExplicitInput) mbReleaseExplicitInput.value = explicitChoice ? '1' : '0';
 
       if (data.label) {
         setLabel(data.label);
@@ -1588,20 +1628,23 @@ $cancelUrl = $isEdit
       const dropdown = document.getElementById('artistDropdown');
       const selHidden = document.getElementById('artistSelect');
       const nameHidden = document.getElementById('artistNameInput');
+      const mbidHidden = document.getElementById('artistMbidInput');
 
       if (!input || !dropdown) return;
 
-      // Raccoglie artisti dal select nascosto
+      // Raccoglie artisti dal select nascosto, compreso l'MBID già noto.
       const artists = Array.from(selHidden.options)
         .filter(o => o.value !== '')
         .map(o => ({
           id: o.value,
-          name: o.text.trim()
+          name: o.text.trim(),
+          mbid: o.getAttribute('data-mbid') || ''
         }));
 
-      function setArtist(id, name) {
+      function setArtist(id, name, mbid) {
         selHidden.value = id || '';
         nameHidden.value = id ? '' : name;
+        if (mbidHidden) mbidHidden.value = mbid || '';
         input.value = name;
         dropdown.style.display = 'none';
         if (name) {
@@ -1624,7 +1667,7 @@ $cancelUrl = $isEdit
           li.textContent = a.name;
           li.addEventListener('mousedown', (e) => {
             e.preventDefault();
-            setArtist(a.id, a.name);
+            setArtist(a.id, a.name, a.mbid);
           });
           dropdown.appendChild(li);
         });
@@ -1635,7 +1678,7 @@ $cancelUrl = $isEdit
         liNew.textContent = '+ Nuovo artista: "' + input.value.trim() + '"';
         liNew.addEventListener('mousedown', (e) => {
           e.preventDefault();
-          setArtist('', input.value.trim());
+          setArtist('', input.value.trim(), '');
         });
         dropdown.appendChild(liNew);
         dropdown.style.display = 'block';
@@ -1646,6 +1689,7 @@ $cancelUrl = $isEdit
         // Resetta selezione quando l'utente modifica il testo
         selHidden.value = '';
         nameHidden.value = input.value.trim();
+        if (mbidHidden) mbidHidden.value = '';
         if (!q) {
           dropdown.style.display = 'none';
           return;
