@@ -108,15 +108,11 @@ class AlbumController
       'label_id'  => (int)($_GET['label_id'] ?? 0),
     ];
 
-    // a.created_at: "Data di aggiunta", esposto solo nella vista griglia.
-    $allowedOrder = ['a.title', 'ar.name', 'a.year', 'a.created_at'];
-    $order = in_array($_GET['order'] ?? '', $allowedOrder, true)
-      ? $_GET['order']
-      : 'a.title';
-
-    $dir = strtoupper($_GET['dir'] ?? 'ASC') === 'DESC' ? 'DESC' : 'ASC';
-
     $view = $this->resolveArchiveView();
+
+    // Ordinamento: parametri GET se presenti, altrimenti l'ultima
+    // scelta ricordata nel cookie (stesso schema della vista).
+    [$order, $dir] = $this->resolveArchiveSort($view);
 
     // Elementi per pagina. La lista usa i valori storici; la griglia
     // usa multipli di 24, divisibile per 2, 3, 4, 6, 8 e 12: il CSS
@@ -198,6 +194,58 @@ class AlbumController
 
     $stored = $_COOKIE[$cookie] ?? '';
     return in_array($stored, $allowed, true) ? $stored : 'list';
+  }
+
+  // ----------------------------------------------------------
+  // Ordinamento dell'Archivio: colonna + direzione.
+  // Stesso schema di resolveArchiveView(): se la richiesta contiene
+  // un ordinamento valido lo si usa e lo si ricorda in un cookie;
+  // senza parametri (menu, Home, "Indietro", dopo un salvataggio)
+  // si usa l'ultimo ricordato. Il valore del cookie è confrontato con
+  // la stessa whitelist dei parametri GET.
+  //
+  // a.created_at ("Data di aggiunta") esiste solo nella griglia: in
+  // lista si ripiega su titolo crescente, come il cambio di vista in
+  // list.php, senza sovrascrivere il cookie, così tornando alla
+  // griglia si ritrova l'ordinamento per data.
+  // ----------------------------------------------------------
+  private function resolveArchiveSort(string $view): array
+  {
+    // a.created_at: "Data di aggiunta", esposto solo nella vista griglia.
+    $allowedOrder = ['a.title', 'ar.name', 'a.year', 'a.created_at'];
+    $default      = ['a.title', 'ASC'];
+    $cookie       = 'grz_archive_sort';
+
+    $requestedOrder = $_GET['order'] ?? '';
+    if (in_array($requestedOrder, $allowedOrder, true)) {
+      $order = $requestedOrder;
+      $dir   = strtoupper($_GET['dir'] ?? 'ASC') === 'DESC' ? 'DESC' : 'ASC';
+
+      $value = $order . '|' . $dir;
+      if (($_COOKIE[$cookie] ?? '') !== $value && !headers_sent()) {
+        $path = parse_url(BASE_URL, PHP_URL_PATH);
+        setcookie($cookie, $value, [
+          'expires'  => time() + 365 * 24 * 3600,
+          'path'     => ($path !== null && $path !== '') ? rtrim($path, '/') . '/' : '/',
+          'samesite' => 'Lax',
+          'httponly' => true,
+        ]);
+      }
+    } else {
+      $stored = explode('|', (string)($_COOKIE[$cookie] ?? ''), 2);
+      if (in_array($stored[0], $allowedOrder, true)) {
+        $order = $stored[0];
+        $dir   = ($stored[1] ?? '') === 'DESC' ? 'DESC' : 'ASC';
+      } else {
+        [$order, $dir] = $default;
+      }
+    }
+
+    if ($view !== 'grid' && $order === 'a.created_at') {
+      return $default;
+    }
+
+    return [$order, $dir];
   }
 
   // ----------------------------------------------------------
@@ -338,41 +386,110 @@ class AlbumController
       return;
     }
 
-    // -------------------------------------------------------
-    // Controllo duplicati — stesso artista + titolo (il formato
-    // non conta più: per aggiungere un formato si MODIFICA la
-    // scheda esistente). L'artista viene risolto in SOLA LETTURA
-    // (findByName): se l'inserimento viene bloccato non deve
-    // restare nel DB un artista orfano creato da findOrCreate.
-    // In modifica ($id) il record corrente viene escluso.
-    //
-    // Titolo uguale non significa sempre stesso album: alcuni
-    // artisti hanno più album omonimi (American Football LP1-LP4,
-    // Peter Gabriel 1-4, Weezer). findSameAlbum() confronta quindi
-    // il release-group MusicBrainz: stesso gruppo = stesso album
-    // (anche se edizione diversa, es. ristampa) e il salvataggio
-    // resta bloccato; gruppo diverso = album distinto e il
-    // salvataggio procede.
-    // -------------------------------------------------------
-    $checkArtistId = !empty($_POST['artist_id'])
-      ? (int)$_POST['artist_id']
-      : $this->artistModel->findByName($_POST['artist_name'] ?? '');
+    // Identita' MusicBrainz ricevuta dal form. L'MBID identifica la
+    // release specifica; il release-group collega release della stessa
+    // famiglia/opera ma NON basta da solo a dichiarare un duplicato.
+    // In modifica preserviamo il release-group esistente solo se l'MBID non
+    // e' cambiato. Per vecchi form/record senza release-group proviamo a
+    // ricavarlo dall'MBID come fallback, senza renderlo obbligatorio.
+    $existingBeforeSave = $id ? $this->albumModel->getById($id) : null;
+    $postedMbid = strtolower(trim((string)($_POST['mbid'] ?? '')));
 
-    if ($checkArtistId) {
+    // Identità MusicBrainz dell'artista. È un UUID come release/release-group,
+    // ma appartiene alla tabella artists e serve a riconoscere alias diversi
+    // della stessa entità (es. "Beatles" / "The Beatles").
+    $postedArtistMbid = strtolower(trim((string)($_POST['artist_mbid'] ?? '')));
+    if (!$this->isReleaseMbid($postedArtistMbid)) {
+      $postedArtistMbid = '';
+    }
+
+    $postedReleaseGroup = strtolower(trim((string)($_POST['mb_release_group'] ?? '')));
+    if (!$this->isReleaseMbid($postedReleaseGroup)) {
+      $postedReleaseGroup = '';
+    }
+
+    if ($postedReleaseGroup === '' && $existingBeforeSave) {
+      $oldMbid = strtolower(trim((string)($existingBeforeSave['mbid'] ?? '')));
+      $oldGroup = strtolower(trim((string)($existingBeforeSave['mb_release_group'] ?? '')));
+      if ($oldMbid !== '' && $oldMbid === $postedMbid && $this->isReleaseMbid($oldGroup)) {
+        $postedReleaseGroup = $oldGroup;
+      }
+    }
+
+    if ($postedReleaseGroup === '' && $this->isReleaseMbid($postedMbid)) {
+      $resolvedGroup = $this->releaseGroupOf($postedMbid);
+      if (is_string($resolvedGroup) && $this->isReleaseMbid($resolvedGroup)) {
+        $postedReleaseGroup = strtolower($resolvedGroup);
+      }
+    }
+
+    // -------------------------------------------------------
+    // Controllo duplicati. Il formato non conta: per aggiungere un
+    // formato si MODIFICA la scheda esistente. L'artista viene risolto
+    // in sola lettura, così un salvataggio bloccato non crea orfani.
+    //
+    // Identita' primaria per la deduplica: release MBID esatto.
+    // Un MBID diverso arrivato automaticamente dal lookup non basta pero'
+    // a dichiarare una release distinta: MusicBrainz puo' scegliere stampe
+    // diverse dello stesso release-group. La distinzione e' intenzionale solo
+    // quando l'utente seleziona esplicitamente un'edizione nel form.
+    // -------------------------------------------------------
+    $typedArtistName = trim((string)($_POST['artist_name'] ?? ''));
+    $postedArtistId  = !empty($_POST['artist_id']) ? (int)$_POST['artist_id'] : 0;
+
+    // Manteniamo anche il match per nome separato: serve più sotto per la
+    // sola correzione di grafia. Un alias risolto tramite MBID non deve
+    // rinominare globalmente l'artista.
+    $nameResolvedArtistId = $typedArtistName !== ''
+      ? $this->artistModel->findByName($typedArtistName)
+      : null;
+
+    if ($postedArtistId > 0 && $this->artistModel->getById($postedArtistId)) {
+      // Scelta esplicita dall'autocomplete locale: l'id dell'utente prevale.
+      $checkArtistId = $postedArtistId;
+    } else {
+      // Nessun id locale selezionato: prima MBID artista, poi nome compatibile.
+      // È ancora sola lettura: nessun artista viene creato/aggiornato prima
+      // che il controllo duplicati dell'album sia terminato.
+      $checkArtistId = $this->artistModel->findByIdentity(
+        $typedArtistName,
+        $postedArtistMbid
+      );
+    }
+
+    if ($id === null && $checkArtistId) {
+      // Una release diversa e' intenzionale soltanto se l'utente l'ha scelta
+      // esplicitamente dal pannello Edizioni. Gli MBID applicati dal lookup
+      // automatico non sono affidabili come prova negativa: MusicBrainz puo'
+      // scegliere due release diverse dello stesso release-group in due ricerche.
+      $releaseExplicit = !empty($_POST['mb_release_explicit'])
+        && (string)$_POST['mb_release_explicit'] === '1';
+
+      // La tracklist partecipa alla deduplica conservativa. Non usiamo le
+      // durate come criterio rigido: release/API diverse possono riportare
+      // durate differenti pur avendo la stessa sequenza di brani.
+      $incomingTrackTitles = $this->postedTrackTitles($_POST['track_title'] ?? []);
+
       $duplicate = $this->findSameAlbum(
         $checkArtistId,
         trim($_POST['title'] ?? ''),
-        trim($_POST['mbid'] ?? ''),
+        $postedMbid,
+        $postedReleaseGroup,
         (int)($_POST['year'] ?? 0),
-        $id
+        $id,
+        $releaseExplicit,
+        $incomingTrackTitles
       );
 
       if ($duplicate) {
-        $errors = [
-          'duplicate' => 'Questo album è già in archivio. '
-            . 'Per aggiungere un formato (es. il CD oltre al vinile) apri la scheda esistente, '
-            . 'premi Modifica e spunta il nuovo formato.',
-        ];
+        $duplicateMessage = 'Questo album è già in archivio. '
+          . 'Per aggiungere un formato (es. il CD oltre al vinile) apri la scheda esistente, '
+          . 'premi Modifica e spunta il nuovo formato.';
+        if (!empty($duplicate['_year_mismatch'])) {
+          $duplicateMessage .= " MusicBrainz identifica lo stesso album, ma l'anno non coincide "
+            . '(archivio: ' . (int)$duplicate['year'] . ', nuovo dato: ' . (int)$duplicate['_incoming_year'] . ').';
+        }
+        $errors = ['duplicate' => $duplicateMessage];
 
         // Stesso flusso errori della validazione
         if (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && $_SERVER['HTTP_X_REQUESTED_WITH'] === 'XMLHttpRequest') {
@@ -392,7 +509,14 @@ class AlbumController
     // Riusa l'id già risolto in lettura; crea l'artista solo ora,
     // a controllo duplicati superato.
     $artistId = $checkArtistId
-      ?: $this->artistModel->findOrCreate($_POST['artist_name'] ?? '');
+      ?: $this->artistModel->findOrCreate($typedArtistName, $postedArtistMbid);
+
+    // Se il record esisteva già per nome ma non aveva ancora l'MBID, lo
+    // completiamo soltanto ora, dopo che il salvataggio ha superato la
+    // deduplica. Un MBID esistente non viene mai sovrascritto.
+    if ($postedArtistMbid !== '') {
+      $this->artistModel->attachMbidIfEmpty((int)$artistId, $postedArtistMbid);
+    }
 
     // CORREZIONE GRAFIA ARTISTA in modifica.
     // La colonna artists.name usa utf8mb4_unicode_ci, che nei confronti
@@ -409,8 +533,14 @@ class AlbumController
     // tutto l'archivio, perché l'artista è unico. In inserimento non si
     // rinomina mai: scrivere "coldplay" in minuscolo su un disco nuovo non
     // deve cambiare la grafia dell'artista esistente.
-    $typedArtistName = trim($_POST['artist_name'] ?? '');
-    if ($id && $artistId && empty($_POST['artist_id']) && $typedArtistName !== '') {
+    if (
+      $id
+      && $artistId
+      && empty($_POST['artist_id'])
+      && $typedArtistName !== ''
+      && $nameResolvedArtistId !== null
+      && (int)$nameResolvedArtistId === (int)$artistId
+    ) {
       $currentAlbum = $this->albumModel->getById($id);
       if ($currentAlbum && (int)$currentAlbum['artist_id'] === (int)$artistId) {
         $this->artistModel->updateNameSpelling((int)$artistId, $typedArtistName);
@@ -428,7 +558,7 @@ class AlbumController
     if (!empty($_FILES['cover_file']['tmp_name'])) {
       $coverLocal = $this->uploadCover($_FILES['cover_file']);
     }
-    $existing = $id ? $this->albumModel->getById($id) : null;
+    $existing = $existingBeforeSave;
 
     $coverLocalNew      = trim($_POST['cover_local_new'] ?? '');
     $coverLocalExisting = trim($_POST['cover_local_existing'] ?? '');
@@ -463,7 +593,8 @@ class AlbumController
       'cover_url' => trim($_POST['cover_url'] ?? '') ?: null,
       // Priorità: 1) file caricato manualmente, 2) scaricata da API, 3) esistente
       'cover_local' => $coverLocalFinal,
-      'mbid'        => trim($_POST['mbid'] ?? ''),
+      'mbid'        => $postedMbid,
+      'mb_release_group' => $postedReleaseGroup,
     ];
 
     if ($id) {
@@ -1267,100 +1398,385 @@ class AlbumController
 
   // Esegue la singola GET cURL. Ritorna [body|null, httpCode, error, errno].
   // ----------------------------------------------------------
-  // Duplicati con titolo omonimo
+  // Duplicati / identita' album
   //
-  // Restituisce la scheda esistente che rappresenta lo STESSO album
-  // (stesso artista, stesso titolo, stesso release-group MusicBrainz),
-  // oppure null se non ce n'è nessuna.
-  //
-  // Regole, per ogni scheda con artista e titolo uguali:
-  //  1) entrambe hanno un MBID di release e MusicBrainz risponde:
-  //     stesso release-group = stesso album (duplicato), gruppo
-  //     diverso = album distinto;
-  //  2) altrimenti (inserimento manuale senza MBID, MusicBrainz non
-  //     raggiungibile): anni entrambi noti e diversi = album distinti,
-  //     in tutti gli altri casi si considera duplicato, come prima.
-  // Le chiamate a MusicBrainz avvengono solo quando esiste già una
-  // scheda con lo stesso titolo, quindi il salvataggio normale non
-  // rallenta.
+  // Ordine di decisione verificato sui dati reali dell'archivio:
+  //  1) stesso release MBID = stessa release, duplicato forte;
+  //  2) MBID diversi NON bastano a distinguere due album se arrivano dal
+  //     lookup automatico: Them Crooked Vultures ha prodotto due release MBID
+  //     diversi ma stesso RG, titolo, anno e tracklist;
+  //  3) se l'utente sceglie esplicitamente un'altra release nel pannello
+  //     Edizioni, due MBID diversi possono rappresentare schede distinte;
+  //  4) release-group uguale = informazione di famiglia, non duplicato da solo;
+  //  5) nel fallback titolo-base/hint, anno e tracklist sono tutti obbligatori.
   // ----------------------------------------------------------
-  private function findSameAlbum(int $artistId, string $title, string $mbid, int $year, ?int $excludeId): ?array
-  {
+  private function findSameAlbum(
+    int $artistId,
+    string $title,
+    string $mbid,
+    string $releaseGroup,
+    int $year,
+    ?int $excludeId,
+    bool $releaseExplicit = false,
+    array $incomingTrackTitles = []
+  ): ?array {
+    $db = Database::getInstance();
+
+    $mbid = strtolower(trim($mbid));
+    if (!$this->isReleaseMbid($mbid)) {
+      $mbid = '';
+    }
+
+    $releaseGroup = strtolower(trim($releaseGroup));
+    if (!$this->isReleaseMbid($releaseGroup)) {
+      $releaseGroup = '';
+    }
+
+    // 1) Identita' piu' forte: stessa release MusicBrainz.
+    // Il titolo locale puo' essere stato corretto o reso piu' descrittivo,
+    // quindi il confronto avviene prima delle euristiche sul titolo.
+    if ($mbid !== '') {
+      $sql = "
+          SELECT id, title, slug, year, mbid, mb_release_group
+          FROM albums
+          WHERE artist_id = :artist_id
+            AND mbid = :mbid
+      ";
+      $params = [
+        ':artist_id' => $artistId,
+        ':mbid'      => $mbid,
+      ];
+      if ($excludeId !== null) {
+        $sql .= " AND id <> :exclude_id";
+        $params[':exclude_id'] = $excludeId;
+      }
+      $sql .= " ORDER BY id ASC LIMIT 1";
+
+      $stmt = $db->prepare($sql);
+      $stmt->execute($params);
+      $sameRelease = $stmt->fetch(PDO::FETCH_ASSOC);
+      if ($sameRelease) {
+        return $this->withYearConsistency($sameRelease, $year);
+      }
+    }
+
+    // 2) Fallback: candidate dello stesso artista con lo stesso titolo-base.
+    // Il release-group e' solo informazione di supporto: i dati reali
+    // dell'archivio dimostrano che release diverse dello stesso gruppo
+    // (es. edizioni deluxe/doppio disco) possono essere schede legittime.
+    $titleKey = $this->albumBaseTitleKey($title);
+    if ($titleKey === '') {
+      return null;
+    }
+
     $sql = "
-        SELECT id, title, slug, year, mbid
+        SELECT id, title, slug, year, mbid, mb_release_group
         FROM albums
         WHERE artist_id = :artist_id
-          AND LOWER(TRIM(title)) = LOWER(TRIM(:title))
     ";
-    $params = [':artist_id' => $artistId, ':title' => $title];
+    $params = [':artist_id' => $artistId];
     if ($excludeId !== null) {
       $sql .= " AND id <> :exclude_id";
       $params[':exclude_id'] = $excludeId;
     }
+    $sql .= " ORDER BY id ASC";
 
-    $stmt = Database::getInstance()->prepare($sql);
+    $stmt = $db->prepare($sql);
     $stmt->execute($params);
-    $candidates = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    if (empty($candidates)) {
-      return null;
-    }
 
-    $newGroup = $this->releaseGroupOf($mbid);
+    $newHint = $this->albumTitleHintKey($title);
 
-    foreach ($candidates as $cand) {
-      $candGroup = $this->releaseGroupOf((string)($cand['mbid'] ?? ''));
-
-      if ($newGroup !== '' && $candGroup !== '') {
-        if ($newGroup === $candGroup) {
-          return $cand;
-        }
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $cand) {
+      if ($this->albumBaseTitleKey((string)($cand['title'] ?? '')) !== $titleKey) {
         continue;
       }
 
+      $candMbid = strtolower(trim((string)($cand['mbid'] ?? '')));
+      if (!$this->isReleaseMbid($candMbid)) {
+        $candMbid = '';
+      }
+
+      $candGroup = strtolower(trim((string)($cand['mb_release_group'] ?? '')));
+      if (!$this->isReleaseMbid($candGroup)) {
+        $candGroup = '';
+      }
+
+      // Se entrambi i release-group sono noti e diversi, l'identita'
+      // MusicBrainz contraddice il match locale.
+      if ($releaseGroup !== '' && $candGroup !== ''
+          && !hash_equals($releaseGroup, $candGroup)) {
+        continue;
+      }
+
+      // Due release MBID diversi possono essere una seconda edizione reale,
+      // ma soltanto quando l'utente l'ha scelta esplicitamente. Se invece
+      // l'MBID e' arrivato dal lookup automatico, continuiamo le verifiche
+      // locali: MusicBrainz puo' scegliere release differenti dello stesso RG.
+      if ($mbid !== '' && $candMbid !== ''
+          && !hash_equals($mbid, $candMbid)
+          && $releaseExplicit) {
+        continue;
+      }
+
+      $candHint = $this->albumTitleHintKey((string)($cand['title'] ?? ''));
       $candYear = (int)($cand['year'] ?? 0);
-      if ($year > 0 && $candYear > 0 && $year !== $candYear) {
+
+      $hintsDiffer = $newHint !== '' && $candHint !== ''
+        && !$this->albumHintsEquivalent($newHint, $candHint);
+      if ($hintsDiffer) {
         continue;
       }
+
+      // Nel fallback locale l'anno e' obbligatorio: se manca da uno dei
+      // due lati, oppure non coincide, non dichiariamo un duplicato.
+      if ($year <= 0 || $candYear <= 0 || $year !== $candYear) {
+        continue;
+      }
+
+      // Anche la tracklist e' obbligatoria nel fallback: stesso numero di
+      // tracce e stessi titoli normalizzati nello stesso ordine. Le durate
+      // non sono usate come veto perche' release/API diverse possono
+      // riportare durate differenti pur riferendosi allo stesso album.
+      $candidateTracks = $this->trackModel->getByAlbum((int)$cand['id']);
+      if (!$this->sameTracklistTitles($incomingTrackTitles, $candidateTracks)) {
+        continue;
+      }
+
       return $cand;
     }
 
     return null;
   }
 
-  // Release-group MusicBrainz di una release, oppure '' se l'MBID
-  // manca, non è valido o MusicBrainz non risponde. Cache per la
-  // durata della richiesta e pausa di 1,1 s tra due chiamate, come
-  // richiesto dal limite di MusicBrainz (1 richiesta al secondo).
-  private function releaseGroupOf(string $releaseMbid): string
+  /**
+   * Estrae dal POST soltanto i titoli reali della tracklist, mantenendo
+   * l'ordine visualizzato nel form.
+   */
+  private function postedTrackTitles($rawTitles): array
+  {
+    $out = [];
+    foreach ((array)$rawTitles as $title) {
+      $title = trim((string)$title);
+      if ($title !== '') {
+        $out[] = $title;
+      }
+    }
+    return $out;
+  }
+
+  /**
+   * Confronto conservativo della tracklist: stesso numero di tracce,
+   * stessi titoli normalizzati, stesso ordine.
+   */
+  private function sameTracklistTitles(array $incomingTitles, array $candidateTracks): bool
+  {
+    $incoming = [];
+    foreach ($incomingTitles as $title) {
+      $key = $this->trackTitleIdentityKey((string)$title);
+      if ($key !== '') {
+        $incoming[] = $key;
+      }
+    }
+
+    if (empty($incoming)) {
+      return false;
+    }
+
+    usort($candidateTracks, static function (array $a, array $b): int {
+      $pa = (int)($a['position'] ?? 0);
+      $pb = (int)($b['position'] ?? 0);
+      if ($pa === $pb) {
+        return (int)($a['id'] ?? 0) <=> (int)($b['id'] ?? 0);
+      }
+      return $pa <=> $pb;
+    });
+
+    $stored = [];
+    foreach ($candidateTracks as $track) {
+      $key = $this->trackTitleIdentityKey((string)($track['title'] ?? ''));
+      if ($key !== '') {
+        $stored[] = $key;
+      }
+    }
+
+    if (count($incoming) !== count($stored) || empty($stored)) {
+      return false;
+    }
+
+    foreach ($incoming as $idx => $key) {
+      if (!isset($stored[$idx]) || !$this->trackTitleKeysMatch($key, $stored[$idx])) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Due titoli normalizzati sono considerati lo stesso brano se coincidono
+   * oppure differiscono soltanto per una piccola variante di trascrizione.
+   * La soglia e' volutamente conservativa: questo confronto viene usato solo
+   * quando artista, titolo album, anno, release-group, numero tracce e ordine
+   * hanno gia' coinciso. Esempio reale: "Wishing For A Blue Sky" e
+   * "Wishing for Blue Sky" devono essere la stessa traccia.
+   */
+  private function trackTitleKeysMatch(string $a, string $b): bool
+  {
+    if ($a === $b) {
+      return true;
+    }
+    if ($a === '' || $b === '') {
+      return false;
+    }
+
+    $la = strlen($a);
+    $lb = strlen($b);
+    $short = $la <= $lb ? $a : $b;
+    $long  = $la <= $lb ? $b : $a;
+
+    if (strlen($short) >= 5 && strpos($long, $short) !== false) {
+      return true;
+    }
+
+    if ($la <= 255 && $lb <= 255) {
+      $maxDistance = (int)floor(max($la, $lb) * 0.15);
+      return $maxDistance > 0 && levenshtein($a, $b) <= $maxDistance;
+    }
+
+    return false;
+  }
+
+  /**
+   * Normalizzazione limitata all'identita' della traccia. Non elimina parole
+   * significative e non usa fuzzy matching: neutralizza soltanto maiuscole,
+   * apostrofi tipografici, ampersand, punteggiatura e spazi.
+   */
+  private function trackTitleIdentityKey(string $title): string
+  {
+    $title = html_entity_decode(trim($title), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $title = str_replace(["’", "‘", "`"], "'", $title);
+    $title = str_replace('&', ' and ', $title);
+
+    if (function_exists('mb_strtolower')) {
+      $title = mb_strtolower($title, 'UTF-8');
+    } else {
+      $title = strtolower($title);
+    }
+
+    $title = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $title);
+    $title = preg_replace('/\s+/u', ' ', trim((string)$title));
+
+    return trim((string)$title);
+  }
+
+  /**
+   * Stessa release MBID ma anno differente non crea un secondo album:
+   * marca solo la discordanza per il messaggio di validazione.
+   */
+  private function withYearConsistency(array $album, int $incomingYear): array
+  {
+    $storedYear = (int)($album['year'] ?? 0);
+    if ($incomingYear > 0 && $storedYear > 0 && $incomingYear !== $storedYear) {
+      $album['_year_mismatch'] = true;
+      $album['_incoming_year'] = $incomingYear;
+    }
+    return $album;
+  }
+
+  // Titolo album senza la parte finale tra parentesi o quadre,
+  // ridotto a lettere e cifre minuscole: "Weezer (The Green Album)"
+  // e "Weezer" danno entrambi "weezer".
+  private function albumBaseTitleKey(string $title): string
+  {
+    $t = trim($title);
+    $t = preg_replace('/\s*[\(\[][^\)\]]*[\)\]]\s*$/u', '', $t) ?? $t;
+    $t = function_exists('mb_strtolower') ? mb_strtolower($t, 'UTF-8') : strtolower($t);
+    return (string)preg_replace('/[^\pL\pN]+/u', '', $t);
+  }
+
+  // Soprannome tra parentesi alla fine del titolo, normalizzato:
+  // "Weezer (The Green Album)" e "Weezer (Green)" danno "green";
+  // "Weezer" da' stringa vuota.
+  private function albumTitleHintKey(string $title): string
+  {
+    if (!preg_match('/[\(\[]([^\)\]]*)[\)\]]\s*$/u', trim($title), $m)) {
+      return '';
+    }
+    $h = function_exists('mb_strtolower') ? mb_strtolower($m[1], 'UTF-8') : strtolower($m[1]);
+    $h = (string)preg_replace('/[^\pL\pN]+/u', ' ', $h);
+    $h = (string)preg_replace('/^\s*the\s+/u', '', $h);
+    $h = (string)preg_replace('/\s+album\s*$/u', '', $h);
+    return (string)preg_replace('/\s+/u', '', $h);
+  }
+
+  private function albumHintsEquivalent(string $a, string $b): bool
+  {
+    return $a !== '' && $b !== '' && hash_equals($a, $b);
+  }
+
+  private function isReleaseMbid(string $mbid): bool
+  {
+    return (bool)preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', strtolower(trim($mbid)));
+  }
+
+  // Release-group MusicBrainz di una release. Cache per la durata della
+  // richiesta e pausa di 1,1 s tra due chiamate, come richiesto dal
+  // limite di MusicBrainz (1 richiesta al secondo).
+  //
+  // Valori di ritorno distinti:
+  //   ''    MBID assente o non valido;
+  //   null  MBID valido ma release-group NON risolto (rete, SSL, 503):
+  //         il chiamante non deve trattarlo come MBID assente;
+  //   'id'  release-group trovato.
+  // Gli esiti non risolti non vengono messi in cache, cosi' una seconda
+  // chiamata nella stessa richiesta puo' riuscire.
+  private function releaseGroupOf(string $releaseMbid): ?string
   {
     static $cache = [];
     static $lastCall = 0.0;
 
     $releaseMbid = strtolower(trim($releaseMbid));
-    if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $releaseMbid)) {
+    if (!$this->isReleaseMbid($releaseMbid)) {
       return '';
     }
     if (array_key_exists($releaseMbid, $cache)) {
       return $cache[$releaseMbid];
     }
 
-    $wait = 1.1 - (microtime(true) - $lastCall);
-    if ($lastCall > 0 && $wait > 0) {
-      usleep((int)($wait * 1000000));
-    }
-    $lastCall = microtime(true);
-
     $url = 'https://musicbrainz.org/ws/2/release/' . $releaseMbid . '?inc=release-groups&fmt=json';
-    [$body, $code] = $this->curlGet($url, APP_USER_AGENT, 8, true);
+    $sslErrnos = [35, 51, 58, 60, 77, 83]; // stessi errori SSL/CA gestiti per le descrizioni
 
-    $group = '';
-    if ($body !== null && $code === 200) {
-      $data  = json_decode($body, true);
-      $group = strtolower((string)($data['release-group']['id'] ?? ''));
+    for ($attempt = 1; $attempt <= 2; $attempt++) {
+      $wait = 1.1 - (microtime(true) - $lastCall);
+      if ($lastCall > 0 && $wait > 0) {
+        usleep((int)($wait * 1000000));
+      }
+      $lastCall = microtime(true);
+
+      [$body, $code, , $errno] = $this->curlGet($url, APP_USER_AGENT, 8, true);
+
+      // MAMP senza CA bundle: ritenta senza verifica, come fetchUrl().
+      if ($body === null && in_array($errno, $sslErrnos, true)) {
+        [$body, $code, , ] = $this->curlGet($url, APP_USER_AGENT, 8, false);
+      }
+
+      if ($body !== null && $code === 200) {
+        $data  = json_decode($body, true);
+        $group = strtolower((string)($data['release-group']['id'] ?? ''));
+        if ($group !== '') {
+          $cache[$releaseMbid] = $group;
+          return $group;
+        }
+        return null;
+      }
+
+      // Rate limit o servizio occupato: un secondo tentativo.
+      if (!in_array($code, [429, 503], true) && $body !== null) {
+        break;
+      }
     }
 
-    $cache[$releaseMbid] = $group;
-    return $group;
+    return null;
   }
 
   private function curlGet(string $url, string $userAgent, int $timeoutSeconds, bool $verifySsl): array

@@ -447,7 +447,7 @@ $sortUrl = function (string $col) use ($listParams, $order, $dir): string {
             <?= htmlspecialchars($a['title']) ?>
           </a>
           <a href="<?= BASE_URL ?>/index.php?route=artists/profile/<?= (int)$a['artist_id'] ?>"
-            class="grz-archive-tile__artist">
+            class="grz-archive-tile__artist" title="<?= htmlspecialchars($a['artist_name']) ?>">
             <?= htmlspecialchars($a['artist_name']) ?>
           </a>
           <div class="grz-archive-tile__foot">

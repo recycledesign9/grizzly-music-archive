@@ -612,6 +612,17 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
                 <i class="bi bi-download me-1" aria-hidden="true"></i>Esporta archivio
               </a>
             </div>
+
+            <!-- Stato dell'export: resta visibile finché il server non ha
+                 finito di creare lo ZIP e il browser non ha avviato il download. -->
+            <div class="grz-xfer d-none" id="exportStatus" role="status" aria-live="polite">
+              <div class="grz-xfer__head">
+                <span class="grz-xfer__title" id="exportStatusTitle">Preparazione dell'archivio</span>
+                <span class="grz-xfer__time font-monospace" id="exportStatusTime">0:00</span>
+              </div>
+              <div class="grz-xfer__bar" id="exportStatusBar" aria-hidden="true"><span></span></div>
+              <p class="grz-xfer__note" id="exportStatusNote">Grizzly sta raccogliendo dati e immagini. Con molte copertine servono anche alcuni minuti: lascia aperta questa pagina.</p>
+            </div>
             <details class="grz-set__more">
               <summary>File audio e percorsi</summary>
               <p>I file audio vanno spostati a parte, con "Migra file audio" o copiando la cartella. I percorsi della libreria esterna e delle cartelle ignorate sono salvati in forma relativa, quindi si possono rimappare su una cartella diversa nel nuovo server.</p>
@@ -644,6 +655,17 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
                 <!-- conferma esplicita richiesta dal controller -->
                 <input type="hidden" name="confirm" value="REPLACE">
               </form>
+
+              <!-- Stato dell'import: visibile dall'invio del form fino al
+                   ricaricamento della pagina con l'esito. -->
+              <div class="grz-xfer d-none mt-3" id="importStatus" role="status" aria-live="polite">
+                <div class="grz-xfer__head">
+                  <span class="grz-xfer__title" id="importStatusTitle">Importazione in corso</span>
+                  <span class="grz-xfer__time font-monospace" id="importStatusTime">0:00</span>
+                </div>
+                <div class="grz-xfer__bar" aria-hidden="true"><span></span></div>
+                <p class="grz-xfer__note">Non chiudere e non ricaricare la pagina. Al termine l'esito compare in cima alle Impostazioni.</p>
+              </div>
 
               <p class="grz-set__danger-note">Dopo l'import la scansione automatica resta disattivata: controlla la cartella da scansionare, salvala per rimappare i percorsi, poi riattivala.</p>
             </div>
@@ -694,6 +716,56 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
     </div>
   </div>
 </div>
+
+<style>
+  /* Pannello di stato per export e import (Backup e ripristino). */
+  .grz-xfer {
+    margin-top: .875rem;
+    padding: .75rem .875rem;
+    border: 1px solid var(--bs-border-color);
+    border-radius: .5rem;
+    background: var(--bs-tertiary-bg);
+  }
+  .grz-xfer__head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .75rem;
+    margin-bottom: .5rem;
+  }
+  .grz-xfer__title { font-weight: 600; font-size: .9rem; }
+  .grz-xfer__time { font-size: .85rem; color: var(--bs-secondary-color); font-variant-numeric: tabular-nums; }
+  .grz-xfer__bar {
+    position: relative;
+    height: 4px;
+    border-radius: 2px;
+    overflow: hidden;
+    background: var(--bs-secondary-bg);
+  }
+  /* Barra indeterminata: la durata della creazione dello ZIP non è nota. */
+  .grz-xfer__bar > span {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 35%;
+    border-radius: 2px;
+    background: var(--bs-warning);
+    animation: grz-xfer-slide 1.4s ease-in-out infinite;
+  }
+  .grz-xfer__note { margin: .5rem 0 0; font-size: .8rem; color: var(--bs-secondary-color); }
+  .grz-xfer.is-done { border-color: var(--bs-success-border-subtle); }
+  .grz-xfer.is-done .grz-xfer__bar > span { width: 100%; animation: none; background: var(--bs-success); }
+  .grz-xfer.is-warn { border-color: var(--bs-warning-border-subtle); }
+  .grz-xfer.is-warn .grz-xfer__bar > span { width: 100%; animation: none; opacity: .5; }
+  @keyframes grz-xfer-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(290%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .grz-xfer__bar > span { width: 100%; animation: none; opacity: .6; }
+  }
+</style>
 
 <script>
   // Indice laterale: scorrimento alla sezione senza cambiare l'hash.
@@ -799,32 +871,220 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
 </script>
 
 <script>
-  // ── Feedback visivo durante la preparazione dell'export ─────
+  // ── Export archivio: stato reale dal clic al download ──────
+  //
+  // Il link punta a una route che restituisce lo ZIP come allegato.
+  // Due problemi della versione precedente:
+  //  1. app.js intercetta i link interni per la navigazione SPA: scaricava
+  //     lo ZIP via fetch, non trovava #page-content e richiedeva di nuovo la
+  //     stessa URL. L'export veniva quindi generato due volte.
+  //  2. lo spinner veniva rimosso dopo 5 secondi fissi, senza relazione con
+  //     il lavoro del server.
+  //
+  // Soluzione: il clic viene gestito qui (stopPropagation impedisce ad app.js
+  // di intercettarlo) e la URL riceve un token casuale. Il controller, quando
+  // lo ZIP è pronto e un attimo prima di inviarlo, imposta il cookie
+  // grz_export_done=<token>. La pagina controlla il cookie: finché non arriva
+  // lo stato resta "in preparazione", quando arriva il download è partito.
+  // In caso di errore il controller fa redirect alle Impostazioni con il
+  // messaggio flash, quindi la pagina si ricarica e mostra l'errore.
+  //
+  // Lo stato del lavoro vive in window.__grizzlyExportJob: se l'utente
+  // naviga altrove con la SPA e torna, il pannello riprende dal punto giusto.
   (function() {
-    var b = document.getElementById('btnExport');
-    if (!b) return;
-    b.addEventListener('click', function() {
-      var original = b.innerHTML;
-      window.__grizzlyIgnoredPollingPaused = true;
-      b.classList.add('disabled');
-      b.setAttribute('aria-disabled', 'true');
-      b.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Preparazione export…';
-      // Il download avviene fuori dalla pagina: ripristina dopo qualche secondo.
-      setTimeout(function() {
+    var EXPORT_TIMEOUT_MS = 20 * 60 * 1000; // oltre questo limite si avvisa l'utente
+    var POLL_MS = 500;
+    var COOKIE_NAME = 'grz_export_done';
+
+    function $(id) { return document.getElementById(id); }
+
+    function formatElapsed(ms) {
+      var s = Math.max(0, Math.floor(ms / 1000));
+      return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }
+
+    function newToken() {
+      var bytes = new Uint8Array(16);
+      if (window.crypto && window.crypto.getRandomValues) {
+        window.crypto.getRandomValues(bytes);
+      } else {
+        for (var i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+      }
+      return Array.prototype.map.call(bytes, function(b) {
+        return ('0' + b.toString(16)).slice(-2);
+      }).join('');
+    }
+
+    function readDoneCookie() {
+      var m = document.cookie.match(new RegExp('(?:^|;\\s*)' + COOKIE_NAME + '=([a-f0-9]+)'));
+      return m ? m[1] : '';
+    }
+
+    function clearDoneCookie() {
+      document.cookie = COOKIE_NAME + '=; Max-Age=0; path=/; SameSite=Lax';
+    }
+
+    // ── Rendering: gli elementi vengono cercati a ogni chiamata perché la
+    // SPA può aver sostituito il DOM della pagina nel frattempo.
+    function renderButton(busy) {
+      var b = $('btnExport');
+      if (!b) return;
+      if (busy) {
+        if (!b.dataset.originalHtml) b.dataset.originalHtml = b.innerHTML;
+        b.classList.add('disabled');
+        b.setAttribute('aria-disabled', 'true');
+        b.innerHTML = '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Esportazione in corso…';
+      } else {
         b.classList.remove('disabled');
         b.removeAttribute('aria-disabled');
-        b.innerHTML = original;
-        window.__grizzlyIgnoredPollingPaused = false;
-      }, 5000);
+        if (b.dataset.originalHtml) {
+          b.innerHTML = b.dataset.originalHtml;
+          delete b.dataset.originalHtml;
+        }
+      }
+    }
+
+    function renderStatus(state, elapsedMs) {
+      var box = $('exportStatus');
+      if (!box) return;
+      var title = $('exportStatusTitle');
+      var time = $('exportStatusTime');
+      var note = $('exportStatusNote');
+
+      box.classList.remove('d-none', 'is-done', 'is-warn');
+
+      if (state === 'hidden') {
+        box.classList.add('d-none');
+        return;
+      }
+
+      if (time) time.textContent = formatElapsed(elapsedMs);
+
+      if (state === 'running') {
+        if (title) title.textContent = "Preparazione dell'archivio";
+        if (note) note.textContent = 'Grizzly sta raccogliendo dati e immagini. '
+          + 'Con molte copertine servono anche alcuni minuti: lascia aperta questa pagina.';
+      } else if (state === 'done') {
+        box.classList.add('is-done');
+        if (title) title.textContent = 'Archivio pronto';
+        if (note) note.textContent = 'Il download è stato avviato dal browser. '
+          + 'Il file grizzly-export-….zip si trova nella cartella dei download.';
+      } else if (state === 'timeout') {
+        box.classList.add('is-warn');
+        if (title) title.textContent = 'Nessuna conferma dal server';
+        if (note) note.textContent = 'Il download potrebbe essere comunque arrivato: controlla la cartella '
+          + 'dei download prima di riprovare. Se manca, il server ha probabilmente interrotto l\'operazione.';
+      }
+    }
+
+    function stopPolling() {
+      if (window.__grizzlyExportPoll) {
+        clearInterval(window.__grizzlyExportPoll);
+        window.__grizzlyExportPoll = null;
+      }
+    }
+
+    function finish(state) {
+      var job = window.__grizzlyExportJob;
+      var elapsed = job ? Date.now() - job.startedAt : 0;
+      stopPolling();
+      clearDoneCookie();
+      window.__grizzlyExportJob = null;
+      window.__grizzlyIgnoredPollingPaused = false;
+
+      renderButton(false);
+      renderStatus(state, elapsed);
+
+      // L'esito positivo resta visibile qualche secondo, poi il pannello si
+      // chiude. L'avviso di timeout resta finché l'utente non riprova.
+      if (state === 'done') {
+        if (window.__grizzlyExportHide) clearTimeout(window.__grizzlyExportHide);
+        window.__grizzlyExportHide = setTimeout(function() {
+          window.__grizzlyExportHide = null;
+          if (!window.__grizzlyExportJob) renderStatus('hidden', 0);
+        }, 10000);
+      }
+    }
+
+    function tick() {
+      var job = window.__grizzlyExportJob;
+      if (!job) { stopPolling(); return; }
+
+      var elapsed = Date.now() - job.startedAt;
+
+      if (readDoneCookie() === job.token) {
+        finish('done');
+        return;
+      }
+      if (elapsed > EXPORT_TIMEOUT_MS) {
+        finish('timeout');
+        return;
+      }
+
+      renderButton(true);
+      renderStatus('running', elapsed);
+    }
+
+    function startPolling() {
+      stopPolling();
+      window.__grizzlyExportPoll = setInterval(tick, POLL_MS);
+      tick();
+    }
+
+    var b = $('btnExport');
+    if (!b) return;
+
+    b.addEventListener('click', function(e) {
+      // Il download non deve passare dalla navigazione SPA di app.js.
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Un export già in corso: il clic non avvia una seconda richiesta.
+      if (window.__grizzlyExportJob) return;
+
+      if (window.__grizzlyExportHide) {
+        clearTimeout(window.__grizzlyExportHide);
+        window.__grizzlyExportHide = null;
+      }
+
+      clearDoneCookie();
+      var token = newToken();
+      window.__grizzlyExportJob = { token: token, startedAt: Date.now() };
+      window.__grizzlyIgnoredPollingPaused = true;
+
+      startPolling();
+
+      var href = b.getAttribute('href');
+      var url = href + (href.indexOf('?') === -1 ? '?' : '&') + 'export_token=' + token;
+
+      // Una risposta "attachment" non sostituisce la pagina: il browser
+      // salva il file e la pagina resta dov'è, player compreso.
+      window.location.assign(url);
     });
+
+    // Rientro nella pagina via SPA con un export ancora in corso.
+    if (window.__grizzlyExportJob) {
+      startPolling();
+    }
   })();
 
 
   // ── Conferma import (sostituzione archivio) ─────────────────
+  // L'import resta un normale invio di form: il server risponde con un
+  // redirect alle Impostazioni e il messaggio di esito. Qui si aggiungono
+  // il blocco del doppio invio e un pannello con il tempo trascorso, che
+  // resta visibile fino al ricaricamento della pagina.
   (function() {
     var form = document.getElementById('importForm');
     if (!form) return;
+    var submitting = false;
+
     form.addEventListener('submit', function(e) {
+      if (submitting) {
+        e.preventDefault();
+        return;
+      }
+
       var f = document.getElementById('importFile');
       if (!f || !f.files || !f.files.length) {
         e.preventDefault();
@@ -841,10 +1101,28 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
         e.preventDefault();
         return;
       }
+
+      submitting = true;
+      window.__grizzlyIgnoredPollingPaused = true;
+
+      // Il campo file NON va disabilitato: un campo disabilitato non viene
+      // incluso nell'invio del form.
       var btn = document.getElementById('btnImport');
       if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Importazione…';
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Importazione in corso…';
+      }
+
+      var box = document.getElementById('importStatus');
+      var time = document.getElementById('importStatusTime');
+      if (box) {
+        box.classList.remove('d-none');
+        var started = Date.now();
+        setInterval(function() {
+          if (!time) return;
+          var s = Math.floor((Date.now() - started) / 1000);
+          time.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+        }, 1000);
       }
     });
   })();

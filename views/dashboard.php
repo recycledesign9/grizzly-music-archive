@@ -204,8 +204,8 @@ require BASE_PATH . '/views/layout/header.php';
                 <?php endif; ?>
               </div>
               <div class="grz-album-tile__info">
-                <span class="grz-album-tile__title"><?= htmlspecialchars($a['title']) ?></span>
-                <span class="grz-album-tile__artist"><?= htmlspecialchars($a['artist_name']) ?></span>
+                <span class="grz-album-tile__title" title="<?= htmlspecialchars($a['title']) ?>"><?= htmlspecialchars($a['title']) ?></span>
+                <span class="grz-album-tile__artist" title="<?= htmlspecialchars($a['artist_name']) ?>"><?= htmlspecialchars($a['artist_name']) ?></span>
                 <span class="grz-arrival" title="Aggiunto il <?= htmlspecialchars(date('d/m/Y', strtotime((string)$a['created_at']))) ?>">
                   <?= htmlspecialchars(grzArrivalLabel((string)$a['created_at'])) ?>
                 </span>
@@ -365,9 +365,6 @@ require BASE_PATH . '/views/layout/header.php';
           <?php endif; ?>
           <div><dt>Caricato</dt><dd><?= htmlspecialchars(grzArrivalLabel((string)$dayPick['created_at'])) ?></dd></div>
         </dl>
-        <?php if (!empty($dayPick['notes'])): ?>
-          <p class="grz-daypick__notes"><?= htmlspecialchars(mb_strimwidth((string)$dayPick['notes'], 0, 180, '…', 'UTF-8')) ?></p>
-        <?php endif; ?>
         <a href="<?= $dpUrl ?>" class="btn btn-sm btn-warning grz-daypick__cta">
           <i class="bi bi-disc me-1" aria-hidden="true"></i>Apri il disco
         </a>

@@ -870,6 +870,22 @@ class SettingsController
                 ob_end_clean();
             }
 
+            // Conferma per la pagina Impostazioni: il cookie arriva insieme
+            // agli header del download, cioè quando lo ZIP è già pronto.
+            // La pagina lo legge per chiudere lo stato "in preparazione".
+            // Non HttpOnly perché deve leggerlo il JavaScript della pagina;
+            // contiene solo il token casuale generato dal browser.
+            $exportToken = (string)($_GET['export_token'] ?? '');
+            if (preg_match('/^[a-f0-9]{32}$/', $exportToken)) {
+                setcookie('grz_export_done', $exportToken, [
+                    'expires'  => time() + 300,
+                    'path'     => '/',
+                    'secure'   => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+                    'httponly' => false,
+                    'samesite' => 'Lax',
+                ]);
+            }
+
             header('Content-Type: application/zip');
             header('Content-Disposition: attachment; filename="' . $filename . '"');
             header('Content-Length: ' . filesize($zipPath));
