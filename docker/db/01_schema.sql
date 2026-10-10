@@ -41,6 +41,7 @@ CREATE TABLE `artists` (
   `name`              VARCHAR(200) COLLATE utf8mb4_unicode_ci NOT NULL,
   `slug`              VARCHAR(220) COLLATE utf8mb4_unicode_ci NOT NULL,
   `mb_artist_id`      VARCHAR(36)  COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `deezer_artist_id`  VARCHAR(32)  COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `bio`               TEXT         COLLATE utf8mb4_unicode_ci,
   `bio_source`        VARCHAR(20)  COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `bio_lang`          VARCHAR(5)   COLLATE utf8mb4_unicode_ci DEFAULT NULL,
@@ -58,6 +59,11 @@ CREATE TABLE `artists` (
   `image_url`         VARCHAR(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `image_local`       VARCHAR(300) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `image_source`      VARCHAR(40)  COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `image_fetched_at`  TIMESTAMP NULL DEFAULT NULL,
+  `image_status`      VARCHAR(10) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none'
+                      COMMENT 'ok | error | none - outcome of the last artist-image fetch',
+  `image_fetch_version` SMALLINT UNSIGNED NOT NULL DEFAULT 0
+                      COMMENT 'Artist image fetch logic version',
   `country`           VARCHAR(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `active_from`       YEAR(4) DEFAULT NULL,
   `active_to`         YEAR(4) DEFAULT NULL,
@@ -65,6 +71,7 @@ CREATE TABLE `artists` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `slug` (`slug`),
   UNIQUE KEY `uq_mb_artist_id` (`mb_artist_id`),
+  UNIQUE KEY `uq_deezer_artist_id` (`deezer_artist_id`),
   KEY `idx_artist_name` (`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -127,6 +134,7 @@ CREATE TABLE `albums` (
   `cover_url`   VARCHAR(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `cover_local` VARCHAR(300) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `mbid`        VARCHAR(36)  COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `mb_release_group` VARCHAR(36) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `needs_review` TINYINT(1) NOT NULL DEFAULT 0
                  COMMENT 'Set to 1 when scanner metadata needs manual verification',
   `review_note` VARCHAR(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL
@@ -139,6 +147,7 @@ CREATE TABLE `albums` (
   KEY `idx_album_format` (`format_id`),
   KEY `idx_album_year` (`year`),
   KEY `idx_album_title` (`title`),
+  KEY `idx_albums_mb_release_group` (`mb_release_group`),
   KEY `fk_album_genre` (`genre_id`),
   KEY `fk_album_label` (`label_id`),
   KEY `idx_album_needs_review` (`needs_review`),
