@@ -1405,8 +1405,8 @@ class AlbumController
   //  2) MBID diversi NON bastano a distinguere due album se arrivano dal
   //     lookup automatico: Them Crooked Vultures ha prodotto due release MBID
   //     diversi ma stesso RG, titolo, anno e tracklist;
-  //  3) se l'utente sceglie esplicitamente un'altra release nel pannello
-  //     Edizioni, due MBID diversi possono rappresentare schede distinte;
+  //  3) una release scelta esplicitamente NON e' automaticamente distinta:
+  //     MBID diversi restano compatibili finche' anno e tracklist coincidono;
   //  4) release-group uguale = informazione di famiglia, non duplicato da solo;
   //  5) nel fallback titolo-base/hint, anno e tracklist sono tutti obbligatori.
   // ----------------------------------------------------------
@@ -1505,16 +1505,6 @@ class AlbumController
       // MusicBrainz contraddice il match locale.
       if ($releaseGroup !== '' && $candGroup !== ''
           && !hash_equals($releaseGroup, $candGroup)) {
-        continue;
-      }
-
-      // Due release MBID diversi possono essere una seconda edizione reale,
-      // ma soltanto quando l'utente l'ha scelta esplicitamente. Se invece
-      // l'MBID e' arrivato dal lookup automatico, continuiamo le verifiche
-      // locali: MusicBrainz puo' scegliere release differenti dello stesso RG.
-      if ($mbid !== '' && $candMbid !== ''
-          && !hash_equals($mbid, $candMbid)
-          && $releaseExplicit) {
         continue;
       }
 
