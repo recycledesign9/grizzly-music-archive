@@ -44,6 +44,12 @@ class SettingsController
             case 'worker-start':
                 $this->startWorker();
                 break;
+            case 'add-scan-exclusion':
+                $this->addScanExclusion();
+                break;
+            case 'remove-scan-exclusion':
+                $this->removeScanExclusion();
+                break;
             case 'ignored-list':
                 $this->ignoredMediaSourcesList();
                 break;
@@ -117,7 +123,14 @@ class SettingsController
         $mediaScanWorkerAlive = (bool)$mediaScanWorker['alive'];
         $mediaScanWorkerHeartbeatAge = $mediaScanWorker['heartbeat_age'];
 
-        // Nella pagina Settings carichiamo soltanto il conteggio.
+        // Directory configurate esplicitamente come escluse dalla scansione.
+        // Sono regole di configurazione e restano separate dai tombstone
+        // media_scan_ignored generati quando un album external viene eliminato.
+        $scanExclusionService = new MediaScanExclusionService($db);
+        $excludedScanPaths = $scanExclusionService->listAll();
+        $excludedScanPathsCount = count($excludedScanPaths);
+
+        // Nella pagina Settings carichiamo soltanto il conteggio dei tombstone.
         // L'elenco completo viene richiesto via AJAX con ricerca e paginazione,
         // così anche migliaia di tombstone non appesantiscono il rendering.
         $ignoredMediaSourcesCount = (int)$db
@@ -491,6 +504,127 @@ class SettingsController
             exit;
         }
     }
+
+    // ----------------------------------------------------------
+    // SCANNER MEDIA: aggiunge una directory esclusa dalla discovery.
+    // POST /index.php?route=settings/add-scan-exclusion
+    // ----------------------------------------------------------
+    private function addScanExclusion(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['ok' => false, 'message' => 'Metodo non consentito.']);
+            exit;
+        }
+
+        $sessionToken = (string)($_SESSION['csrf_token'] ?? '');
+        $postedToken  = (string)($_POST['csrf_token'] ?? '');
+        if ($sessionToken === '' || $postedToken === '' || !hash_equals($sessionToken, $postedToken)) {
+            http_response_code(403);
+            echo json_encode(['ok' => false, 'message' => 'Token CSRF non valido. Ricarica la pagina e riprova.']);
+            exit;
+        }
+
+        $path = trim((string)($_POST['path'] ?? ''));
+
+        try {
+            $db = Database::getInstance();
+
+            $stmt = $db->prepare("SELECT `value` FROM settings WHERE `key` = 'media_scan_path' LIMIT 1");
+            $stmt->execute();
+            $watchedRoot = trim((string)($stmt->fetchColumn() ?: ''));
+
+            $service = new MediaScanExclusionService($db);
+            $result = $service->add($path, $watchedRoot);
+
+            if (!$result['ok']) {
+                http_response_code(422);
+                echo json_encode([
+                    'ok' => false,
+                    'message' => $result['message'],
+                ]);
+                exit;
+            }
+
+            echo json_encode([
+                'ok' => true,
+                'message' => $result['message'],
+                'warning' => $result['warning'],
+                'row' => $result['row'],
+                'rows' => $service->listAll(),
+                'count' => $service->count(),
+            ]);
+            exit;
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode([
+                'ok' => false,
+                'message' => 'Errore durante il salvataggio della cartella esclusa.'
+                    . (defined('DEBUG') && DEBUG ? ' ' . $e->getMessage() : ''),
+            ]);
+            exit;
+        }
+    }
+
+    // ----------------------------------------------------------
+    // SCANNER MEDIA: rimuove una directory esclusa dalla discovery.
+    // POST /index.php?route=settings/remove-scan-exclusion
+    // ----------------------------------------------------------
+    private function removeScanExclusion(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['ok' => false, 'message' => 'Metodo non consentito.']);
+            exit;
+        }
+
+        $sessionToken = (string)($_SESSION['csrf_token'] ?? '');
+        $postedToken  = (string)($_POST['csrf_token'] ?? '');
+        if ($sessionToken === '' || $postedToken === '' || !hash_equals($sessionToken, $postedToken)) {
+            http_response_code(403);
+            echo json_encode(['ok' => false, 'message' => 'Token CSRF non valido. Ricarica la pagina e riprova.']);
+            exit;
+        }
+
+        $id = (int)($_POST['id'] ?? 0);
+        if ($id <= 0) {
+            http_response_code(422);
+            echo json_encode(['ok' => false, 'message' => 'Cartella esclusa non valida.']);
+            exit;
+        }
+
+        try {
+            $db = Database::getInstance();
+            $service = new MediaScanExclusionService($db);
+
+            if (!$service->remove($id)) {
+                http_response_code(404);
+                echo json_encode(['ok' => false, 'message' => 'Cartella esclusa non trovata.']);
+                exit;
+            }
+
+            echo json_encode([
+                'ok' => true,
+                'message' => 'Cartella rimossa dalle esclusioni.',
+                'rows' => $service->listAll(),
+                'count' => $service->count(),
+            ]);
+            exit;
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode([
+                'ok' => false,
+                'message' => 'Errore durante la rimozione della cartella esclusa.'
+                    . (defined('DEBUG') && DEBUG ? ' ' . $e->getMessage() : ''),
+            ]);
+            exit;
+        }
+    }
+
 
     // ----------------------------------------------------------
     // SCANNER MEDIA: elenco paginato delle directory ignorate.

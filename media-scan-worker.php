@@ -662,6 +662,7 @@ $stopReason = '';
 $exitCode = 0;
 
 $service = new MediaImportService();
+$exclusionService = new MediaScanExclusionService($db);
 $state   = loadWorkerState($stateFile);
 $lastNotice = null;
 $lastActiveConfiguredPath = null;
@@ -818,6 +819,19 @@ while (true) {
 
     if (!isset($state['albums']) || !is_array($state['albums'])) {
         $state['albums'] = [];
+    }
+
+    // Le esclusioni configurate sono subtree veri. Prima della discovery
+    // eliminiamo dallo state eventuali PENDING/WAIT/DEFER storici che ricadono
+    // in una directory ora esclusa: non devono più essere seguiti dal worker.
+    $excludedRuntimeRoots = $exclusionService->runtimeExcludedRoots($realImport);
+    if (!empty($excludedRuntimeRoots) && !empty($state['albums'])) {
+        foreach (array_keys($state['albums']) as $knownAlbumKey) {
+            if (MediaScanExclusionService::pathInAnySubtree((string)$knownAlbumKey, $excludedRuntimeRoots)) {
+                unset($state['albums'][$knownAlbumKey]);
+                workerLog('[EXCLUDED] Stato scanner rimosso: ' . $knownAlbumKey);
+            }
+        }
     }
 
     $now        = time();

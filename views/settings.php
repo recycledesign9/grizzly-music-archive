@@ -13,6 +13,8 @@ require BASE_PATH . '/views/layout/header.php';
 /** @var int|null $mediaScanWorkerHeartbeatAge */
 /** @var array  $mediaScanWorker  stato da MediaScanWorkerSupervisor::status() */
 /** @var array  $ignoredMediaSources */
+/** @var array  $excludedScanPaths */
+/** @var int    $excludedScanPathsCount */
 
 $defaultAudioPath = defined('AUDIO_PATH') ? AUDIO_PATH : BASE_PATH . '/public/uploads/audio';
 $mediaScanWorker  = is_array($mediaScanWorker ?? null) ? $mediaScanWorker : [
@@ -22,6 +24,8 @@ $mediaScanWorker  = is_array($mediaScanWorker ?? null) ? $mediaScanWorker : [
 $mediaScanWorkerMode  = (string)($mediaScanWorker['mode'] ?? 'managed');
 $mediaScanWorkerState = (string)($mediaScanWorker['state'] ?? 'stopped');
 $ignoredCount     = (int)($ignoredMediaSourcesCount ?? 0);
+$excludedScanPaths = is_array($excludedScanPaths ?? null) ? $excludedScanPaths : [];
+$excludedScanPathsCount = (int)($excludedScanPathsCount ?? count($excludedScanPaths));
 
 /** @var array $externalApiServices */
 $externalApiServices = is_array($externalApiServices ?? null) ? $externalApiServices : [];
@@ -411,6 +415,76 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
               </button>
               <span id="mediaScanSaveResult" class="small"></span>
             </div>
+          </div>
+        </div>
+
+        <div class="grz-set__row" id="excludedScanPathsBlock">
+          <div class="grz-set__label">
+            <h3>Cartelle escluse <span class="badge bg-secondary" id="excludedScanPathsCount"><?= $excludedScanPathsCount ?></span></h3>
+            <p>Grizzly ignora queste cartelle e tutto ciò che contengono. Usale per directory temporanee, download in corso o contenuti che non vuoi indicizzare.</p>
+          </div>
+          <div class="grz-set__control">
+            <label for="mediaScanExcludedPath" class="form-label">Nuova cartella esclusa</label>
+            <div class="input-group">
+              <button class="btn btn-outline-secondary" type="button" id="btnBrowseExcluded" title="Sfoglia cartelle" aria-label="Sfoglia cartelle">
+                <i class="bi bi-folder2-open" aria-hidden="true"></i>
+              </button>
+              <input type="text"
+                id="mediaScanExcludedPath"
+                class="form-control font-monospace"
+                placeholder="Percorso dentro la cartella da scansionare"
+                autocomplete="off"
+                spellcheck="false">
+              <button type="button" class="btn btn-outline-warning" id="btnAddScanExcluded">
+                <i class="bi bi-plus-lg me-1" aria-hidden="true"></i>Aggiungi
+              </button>
+            </div>
+            <div class="form-text">
+              Il percorso deve trovarsi all'interno della cartella configurata per la scansione. Puoi aggiungerlo anche se la cartella non esiste ancora.
+            </div>
+
+            <div id="dirBrowserExcluded" class="d-none mt-3">
+              <div class="card border">
+                <div class="card-header py-2 d-flex align-items-center justify-content-between">
+                  <span class="small fw-semibold"><i class="bi bi-folder2-open me-1" aria-hidden="true"></i>Sfoglia cartelle</span>
+                  <button type="button" class="btn-close btn-sm" id="btnCloseBrowserExcluded" aria-label="Chiudi"></button>
+                </div>
+                <div class="card-body p-0">
+                  <div id="browserCurrentPathExcluded" class="px-3 py-2 bg-body-secondary text-body small border-bottom"></div>
+                  <div id="browserListExcluded" style="max-height:280px;overflow-y:auto"></div>
+                </div>
+                <div class="card-footer py-2 d-flex gap-2">
+                  <button type="button" class="btn btn-sm btn-warning" id="btnSelectExcludedDir">
+                    <i class="bi bi-check-lg me-1" aria-hidden="true"></i>Usa questa cartella
+                  </button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" id="btnCancelBrowserExcluded">Annulla</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="excludedScanResult" class="small mt-2"></div>
+
+            <div class="list-group list-group-flush border rounded mt-3" id="excludedScanPathsList">
+              <?php if (empty($excludedScanPaths)): ?>
+                <div class="list-group-item small text-muted fst-italic">Nessuna cartella esclusa.</div>
+              <?php else: ?>
+                <?php foreach ($excludedScanPaths as $excluded): ?>
+                  <div class="list-group-item d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-2">
+                    <div class="font-monospace small text-break"><?= htmlspecialchars((string)($excluded['source_path'] ?? ''), ENT_QUOTES, 'UTF-8') ?></div>
+                    <button type="button"
+                      class="btn btn-sm btn-outline-danger flex-shrink-0 btn-remove-scan-excluded"
+                      data-id="<?= (int)($excluded['id'] ?? 0) ?>">
+                      <i class="bi bi-trash3 me-1" aria-hidden="true"></i>Rimuovi
+                    </button>
+                  </div>
+                <?php endforeach; ?>
+              <?php endif; ?>
+            </div>
+
+            <details class="grz-set__more">
+              <summary>Differenza dalle cartelle ignorate</summary>
+              <p>Le cartelle escluse sono una configurazione preventiva: lo scanner non le attraversa. Le cartelle ignorate qui sotto sono invece tombstone creati quando elimini dall'archivio un album external lasciando la sorgente sul disco.</p>
+            </details>
           </div>
         </div>
 
@@ -1582,6 +1656,150 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       };
     }
 
+    // ── Directory escluse dalla discovery scanner ───────────────
+    var excludedScanInput = document.getElementById('mediaScanExcludedPath');
+    var btnAddScanExcluded = document.getElementById('btnAddScanExcluded');
+    var excludedScanList = document.getElementById('excludedScanPathsList');
+    var excludedScanResult = document.getElementById('excludedScanResult');
+    var excludedScanCount = document.getElementById('excludedScanPathsCount');
+
+    function renderExcludedScanRows(rows) {
+      if (!excludedScanList) return;
+
+      rows = Array.isArray(rows) ? rows : [];
+
+      if (excludedScanCount) {
+        excludedScanCount.textContent = String(rows.length);
+      }
+
+      if (rows.length === 0) {
+        excludedScanList.innerHTML =
+          '<div class="list-group-item small text-muted fst-italic">Nessuna cartella esclusa.</div>';
+        return;
+      }
+
+      excludedScanList.innerHTML = rows.map(function(row) {
+        return '' +
+          '<div class="list-group-item d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-2">' +
+            '<div class="font-monospace small text-break">' + escHtml(row.source_path || '') + '</div>' +
+            '<button type="button" class="btn btn-sm btn-outline-danger flex-shrink-0 btn-remove-scan-excluded" data-id="' +
+              String(parseInt(row.id, 10) || 0) + '">' +
+              '<i class="bi bi-trash3 me-1"></i>Rimuovi' +
+            '</button>' +
+          '</div>';
+      }).join('');
+    }
+
+    function addScanExcludedPath() {
+      if (!btnAddScanExcluded || !excludedScanInput) return;
+
+      var path = excludedScanInput.value.trim();
+      if (!path) {
+        if (excludedScanResult) {
+          excludedScanResult.className = 'small mt-2 text-danger';
+          excludedScanResult.innerHTML =
+            '<i class="bi bi-x-circle me-1"></i>Inserisci una cartella da escludere.';
+        }
+        return;
+      }
+
+      var originalHtml = btnAddScanExcluded.innerHTML;
+      btnAddScanExcluded.disabled = true;
+      btnAddScanExcluded.innerHTML =
+        '<span class="spinner-border spinner-border-sm me-1"></span>Salvataggio…';
+
+      postJSON(
+        BASE_URL + '/index.php?route=settings/add-scan-exclusion',
+        { path: path },
+        function(data) {
+          btnAddScanExcluded.disabled = false;
+          btnAddScanExcluded.innerHTML = originalHtml;
+
+          if (!data.ok) {
+            if (excludedScanResult) {
+              excludedScanResult.className = 'small mt-2 text-danger';
+              excludedScanResult.innerHTML =
+                '<i class="bi bi-x-circle me-1"></i>' +
+                escHtml(data.message || 'Errore nel salvataggio.');
+            }
+            return;
+          }
+
+          renderExcludedScanRows(data.rows || []);
+          excludedScanInput.value = '';
+
+          if (excludedScanResult) {
+            if (data.warning) {
+              excludedScanResult.className = 'small mt-2 text-warning-emphasis';
+              excludedScanResult.innerHTML =
+                '<i class="bi bi-exclamation-triangle me-1"></i>' +
+                escHtml(data.warning);
+            } else {
+              excludedScanResult.className = 'small mt-2 text-success';
+              excludedScanResult.innerHTML =
+                '<i class="bi bi-check-circle me-1"></i>' +
+                escHtml(data.message || 'Cartella esclusa.');
+            }
+          }
+        }
+      );
+    }
+
+    if (btnAddScanExcluded) {
+      btnAddScanExcluded.addEventListener('click', addScanExcludedPath);
+    }
+
+    if (excludedScanInput) {
+      excludedScanInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          addScanExcludedPath();
+        }
+      });
+    }
+
+    if (excludedScanList) {
+      excludedScanList.addEventListener('click', function(e) {
+        var btn = e.target.closest('.btn-remove-scan-excluded');
+        if (!btn) return;
+
+        var id = parseInt(btn.getAttribute('data-id'), 10) || 0;
+        if (id <= 0) return;
+
+        var originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Rimozione…';
+
+        postJSON(
+          BASE_URL + '/index.php?route=settings/remove-scan-exclusion',
+          { id: String(id) },
+          function(data) {
+            if (!data.ok) {
+              btn.disabled = false;
+              btn.innerHTML = originalHtml;
+
+              if (excludedScanResult) {
+                excludedScanResult.className = 'small mt-2 text-danger';
+                excludedScanResult.innerHTML =
+                  '<i class="bi bi-x-circle me-1"></i>' +
+                  escHtml(data.message || 'Errore nella rimozione.');
+              }
+              return;
+            }
+
+            renderExcludedScanRows(data.rows || []);
+
+            if (excludedScanResult) {
+              excludedScanResult.className = 'small mt-2 text-success';
+              excludedScanResult.innerHTML =
+                '<i class="bi bi-check-circle me-1"></i>' +
+                escHtml(data.message || 'Cartella rimossa dalle esclusioni.');
+            }
+          }
+        );
+      });
+    }
+
     // ── Gestione paginata cartelle ignorate ─────────────────────
     var ignoredManager = document.getElementById('ignoredMediaManager');
     var btnManageIgnored = document.getElementById('btnManageIgnored');
@@ -2197,12 +2415,15 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
     // Le richieste precedenti vengono annullate: una risposta lenta non può
     // più ridisegnare il browser dopo che l'utente è già entrato altrove.
     var currentBrowsePath = '';
-    var currentBrowserTarget = 'audio'; // 'audio' | 'migrate' | 'scan'
+    var currentBrowserTarget = 'audio'; // 'audio' | 'migrate' | 'scan' | 'excluded'
     var browserRequestId = 0;
     var browserAbortController = null;
 
     function browserElements(target) {
-      var suffix = target === 'migrate' ? 'Migrate' : (target === 'scan' ? 'Scan' : '');
+      var suffix =
+        target === 'migrate' ? 'Migrate' :
+        (target === 'scan' ? 'Scan' :
+        (target === 'excluded' ? 'Excluded' : ''));
 
       return {
         browser: document.getElementById('dirBrowser' + suffix),
@@ -2210,7 +2431,8 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
         path: document.getElementById('browserCurrentPath' + suffix),
         select: document.getElementById(
           target === 'migrate' ? 'btnSelectMigrateDir' :
-          (target === 'scan' ? 'btnSelectScanDir' : 'btnSelectThisDir')
+          (target === 'scan' ? 'btnSelectScanDir' :
+          (target === 'excluded' ? 'btnSelectExcludedDir' : 'btnSelectThisDir'))
         )
       };
     }
@@ -2225,6 +2447,8 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
         document.getElementById('migrateTargetInput').value = path;
       } else if (target === 'scan') {
         document.getElementById('mediaScanPath').value = path;
+      } else if (target === 'excluded') {
+        document.getElementById('mediaScanExcludedPath').value = path;
       } else {
         document.getElementById('audioPathInput').value = path;
       }
@@ -2410,7 +2634,7 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
           // Per audio e migrazione la cartella deve essere scrivibile.
           // Lo scanner invece ha bisogno soltanto di leggerla.
           if (els.select) {
-            var needsWrite = targetAtRequest !== 'scan';
+            var needsWrite = targetAtRequest !== 'scan' && targetAtRequest !== 'excluded';
             var writable = data.current_writable !== false;
             els.select.disabled = needsWrite && !writable;
             els.select.title = needsWrite && !writable
@@ -2486,6 +2710,33 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       btnSelectScanDir.onclick = function() {
         setBrowserTargetValue('scan', currentBrowsePath);
         closeBrowser('scan');
+      };
+    }
+
+    // Directory escluse dalla scansione
+    var btnBrowseExcluded = document.getElementById('btnBrowseExcluded');
+    if (btnBrowseExcluded) {
+      btnBrowseExcluded.onclick = function() {
+        currentBrowserTarget = 'excluded';
+        var current = document.getElementById('mediaScanExcludedPath').value.trim();
+        var watchedRoot = document.getElementById('mediaScanPath').value.trim();
+        openBrowser(current || watchedRoot || '');
+      };
+    }
+
+    var btnCloseBrowserExcluded = document.getElementById('btnCloseBrowserExcluded');
+    var btnCancelBrowserExcluded = document.getElementById('btnCancelBrowserExcluded');
+    if (btnCloseBrowserExcluded && btnCancelBrowserExcluded) {
+      btnCloseBrowserExcluded.onclick = btnCancelBrowserExcluded.onclick = function() {
+        closeBrowser('excluded');
+      };
+    }
+
+    var btnSelectExcludedDir = document.getElementById('btnSelectExcludedDir');
+    if (btnSelectExcludedDir) {
+      btnSelectExcludedDir.onclick = function() {
+        setBrowserTargetValue('excluded', currentBrowsePath);
+        closeBrowser('excluded');
       };
     }
 

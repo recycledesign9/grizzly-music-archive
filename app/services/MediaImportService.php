@@ -216,8 +216,18 @@ class MediaImportService
      */
     private function discoverAlbums(string $importDir): array
     {
+        // Le directory escluse vengono applicate DURANTE la discovery: il
+        // walker non entra nel sottoalbero, quindi file parziali/non definitivi
+        // non arrivano mai alla stability window né al matcher album.
+        if (!class_exists('MediaScanExclusionService')) {
+            require_once __DIR__ . '/MediaScanExclusionService.php';
+        }
+
+        $exclusionService = new MediaScanExclusionService($this->db);
+        $excludedRuntimeRoots = $exclusionService->runtimeExcludedRoots($importDir);
+
         $candidates = [];
-        foreach ($this->allDirectories($importDir) as $dir) {
+        foreach ($this->allDirectories($importDir, $excludedRuntimeRoots) as $dir) {
             if (count($this->listByExt($dir, self::AUDIO_EXT)) > 0) {
                 $candidates[] = $dir;
             }
@@ -253,8 +263,16 @@ class MediaImportService
     /**
      * Tutte le directory sotto $root (inclusa $root), senza symlink/nascoste.
      */
-    private function allDirectories(string $root): array
+    private function allDirectories(string $root, array $excludedRuntimeRoots = []): array
     {
+        $root = rtrim(str_replace('\\', '/', $root), '/');
+
+        // Guardia supplementare per chiamate dirette/CLI: una root che ricade
+        // dentro un'esclusione non deve essere attraversata.
+        if (MediaScanExclusionService::pathInAnySubtree($root, $excludedRuntimeRoots)) {
+            return [];
+        }
+
         $out   = [$root];
         $stack = [$root];
 
@@ -276,6 +294,14 @@ class MediaImportService
                     continue; // niente symlink, evita loop
                 }
                 if (is_dir($path)) {
+                    $path = rtrim(str_replace('\\', '/', $path), '/');
+
+                    // PRUNE vero: non aggiungere la directory e soprattutto
+                    // non inserirla nello stack da esplorare.
+                    if (MediaScanExclusionService::pathInAnySubtree($path, $excludedRuntimeRoots)) {
+                        continue;
+                    }
+
                     $out[]   = $path;
                     $stack[] = $path;
                 }

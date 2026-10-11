@@ -30,6 +30,7 @@ DROP TABLE IF EXISTS `formats`;
 DROP TABLE IF EXISTS `genres`;
 DROP TABLE IF EXISTS `labels`;
 DROP TABLE IF EXISTS `media_scan_ignored`;
+DROP TABLE IF EXISTS `media_scan_excluded`;
 DROP TABLE IF EXISTS `settings`;
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -288,6 +289,21 @@ CREATE TABLE `media_scan_ignored` (
   `created_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_media_scan_ignored_hash` (`path_hash`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Table: media_scan_excluded
+-- Configurable scanner exclusions.
+-- The scanner must not enter these directories or any descendant.
+-- Kept separate from media_scan_ignored, which stores deletion tombstones.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE `media_scan_excluded` (
+  `id`          INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `path_hash`   CHAR(40) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `source_path` VARCHAR(1000) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `created_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_media_scan_excluded_hash` (`path_hash`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ─────────────────────────────────────────────────────────────────────────────
