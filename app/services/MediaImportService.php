@@ -663,7 +663,12 @@ class MediaImportService
             if ($existing && !empty($existing['id'])) {
                 $dryAlbumId = (int)$existing['id'];
                 $dryExistingTracks = $this->uniqueTrackRows($trackModel->getByAlbum($dryAlbumId));
-                $dryTrackMap = $this->matchExistingTracks($tracks, $dryExistingTracks);
+                $dryTrackMap = $this->matchExistingTracksForAlbumContext(
+                    $tracks,
+                    $dryExistingTracks,
+                    $title,
+                    (string)($existing['title'] ?? '')
+                );
             }
 
             foreach ($tracks as $idx => $t) {
@@ -789,7 +794,12 @@ class MediaImportService
                 $existingTracks = $this->uniqueTrackRows($trackModel->getByAlbum($albumId));
             }
 
-            $trackMap = $this->matchExistingTracks($tracks, $existingTracks);
+            $trackMap = $this->matchExistingTracksForAlbumContext(
+                $tracks,
+                $existingTracks,
+                $title,
+                (string)($existing['title'] ?? '')
+            );
 
             // Riparazione incrementale di una tracklist creata dallo scanner ma
             // rimasta incompleta perche' la watched folder era stata importata
@@ -825,7 +835,12 @@ class MediaImportService
 
                 $trackModel->saveTracklist($albumId, $tl);
                 $existingTracks = $this->uniqueTrackRows($trackModel->getByAlbum($albumId));
-                $trackMap = $this->matchExistingTracks($tracks, $existingTracks);
+                $trackMap = $this->matchExistingTracksForAlbumContext(
+                    $tracks,
+                    $existingTracks,
+                    $title,
+                    (string)($existing['title'] ?? '')
+                );
 
                 // Rimuove l'eventuale vecchia nota "N tracce non associate..."
                 // riscrivendo la review corrente calcolata dai metadati.
@@ -1778,6 +1793,177 @@ class MediaImportService
         return true;
     }
 
+    /**
+     * Estrae il qualificatore editoriale finale da un titolo traccia, ad esempio
+     * "The 2025 Remixes" da "Waves (The 2025 Remixes)".
+     *
+     * Ritorna una chiave normalizzata oppure stringa vuota se il titolo non ha
+     * un qualificatore finale tra parentesi tonde o quadre.
+     */
+    private function scannerTrailingQualifierKey(string $title): string
+    {
+        $title = trim($title);
+        if ($title === '') {
+            return '';
+        }
+
+        if (!preg_match('/\s*[\(\[]([^\)\]]+)[\)\]]\s*$/u', $title, $m)) {
+            return '';
+        }
+
+        return $this->normTrackTitle((string)$m[1]);
+    }
+
+    /**
+     * Rimuove il qualificatore finale soltanto quando coincide con quello atteso.
+     * Non modifica mai il valore persistito: viene usato solo su copie temporanee
+     * delle tracce durante il matching strutturale.
+     */
+    private function stripScannerTrailingQualifier(string $title, string $qualifierKey): string
+    {
+        $title = trim($title);
+        if ($title === '' || $qualifierKey === '') {
+            return $title;
+        }
+
+        if (!preg_match('/^(.*?)(?:\s*[\(\[]([^\)\]]+)[\)\]])\s*$/u', $title, $m)) {
+            return $title;
+        }
+
+        if ($this->normTrackTitle((string)$m[2]) !== $qualifierKey) {
+            return $title;
+        }
+
+        $base = trim((string)$m[1]);
+        return $base !== '' ? $base : $title;
+    }
+
+    /**
+     * Fallback strettamente editoriale per varianti di tracklist.
+     *
+     * Viene accettato soltanto se:
+     *   - scanner e archivio hanno lo stesso numero di tracce;
+     *   - TUTTE le tracce scanner espongono lo stesso qualificatore finale
+     *     (dal tag oppure dal filename);
+     *   - quel qualificatore compare sia nel titolo album scanner sia nel titolo
+     *     album gia' presente;
+     *   - rimosso solo quel qualificatore su copie temporanee, la tracklist viene
+     *     associata completamente 1:1 dal matcher gia' esistente.
+     *
+     * Serve per casi come:
+     *   "Waves (The 2025 Remixes)" <-> "Waves"
+     * quando entrambe le schede album dichiarano "The 2025 Remixes".
+     */
+    private function scannerEditionTrackMap(
+        array $scannedTracks,
+        array $existingTracks,
+        string $scannedAlbumTitle,
+        string $candidateAlbumTitle
+    ): array {
+        $scannedTracks  = array_values($scannedTracks);
+        $existingTracks = array_values($existingTracks);
+
+        $count = count($scannedTracks);
+        if ($count === 0 || $count !== count($existingTracks)) {
+            return [];
+        }
+
+        $qualifierKey = '';
+        foreach ($scannedTracks as $track) {
+            $q = $this->scannerTrailingQualifierKey((string)($track['title'] ?? ''));
+            if ($q === '') {
+                $q = $this->scannerTrailingQualifierKey((string)($track['filename_title'] ?? ''));
+            }
+            if ($q === '') {
+                return [];
+            }
+            if ($qualifierKey === '') {
+                $qualifierKey = $q;
+            } elseif ($q !== $qualifierKey) {
+                return [];
+            }
+        }
+
+        if ($qualifierKey === '') {
+            return [];
+        }
+
+        $scannerAlbumKey   = $this->normTrackTitle($scannedAlbumTitle);
+        $candidateAlbumKey = $this->normTrackTitle($candidateAlbumTitle);
+
+        if ($scannerAlbumKey === '' || $candidateAlbumKey === ''
+            || strpos($scannerAlbumKey, $qualifierKey) === false
+            || strpos($candidateAlbumKey, $qualifierKey) === false) {
+            return [];
+        }
+
+        $normalizedTracks = [];
+        foreach ($scannedTracks as $track) {
+            $copy = $track;
+            $copy['title'] = $this->stripScannerTrailingQualifier(
+                (string)($track['title'] ?? ''),
+                $qualifierKey
+            );
+            $copy['filename_title'] = $this->stripScannerTrailingQualifier(
+                (string)($track['filename_title'] ?? ''),
+                $qualifierKey
+            );
+            $normalizedTracks[] = $copy;
+        }
+
+        $map = $this->matchExistingTracks($normalizedTracks, $existingTracks);
+        return count($map) === $count ? $map : [];
+    }
+
+    private function scannerTracklistsEditionEquivalent(
+        array $scannedTracks,
+        array $existingTracks,
+        string $scannedAlbumTitle,
+        string $candidateAlbumTitle
+    ): bool {
+        $count = count($scannedTracks);
+        if ($count === 0) {
+            return false;
+        }
+
+        return count($this->scannerEditionTrackMap(
+            $scannedTracks,
+            $existingTracks,
+            $scannedAlbumTitle,
+            $candidateAlbumTitle
+        )) === $count;
+    }
+
+    /**
+     * Una volta che l'album e' stato riconosciuto, riusa lo stesso fallback
+     * editoriale anche per associare gli audio alle tracce esistenti.
+     *
+     * Il matcher generale resta invariato. Il fallback viene accettato soltanto
+     * se produce una mappa completa 1:1 secondo le stesse regole conservative
+     * usate dall'identita' album.
+     */
+    private function matchExistingTracksForAlbumContext(
+        array $scannedTracks,
+        array $existingTracks,
+        string $scannedAlbumTitle,
+        string $candidateAlbumTitle
+    ): array {
+        $map = $this->matchExistingTracks($scannedTracks, $existingTracks);
+
+        if (!empty($scannedTracks) && count($map) === count($scannedTracks)) {
+            return $map;
+        }
+
+        $editionMap = $this->scannerEditionTrackMap(
+            $scannedTracks,
+            $existingTracks,
+            $scannedAlbumTitle,
+            $candidateAlbumTitle
+        );
+
+        return !empty($editionMap) ? $editionMap : $map;
+    }
+
     private function findScannerAlbumCandidate(
         int $artistId,
         string $artistName,
@@ -1899,12 +2085,9 @@ class MediaImportService
                 && $candidateGroup !== ''
                 && hash_equals($releaseGroup, $candidateGroup);
 
-            if (!$exactRelease
-                && $releaseGroup !== ''
-                && $candidateGroup !== ''
-                && !$sameGroupCandidate) {
-                continue;
-            }
+            // Un release-group differente non viene scartato prima di leggere
+            // la tracklist. L'eventuale eccezione cross-group viene valutata piu'
+            // avanti con un controllo editoriale completo e molto restrittivo.
 
             $sameTitleBase = $titleBaseKey !== ''
                 && $this->scannerAlbumBaseKey((string)($row['title'] ?? '')) === $titleBaseKey;
@@ -1921,13 +2104,16 @@ class MediaImportService
             $trackRatio = null;
             $trackCountRatio = null;
             $fullTrackMatch = false;
+            $editionTrackMatch = false;
             $strictTrackMatch = $this->scannerTracklistsExactlyEquivalent($scannedTracks, $existingTracks);
             if (!empty($existingTracks) && !empty($scannedTracks)) {
                 $map = $this->matchExistingTracks($scannedTracks, $existingTracks);
+
                 $existingCount = count($existingTracks);
                 $scannedCount = count($scannedTracks);
                 $minCount = min($existingCount, $scannedCount);
                 $maxCount = max($existingCount, $scannedCount);
+
                 if ($minCount > 0) {
                     $matched = count($map);
                     $required = $minCount <= 2 ? $minCount : (int)ceil($minCount * 0.60);
@@ -1935,7 +2121,28 @@ class MediaImportService
                     $trackCountRatio = $maxCount > 0 ? ($minCount / $maxCount) : null;
                     $fullTrackMatch = $existingCount === $scannedCount
                         && $matched === $existingCount;
-                    if (!$exactRelease && $matched < $required) {
+
+                    // Fallback editoriale, valutato soltanto se i matcher ordinari
+                    // non hanno gia' riconosciuto l'intera tracklist. E' indipendente
+                    // dal release-group (vuoto, uguale o diverso) e non modifica le
+                    // soglie del matcher generale: rimuove solo un qualificatore
+                    // editoriale comune a TUTTE le tracce e presente in entrambi i
+                    // titoli album (es. "The 2025 Remixes").
+                    if (!$strictTrackMatch
+                        && !$fullTrackMatch
+                        && $sameTitleBase) {
+                        $editionTrackMatch = $this->scannerTracklistsEditionEquivalent(
+                            $scannedTracks,
+                            $existingTracks,
+                            $title,
+                            (string)($row['title'] ?? '')
+                        );
+                    }
+
+                    // Se il fallback editoriale ha verificato l'intera tracklist 1:1,
+                    // non scartare il candidato soltanto perche' il matcher ordinario
+                    // resta sotto la soglia minima.
+                    if (!$exactRelease && $matched < $required && !$editionTrackMatch) {
                         continue;
                     }
                 }
@@ -1965,7 +2172,7 @@ class MediaImportService
                 // / "The White Album") e tracklist manuali piu' descrittive,
                 // senza rendere il release-group, da solo, una prova sufficiente
                 // di identita'.
-                $structuralTrackMatch = $strictTrackMatch || $fullTrackMatch;
+                $structuralTrackMatch = $strictTrackMatch || $fullTrackMatch || $editionTrackMatch;
 
                 $structuralIdentity = $structuralTrackMatch
                     && $yearDiff !== null
@@ -1976,8 +2183,14 @@ class MediaImportService
                     continue;
                 }
 
-                // Se entrambi i release-group sono noti e diversi, non unire.
-                if ($releaseGroup !== '' && $candidateGroup !== '' && !$sameGroupCandidate) {
+                // Release-group diversi restano normalmente un veto.
+                // L'unica eccezione e' il caso editoriale verificato sopra:
+                // stesso titolo-base, anno identico, stesso numero di tracce,
+                // qualificatore comune all'intera tracklist e match 1:1 completo.
+                if ($releaseGroup !== ''
+                    && $candidateGroup !== ''
+                    && !$sameGroupCandidate
+                    && !$editionTrackMatch) {
                     continue;
                 }
             }
@@ -1990,7 +2203,7 @@ class MediaImportService
             }
             if ($strictTrackMatch) {
                 $score += 100.0;
-            } elseif ($fullTrackMatch) {
+            } elseif ($fullTrackMatch || $editionTrackMatch) {
                 $score += 80.0;
             } elseif ($trackRatio !== null) {
                 $score += 40.0 * $trackRatio;
@@ -2015,6 +2228,7 @@ class MediaImportService
                 'row'                     => $row,
                 'score'                   => $score,
                 'full_track_match'        => $fullTrackMatch,
+                'edition_track_match'     => $editionTrackMatch,
                 'strict_track_match'      => $strictTrackMatch,
                 'exact_release'           => $exactRelease,
                 'different_known_release' => $differentKnownRelease,
