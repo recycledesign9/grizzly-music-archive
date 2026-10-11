@@ -15,7 +15,10 @@ class AlbumMetadataService
     // v3: un album doppio (White Album) resta l'originale anche quando
     // esistono stampe a disco singolo che ne contengono solo una parte
     // (Vol. 1 / Vol. 2); le stampe parziali non fanno comparire l'elenco.
-    private const EDITIONS_LOGIC_VERSION = 3;
+    // v4: cleanTracks() non scarta piu' le tracce quando l'annotazione
+    // riguarda la maggioranza della tracklist (album di remix: tutte le
+    // tracce "(The 2025 remixes)" venivano eliminate per la parola "mix").
+    private const EDITIONS_LOGIC_VERSION = 4;
 
     // Durata della cache delle edizioni: il catalogo di un album cambia
     // di rado, ma nuove ristampe vengono aggiunte a MusicBrainz nel tempo.
@@ -892,10 +895,17 @@ class AlbumMetadataService
         string $album,
         int $year = 0,
         string $artist = '',
-        string $preferredCountry = ''
+        string $preferredCountry = '',
+        bool $restrictToExactTitle = true
     ): array
     {
         $album = strtolower($album);
+
+        // Titolo cercato ridotto a lettere e cifre, per riconoscere il
+        // titolo esatto anche con punteggiatura diversa
+        // ("The Magnificent Tree - The 2025 Remixes" e
+        // "The Magnificent Tree: The 2025 Remixes" hanno la stessa chiave).
+        $albumKey = preg_replace('/[^a-z0-9]+/', '', $album);
 
         // Parole nel titolo che identificano edizioni da evitare.
         // Usate SOLO per penalizzare il punteggio tra candidati già validi
@@ -939,14 +949,14 @@ class AlbumMetadataService
                 $ptPre = strtolower($rgPre['primary-type'] ?? '');
                 $stPre = array_map('strtolower', $rgPre['secondary-types'] ?? []);
                 if ($ptPre !== '' && $ptPre !== 'album' && $ptPre !== 'ep') continue;
-                if (!empty($stPre)) continue;
+                if (!empty($stPre) && !$this->releaseTitleMatchesKey($rel, $albumKey)) continue;
 
                 $titleLow = strtolower($rel['title']);
                 $isSpecial = false;
                 foreach ($avoidTitle as $w) {
                     if (strpos($titleLow, $w) !== false) { $isSpecial = true; break; }
                 }
-                if ($isSpecial) continue;
+                if ($isSpecial && !$this->releaseTitleMatchesKey($rel, $albumKey)) continue;
 
                 $y = (int)substr($rel['date'], 0, 4);
                 if ($y <= 1900) continue;
@@ -961,9 +971,6 @@ class AlbumMetadataService
             }
         }
 
-        // Titolo cercato ridotto a lettere e cifre, per riconoscere il
-        // titolo esatto anche con punteggiatura diversa.
-        $albumKey = preg_replace('/[^a-z0-9]+/', '', $album);
 
         // FIX (In Rainbows): esiste almeno un candidato a DISCO SINGOLO
         // che supera gli scarti hard (artista, tipo release, non-giapponese)?
@@ -986,10 +993,35 @@ class AlbumMetadataService
             $pt  = strtolower($rg['primary-type'] ?? '');
             $st  = array_map('strtolower', $rg['secondary-types'] ?? []);
             if ($pt !== '' && $pt !== 'album' && $pt !== 'ep') continue;
-            if (!empty($st)) continue;
+            if (!empty($st) && !$this->releaseTitleMatchesKey($rel, $albumKey)) continue;
 
             $mc = (int)($rel['media-count'] ?? count($rel['media'] ?? []) ?: 1);
             if ($mc <= 1) { $singleDiscExists = true; break; }
+        }
+
+        // Candidati validi con il titolo esatto cercato: con tipo
+        // secondario ammesso (remix, live...) oppure album/EP in studio.
+        // Servono a non far prevalere, per anzianita', un disco con titolo
+        // diverso quando l'utente ha scritto il titolo esatto di un altro.
+        $exactExists       = false;
+        $exactStudioExists = false;
+        foreach ($releases as $rel) {
+            if (empty($rel['title'])) continue;
+            if ($this->isJapaneseMusicBrainzRelease($rel)) continue;
+            if ($artist !== '' && !$this->artistCreditMatches($rel, $artist)) continue;
+
+            $statusLow = strtolower(trim($rel['status'] ?? ''));
+            if ($statusLow !== '' && $statusLow !== 'official') continue;
+
+            $rgEx = $rel['release-group'] ?? [];
+            $ptEx = strtolower($rgEx['primary-type'] ?? '');
+            if ($ptEx !== '' && $ptEx !== 'album' && $ptEx !== 'ep') continue;
+            if (!$this->releaseTitleMatchesKey($rel, $albumKey)) continue;
+
+            $exactExists = true;
+            if (empty($rgEx['secondary-types'])) {
+                $exactStudioExists = true;
+            }
         }
 
         $best      = null;
@@ -997,6 +1029,20 @@ class AlbumMetadataService
 
         foreach ($releases as $rel) {
             if (empty($rel['title'])) continue;
+
+            // TITOLO ESATTO = DISCO SCELTO. Se tra i candidati validi c'e'
+            // il titolo esatto cercato, il disco e' deciso dal titolo e il
+            // punteggio sceglie solo la stampa tra quelli con quel titolo.
+            // Senza questo vincolo il bonus territoriale (+80 per il paese
+            // dell'artista) e quello di anzianita' facevano vincere
+            // "The Magnificent Tree" (stampe belghe 2000) su
+            // "The Magnificent Tree: The 2025 Remixes" (release XW 2025)
+            // anche con il titolo dei remix scritto per esteso.
+            if ($restrictToExactTitle && $exactExists
+                && !$this->releaseTitleMatchesKey($rel, $albumKey)
+            ) {
+                continue;
+            }
 
             // ESCLUSIONE RIGIDA DELLE EDIZIONI GIAPPONESI. MusicBrainz
             // può attribuire loro uno score elevato perché sono molto ben
@@ -1021,7 +1067,14 @@ class AlbumMetadataService
             }
 
             // Tipo release: scarta Single, Broadcast e release-group con
-            // secondary types (Compilation, Live, Soundtrack, Remix...).
+            // secondary types (Compilation, Live, Soundtrack, Remix...),
+            // TRANNE quando il titolo della release coincide con quello
+            // cercato. Chi scrive "The Magnificent Tree: The 2025 Remixes"
+            // sta catalogando proprio il disco di remix che possiede: prima
+            // la release giusta veniva trovata e scartata, e le ricerche
+            // successive ripiegavano sull'album in studio omonimo del 2000.
+            // Con il titolo base ("The Magnificent Tree") live, remix e
+            // raccolte restano esclusi come prima.
             // Gli EP sono AMMESSI: per un collezionista sono dischi a tutti
             // gli effetti (es. "Jar of Flies" è un EP) — il vecchio scarto
             // duro li rendeva introvabili e faceva vincere ristampe spurie
@@ -1033,8 +1086,12 @@ class AlbumMetadataService
             if ($primaryType !== '' && $primaryType !== 'album' && $primaryType !== 'ep') {
                 continue;
             }
+            $secondaryExact = false;
             if (!empty($secondaryTypes)) {
-                continue;
+                if (!$this->releaseTitleMatchesKey($rel, $albumKey)) {
+                    continue;
+                }
+                $secondaryExact = true;
             }
 
             // SCARTO NON-OFFICIAL: la ricerca In Rainbows include una
@@ -1078,11 +1135,23 @@ class AlbumMetadataService
                 $score += ($albumKey !== '' && $relKey === $albumKey) ? 20 : 8;
             }
 
-            // Penalizza parole speciali nel titolo
-            foreach ($avoidTitle as $word) {
-                if (strpos($title, $word) !== false) {
-                    $score -= 35;
-                    break;
+            // Release con tipo secondario ammessa per titolo esatto: piccola
+            // penalita' solo se esiste anche un album in studio con lo
+            // stesso titolo esatto, cosi' in quel caso (raro) vince lo studio.
+            if ($secondaryExact && $exactStudioExists) {
+                $score -= 15;
+            }
+
+            // Penalizza parole speciali nel titolo, salvo quando il titolo
+            // della release e' esattamente quello cercato: chi scrive
+            // "The Magnificent Tree: Live With Strings" o "Live Through
+            // This" cerca proprio quel disco, non un'edizione speciale.
+            if (!$this->releaseTitleMatchesKey($rel, $albumKey)) {
+                foreach ($avoidTitle as $word) {
+                    if (strpos($title, $word) !== false) {
+                        $score -= 35;
+                        break;
+                    }
                 }
             }
 
@@ -1153,8 +1222,14 @@ class AlbumMetadataService
 
                 // Tra dischi diversi dello stesso tipo con lo stesso
                 // titolo, preferenza per quello uscito per primo.
+                // Se tra i candidati c'e' il titolo esatto cercato, il bonus
+                // vale solo per quei dischi: altrimenti l'album del 2000
+                // batteva per anzianita' il disco di remix del 2025 scritto
+                // per esteso. Senza titoli esatti il comportamento e' quello
+                // di prima.
                 if (isset($rgOldest[$rgId], $typeOldest[$primaryType])
                     && $rgOldest[$rgId] === $typeOldest[$primaryType]
+                    && (!$exactExists || $this->releaseTitleMatchesKey($rel, $albumKey))
                 ) {
                     $score += 20;
                 }
@@ -1166,7 +1241,26 @@ class AlbumMetadataService
             }
         }
 
+        // Se le release con titolo esatto sono state tutte escluse dagli
+        // scarti successivi (per esempio solo stampe multi-disco quando
+        // esiste un disco singolo), si rifa' la scelta senza il vincolo:
+        // il risultato e' quello che si otteneva prima di questa regola.
+        if ($best === null && $restrictToExactTitle && $exactExists) {
+            return $this->pickBestRelease($releases, $album, $year, $artist, $preferredCountry, false);
+        }
+
         return $best ?? [];
+    }
+
+    // Vero se il titolo della release, ridotto a lettere e cifre, coincide
+    // con la chiave del titolo cercato.
+    private function releaseTitleMatchesKey(array $rel, string $albumKey): bool
+    {
+        if ($albumKey === '') {
+            return false;
+        }
+        $relKey = preg_replace('/[^a-z0-9]+/', '', strtolower((string)($rel['title'] ?? '')));
+        return $relKey === $albumKey;
     }
 
     // MBID dell'artista accreditato sulla release scelta.
@@ -2287,15 +2381,23 @@ class AlbumMetadataService
         $clean      = [];
         $seenTitles = [];
 
-        $skipWords = [
-            'take',
-            'rehearsal',
-            'jam',
-            'dialogue',
-            'studio',
-            'mix',
-            'session'
-        ];
+        // Prima passata: quante tracce verrebbero scartate per le parole
+        // marcatore. Le parole servono a togliere poche tracce aggiunte in
+        // coda (take alternativi, jam, missaggi); se riguardano piu' di
+        // meta' della tracklist descrivono l'album stesso (un album di
+        // remix: "Autoharp (The 2025 remixes)" e tutte le altre) e non si
+        // scarta nulla. Prima la tracklist dei remix risultava vuota.
+        $skippable = 0;
+        $nonEmpty  = 0;
+        foreach ($tracks as $t) {
+            $title = trim($t['title'] ?? '');
+            if ($title === '') continue;
+            $nonEmpty++;
+            if ($this->trackHasSkipAnnotation(strtolower($title))) {
+                $skippable++;
+            }
+        }
+        $applySkip = $nonEmpty > 0 && ($skippable * 2) <= $nonEmpty;
 
         foreach ($tracks as $t) {
             $title      = trim($t['title'] ?? '');
@@ -2303,26 +2405,8 @@ class AlbumMetadataService
 
             if ($title === '') continue;
 
-            // Salta tracce SOLO se le parole-marcatore compaiono dentro
-            // un'annotazione tra parentesi/quadre o dopo un trattino
-            // finale, es. "Song (Alternate Take)", "Song (Remix)",
-            // "Song - Studio Jam". MAI sull'intero titolo: altrimenti
-            // un titolo come "Love Takes Miles" verrebbe scartato solo
-            // perché contiene "take" dentro "takes".
-            $annotation = '';
-            if (preg_match('/[\(\[]([^)\]]*)[\)\]]/', $titleLower, $m)) {
-                $annotation .= ' ' . $m[1];
-            }
-            if (preg_match('/\s-\s(.+)$/', $titleLower, $m2)) {
-                $annotation .= ' ' . $m2[1];
-            }
-
-            if ($annotation !== '') {
-                foreach ($skipWords as $word) {
-                    if (strpos($annotation, $word) !== false) {
-                        continue 2;
-                    }
-                }
+            if ($applySkip && $this->trackHasSkipAnnotation($titleLower)) {
+                continue;
             }
 
             // Deduplicazione: normalizza e confronta
@@ -2338,6 +2422,41 @@ class AlbumMetadataService
         }
 
         return array_values($clean);
+    }
+
+    // Vero se le parole marcatore compaiono in un'annotazione del titolo:
+    // tra parentesi/quadre o dopo un trattino finale, es. "Song (Alternate
+    // Take)", "Song (Remix)", "Song - Studio Jam". MAI sull'intero titolo:
+    // altrimenti "Love Takes Miles" verrebbe scartato per "take".
+    private function trackHasSkipAnnotation(string $titleLower): bool
+    {
+        $skipWords = [
+            'take',
+            'rehearsal',
+            'jam',
+            'dialogue',
+            'studio',
+            'mix',
+            'session'
+        ];
+
+        $annotation = '';
+        if (preg_match('/[\(\[]([^)\]]*)[\)\]]/', $titleLower, $m)) {
+            $annotation .= ' ' . $m[1];
+        }
+        if (preg_match('/\s-\s(.+)$/', $titleLower, $m2)) {
+            $annotation .= ' ' . $m2[1];
+        }
+        if ($annotation === '') {
+            return false;
+        }
+
+        foreach ($skipWords as $word) {
+            if (strpos($annotation, $word) !== false) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ----------------------------------------------------------
