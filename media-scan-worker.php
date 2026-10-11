@@ -602,6 +602,322 @@ function albumSnapshot(string $albumDir): string
     return sha1(implode("\n", $rows));
 }
 
+/**
+ * Normalizzazione conservativa usata esclusivamente per correlare una
+ * directory-album scoperta fuori dalle esclusioni con attività ancora
+ * presente dentro una root esclusa.
+ *
+ * Non entra nel matching degli album e non modifica metadati persistiti.
+ */
+function workerActivityNameKey(string $value): string
+{
+    $value = trim($value);
+    if ($value === '') {
+        return '';
+    }
+
+    if (function_exists('mb_strtolower')) {
+        $value = mb_strtolower($value, 'UTF-8');
+    } else {
+        $value = strtolower($value);
+    }
+
+    $value = str_replace(
+        ["\xE2\x80\x98", "\xE2\x80\x99", "\xE2\x80\x9C", "\xE2\x80\x9D", "\xE2\x80\x93", "\xE2\x80\x94", '_'],
+        ["'", "'", '"', '"', '-', '-', ' '],
+        $value
+    );
+
+    $normalized = preg_replace('/[^\\p{L}\\p{N}]+/u', ' ', $value);
+    if (!is_string($normalized)) {
+        $normalized = preg_replace('/[^a-z0-9]+/i', ' ', $value);
+    }
+
+    $normalized = is_string($normalized) ? $normalized : $value;
+    $normalized = preg_replace('/\\s+/u', ' ', $normalized);
+
+    return trim(is_string($normalized) ? $normalized : $value);
+}
+
+function workerIsDiscDirectoryName(string $name): bool
+{
+    return (bool)preg_match('/^(cd|disc|disco|disk)\\s*[-_. ]?\\s*\\d{1,2}$/i', trim($name));
+}
+
+/**
+ * Per un file/cartella sotto una root esclusa individua la directory che più
+ * probabilmente rappresenta l'album. Le directory CD1/Disc 2 confluiscono nel
+ * loro genitore, come avviene già nella discovery principale.
+ */
+function workerExcludedAlbumDir(string $dir, string $excludedRoot): string
+{
+    $dir = MediaScanExclusionService::normalizePath($dir);
+    $excludedRoot = MediaScanExclusionService::normalizePath($excludedRoot);
+
+    if ($dir === '' || $excludedRoot === '') {
+        return '';
+    }
+
+    if (!MediaScanExclusionService::isSameOrDescendant($dir, $excludedRoot)) {
+        return '';
+    }
+
+    if ($dir !== $excludedRoot && workerIsDiscDirectoryName(basename($dir))) {
+        $parent = MediaScanExclusionService::normalizePath(dirname($dir));
+        if ($parent !== '' && MediaScanExclusionService::isSameOrDescendant($parent, $excludedRoot)) {
+            $dir = $parent;
+        }
+    }
+
+    return $dir;
+}
+
+/**
+ * Chiave filename per una correlazione di fallback. Rimuove soltanto
+ * estensioni e prefissi numerici di traccia; non prova a indovinare artista o
+ * album dal nome del file.
+ */
+function workerActivityFileKey(string $filename): string
+{
+    $name = trim(basename($filename));
+    if ($name === '' || $name[0] === '.') {
+        return '';
+    }
+
+    // Alcuni downloader aggiungono un'estensione temporanea sopra quella audio.
+    for ($i = 0; $i < 2; $i++) {
+        $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+        if ($ext === '') {
+            break;
+        }
+        if (in_array($ext, ['part', 'partial', 'tmp', 'download', 'crdownload', 'mp3', 'flac'], true)) {
+            $name = pathinfo($name, PATHINFO_FILENAME);
+            continue;
+        }
+        break;
+    }
+
+    // 01 - Titolo, 1-01 Titolo, 01. Titolo, ecc.
+    $stripped = preg_replace('/^\\s*(?:\\d{1,2}\\s*[-_.]\\s*)?\\d{1,3}\\s*[-_. )]+\\s*/u', '', $name);
+    if (is_string($stripped) && trim($stripped) !== '') {
+        $name = $stripped;
+    }
+
+    $key = workerActivityNameKey($name);
+
+    // Evita correlazioni basate su nomi troppo corti/generici.
+    if (strlen($key) < 5 || in_array($key, ['cover', 'folder', 'front', 'back', 'scan', 'booklet'], true)) {
+        return '';
+    }
+
+    return $key;
+}
+
+/**
+ * Indicizza l'attività presente nelle root escluse senza assumere alcuna
+ * struttura tipo root/utente/album. Gli elementi intermedi possono cambiare,
+ * mancare o essere diversi tra area temporanea e area finale.
+ *
+ * Ogni directory viene indicizzata per nome (così sono visibili anche cartelle
+ * di coda ancora vuote); i file aggiungono un secondo segnale basato sul nome
+ * traccia. Nessun contenuto viene modificato.
+ *
+ * @return array{by_name:array<string,array<string,bool>>,by_file:array<string,array<string,bool>>,names:array<string,string>}
+ */
+function buildExcludedActivityIndex(array $excludedRoots): array
+{
+    $index = [
+        'by_name' => [],
+        'by_file' => [],
+        'names'   => [],
+    ];
+
+    foreach ($excludedRoots as $excludedRoot) {
+        $excludedRoot = MediaScanExclusionService::normalizePath((string)$excludedRoot);
+        if ($excludedRoot === '' || !is_dir($excludedRoot) || !is_readable($excludedRoot)) {
+            continue;
+        }
+
+        $stack = [$excludedRoot];
+        while (!empty($stack)) {
+            $dir = array_pop($stack);
+            $entries = @scandir($dir);
+            if ($entries === false) {
+                continue;
+            }
+
+            foreach ($entries as $entry) {
+                if ($entry === '.' || $entry === '..' || ($entry !== '' && $entry[0] === '.')) {
+                    continue;
+                }
+
+                $path = $dir . '/' . $entry;
+                if (is_link($path)) {
+                    continue;
+                }
+
+                if (is_dir($path)) {
+                    $stack[] = $path;
+
+                    $albumDir = workerExcludedAlbumDir($path, $excludedRoot);
+                    if ($albumDir !== '' && $albumDir !== $excludedRoot) {
+                        $nameKey = workerActivityNameKey(basename($albumDir));
+                        if ($nameKey !== '') {
+                            if (!isset($index['by_name'][$nameKey])) {
+                                $index['by_name'][$nameKey] = [];
+                            }
+                            $index['by_name'][$nameKey][$albumDir] = true;
+                            $index['names'][$albumDir] = $nameKey;
+                        }
+                    }
+                    continue;
+                }
+
+                if (!is_file($path)) {
+                    continue;
+                }
+
+                $albumDir = workerExcludedAlbumDir(dirname($path), $excludedRoot);
+                if ($albumDir === '' || $albumDir === $excludedRoot) {
+                    continue;
+                }
+
+                $nameKey = workerActivityNameKey(basename($albumDir));
+                if ($nameKey !== '') {
+                    if (!isset($index['by_name'][$nameKey])) {
+                        $index['by_name'][$nameKey] = [];
+                    }
+                    $index['by_name'][$nameKey][$albumDir] = true;
+                    $index['names'][$albumDir] = $nameKey;
+                }
+
+                $fileKey = workerActivityFileKey($entry);
+                if ($fileKey !== '') {
+                    if (!isset($index['by_file'][$fileKey])) {
+                        $index['by_file'][$fileKey] = [];
+                    }
+                    $index['by_file'][$fileKey][$albumDir] = true;
+                }
+            }
+        }
+    }
+
+    return $index;
+}
+
+function workerCandidateFileKeys(string $albumDir): array
+{
+    $keys = [];
+
+    try {
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($albumDir, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+
+        foreach ($it as $file) {
+            if (!$file->isFile() || $file->isLink()) {
+                continue;
+            }
+
+            $ext = strtolower(pathinfo($file->getFilename(), PATHINFO_EXTENSION));
+            if (!in_array($ext, ['mp3', 'flac'], true)) {
+                continue;
+            }
+
+            $key = workerActivityFileKey($file->getFilename());
+            if ($key !== '') {
+                $keys[$key] = true;
+            }
+        }
+    } catch (Throwable $e) {
+        return [];
+    }
+
+    return array_keys($keys);
+}
+
+function workerAlbumNamesCompatible(string $a, string $b): bool
+{
+    if ($a === '' || $b === '') {
+        return false;
+    }
+
+    if ($a === $b) {
+        return true;
+    }
+
+    $shorter = strlen($a) <= strlen($b) ? $a : $b;
+    $longer  = strlen($a) <= strlen($b) ? $b : $a;
+
+    // Solo titoli sufficientemente distintivi: evita containment fragili su
+    // nomi corti come "III", "Live", "AM", ecc.
+    return strlen($shorter) >= 10 && strpos($longer, $shorter) !== false;
+}
+
+/**
+ * Cerca attività correlata a un candidate album fuori dalle root escluse.
+ *
+ * Ordine dei segnali:
+ *   1. stesso nome album normalizzato, a qualsiasi profondità;
+ *   2. nome compatibile (uno contiene l'altro) per titoli >= 10 caratteri;
+ *   3. almeno due filename-traccia distintivi in comune;
+ *   4. un filename in comune + nomi album compatibili.
+ *
+ * Il parent (es. username del downloader) NON partecipa mai al confronto.
+ * Un falso positivo può soltanto ritardare un import; non modifica il DB.
+ *
+ * @return array{path:string,reason:string}|null
+ */
+function findExcludedActivityMatch(string $albumKey, array $activity): ?array
+{
+    $candidateName = workerActivityNameKey(basename($albumKey));
+    if ($candidateName === '') {
+        return null;
+    }
+
+    if (!empty($activity['by_name'][$candidateName])) {
+        $paths = array_keys($activity['by_name'][$candidateName]);
+        sort($paths, SORT_STRING);
+        return ['path' => $paths[0], 'reason' => 'same-album-name'];
+    }
+
+    foreach (($activity['names'] ?? []) as $activePath => $activeName) {
+        if (workerAlbumNamesCompatible($candidateName, (string)$activeName)) {
+            return ['path' => (string)$activePath, 'reason' => 'compatible-album-name'];
+        }
+    }
+
+    $candidateFiles = workerCandidateFileKeys($albumKey);
+    if (empty($candidateFiles)) {
+        return null;
+    }
+
+    $hits = [];
+    foreach ($candidateFiles as $fileKey) {
+        foreach (array_keys($activity['by_file'][$fileKey] ?? []) as $activePath) {
+            if (!isset($hits[$activePath])) {
+                $hits[$activePath] = [];
+            }
+            $hits[$activePath][$fileKey] = true;
+        }
+    }
+
+    foreach ($hits as $activePath => $fileHits) {
+        $count = count($fileHits);
+        if ($count >= 2) {
+            return ['path' => (string)$activePath, 'reason' => 'track-filenames'];
+        }
+
+        $activeName = (string)($activity['names'][$activePath] ?? '');
+        if ($count >= 1 && workerAlbumNamesCompatible($candidateName, $activeName)) {
+            return ['path' => (string)$activePath, 'reason' => 'album-name+track'];
+        }
+    }
+
+    return null;
+}
+
 // One worker per Grizzly installation, regardless of which folder is selected.
 $tmpDir    = rtrim(sys_get_temp_dir(), '/');
 $stateFile = $tmpDir . '/grizzly-media-import-state.json';
@@ -834,6 +1150,11 @@ while (true) {
         }
     }
 
+    // Indicizza ogni ciclo l'attività reale dentro le root escluse. Non
+    // assumiamo che i path temporanei e finali condividano username, profondità
+    // o struttura relativa: la correlazione avviene per identità del contenuto.
+    $excludedActivity = buildExcludedActivityIndex($excludedRuntimeRoots);
+
     $now        = time();
     $albumKeys  = $service->discoverAlbumKeys($realImport);
     $stillAlive = [];
@@ -870,6 +1191,52 @@ while (true) {
         $previous = isset($state['albums'][$albumKey]) && is_array($state['albums'][$albumKey])
             ? $state['albums'][$albumKey]
             : [];
+
+        // Una cartella finale può iniziare a popolarsi mentre lo stesso album è
+        // ancora attivo dentro una root esclusa. Il parent (username o altra
+        // directory intermedia) non viene usato: può essere diverso.
+        $activityMatch = findExcludedActivityMatch($albumKey, $excludedActivity);
+        if ($activityMatch !== null) {
+            $wasBlocked = (($previous['last_result'] ?? '') === 'blocked');
+            $sameBlock  = $wasBlocked
+                && (($previous['blocked_by'] ?? '') === $activityMatch['path'])
+                && (($previous['blocked_reason'] ?? '') === $activityMatch['reason']);
+
+            $state['albums'][$albumKey] = [
+                'signature'          => $signature,
+                'stable_since'       => $now,
+                'imported_signature' => isset($previous['imported_signature']) ? $previous['imported_signature'] : null,
+                'last_result'        => 'blocked',
+                'last_scan'          => isset($previous['last_scan']) ? $previous['last_scan'] : null,
+                'deferred_sources'   => [],
+                'blocked_by'         => $activityMatch['path'],
+                'blocked_reason'     => $activityMatch['reason'],
+            ];
+
+            if (!$sameBlock) {
+                workerLog('[BLOCKED] ' . $albumKey
+                    . ' | attivita esclusa=' . $activityMatch['path']
+                    . ' | match=' . $activityMatch['reason']);
+            }
+            continue;
+        }
+
+        // Se l'album era bloccato, la stability window deve partire DA ADESSO,
+        // non dal momento in cui i primi file erano comparsi nella cartella
+        // finale. Questo chiude il race tra trasferimento e cartella completa.
+        if (($previous['last_result'] ?? '') === 'blocked') {
+            $state['albums'][$albumKey] = [
+                'signature'          => $signature,
+                'stable_since'       => $now,
+                'imported_signature' => isset($previous['imported_signature']) ? $previous['imported_signature'] : null,
+                'last_result'        => 'pending',
+                'last_scan'          => isset($previous['last_scan']) ? $previous['last_scan'] : null,
+                'deferred_sources'   => [],
+            ];
+
+            workerLog('[PENDING] Attivita esclusa terminata, avvio stabilita: ' . $albumKey);
+            continue;
+        }
 
         if (!isset($previous['signature']) || $previous['signature'] !== $signature) {
             $state['albums'][$albumKey] = [

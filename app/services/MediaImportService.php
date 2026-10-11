@@ -503,6 +503,25 @@ class MediaImportService
         // correzioni manuali dell'utente (es. albumartist errato "Various
         // Artists" corretto in "Why") dalle scansioni successive.
         $sourceLinkedAlbum = $this->findExistingAlbumBySourcePaths($importDir, $tracks);
+
+        // Se la cartella e' stata spostata, i source_path nuovi non possono
+        // coincidere con quelli salvati in precedenza. Prima di fare lookup
+        // esterni proviamo quindi una relocation conservativa: stesso album
+        // locale (titolo/anno compatibili), tutti gli external precedenti non
+        // piu' raggiungibili e fingerprint dei file coincidenti.
+        //
+        // Questo NON rende source_hash una chiave globale: il fingerprint viene
+        // usato soltanto per riconoscere un MOVE di un album gia' noto. Se il
+        // vecchio file esiste ancora, il candidato viene rifiutato come copia.
+        if ($sourceLinkedAlbum === null) {
+            $sourceLinkedAlbum = $this->findExistingAlbumByRelocatedExternalFingerprints(
+                $tracks,
+                $artist,
+                $title,
+                $year
+            );
+        }
+
         if ($sourceLinkedAlbum !== null) {
             if (!empty($sourceLinkedAlbum['artist_name'])) {
                 $artist = (string)$sourceLinkedAlbum['artist_name'];
@@ -539,7 +558,12 @@ class MediaImportService
         $externalMbid       = $this->isUuid($tagReleaseMbid) ? $tagReleaseMbid : null;
         $externalMbidFromTags = $externalMbid !== null;
         $externalReleaseGroup = $this->isUuid($tagReleaseGroup) ? $tagReleaseGroup : null;
+        $externalReleaseGroupFromTags = $externalReleaseGroup !== null;
         $externalArtistMbid   = $this->isUuid($tagArtistMbid) ? $tagArtistMbid : null;
+        // Un MBID artista scritto nei file e' identita' esplicita. Un MBID
+        // restituito da una ricerca API e' invece soltanto un suggerimento e
+        // non deve scavalcare un artista locale omonimo gia' identificato.
+        $externalArtistMbidFromTags = $externalArtistMbid !== null;
         $externalMetadataAttempted = false;
 
         if ($tagGenre === '' || $tagLabel === '' || $coverSource['type'] === 'none') {
@@ -629,6 +653,45 @@ class MediaImportService
             }
         }
 
+        // Provenienza dell'identita' artista:
+        // - MBID nei tag -> segnale esplicito, puo' distinguere omonimi;
+        // - MBID solo da API -> non puo' contraddire un artista locale con lo
+        //   stesso nome. In quel caso si usa l'identita' locale gia' posseduta.
+        //
+        // Se l'API contraddice un MBID artista locale gia' valido, scartiamo
+        // anche release MBID / release-group ottenuti SOLO dalla stessa ricerca
+        // esterna: l'intero blocco di identita' e' sospetto. I valori espliciti
+        // scritti nei file non vengono mai rimossi.
+        if (!$externalArtistMbidFromTags
+            && $artistFoundByName !== null
+            && $externalArtistMbid !== null) {
+            $localArtistRow = $artistModel->getById((int)$artistFoundByName);
+            $localArtistMbid = is_array($localArtistRow)
+                ? strtolower(trim((string)($localArtistRow['mb_artist_id'] ?? '')))
+                : '';
+
+            if ($this->isUuid($localArtistMbid)
+                && !hash_equals($localArtistMbid, strtolower($externalArtistMbid))) {
+                $externalArtistMbid = null;
+
+                if (!$externalMbidFromTags) {
+                    $externalMbid = null;
+                }
+                if (!$externalReleaseGroupFromTags) {
+                    $externalReleaseGroup = null;
+                }
+            }
+        }
+
+        // Anche quando l'artista locale non ha ancora un MBID, una risposta API
+        // non e' abbastanza forte da creare automaticamente un omonimo separato.
+        // Solo un MBID artista presente nei tag puo' scavalcare il nome locale.
+        $preferLocalArtistByName = !$externalArtistMbidFromTags
+            && $artistFoundByName !== null;
+        $artistIdentityMbid = $externalArtistMbid !== null
+            ? $externalArtistMbid
+            : '';
+
         if ($coverSource['type'] === 'none' && $externalCoverLocal === null && $externalCoverUrl === null) {
             $reasons[] = 'cover assente';
         }
@@ -669,10 +732,10 @@ class MediaImportService
                 $existing = $albumModel->getById((int)$sourceLinkedAlbum['id']);
             }
             if (!$existing) {
-                $artistId = $artistModel->findByIdentity(
-                    $artist,
-                    $externalArtistMbid !== null ? $externalArtistMbid : ''
-                );
+                $artistId = $preferLocalArtistByName
+                    ? (int)$artistFoundByName
+                    : $artistModel->findByIdentity($artist, $artistIdentityMbid);
+
                 $existing = $artistId
                     ? $this->findScannerAlbumCandidate($artistId, $artist, $title, $year, $externalMbid, $externalReleaseGroup, $externalMbidFromTags, $tracks)
                     : null;
@@ -741,10 +804,10 @@ class MediaImportService
         }
 
         if (!$existing) {
-            $artistId = $artistModel->findOrCreate(
-                $artist,
-                $externalArtistMbid !== null ? $externalArtistMbid : ''
-            );
+            $artistId = $preferLocalArtistByName
+                ? (int)$artistFoundByName
+                : $artistModel->findOrCreate($artist, $artistIdentityMbid);
+
             $existing = $this->findScannerAlbumCandidate(
                 $artistId,
                 $artist,
@@ -2351,6 +2414,220 @@ class MediaImportService
         $row = $albumStmt->fetch(PDO::FETCH_ASSOC);
 
         return $row ?: null;
+    }
+
+    /**
+     * Riconosce in modo conservativo lo spostamento fisico di un album gia'
+     * indicizzato quando i source_path precedenti sono diventati orfani.
+     *
+     * source_hash NON diventa una chiave globale di deduplica. Viene usato qui
+     * soltanto come prova di relocation, con queste guardie obbligatorie:
+     *   - il vecchio external non deve essere piu' raggiungibile;
+     *   - l'intero insieme dei fingerprint del nuovo gruppo deve coincidere con
+     *     l'intero insieme dei fingerprint dell'album precedente;
+     *   - un solo album locale deve soddisfare tutte le condizioni;
+     *   - per album con un solo fingerprint si richiedono anche artista,
+     *     titolo-base e anno compatibili, per evitare collisioni deboli.
+     *
+     * Il primo hash viene usato come probe per restringere i candidati; gli
+     * altri file vengono hashati solo se il DB contiene realmente una possibile
+     * sorgente precedente. In questo modo i nuovi album normali non pagano il
+     * costo di hashare due volte l'intera directory.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function findExistingAlbumByRelocatedExternalFingerprints(
+        array $tracks,
+        string $artist,
+        string $title,
+        ?int $year
+    ): ?array {
+        if (empty($tracks)) {
+            return null;
+        }
+
+        // Scegli come probe il file piu' piccolo: e' sufficiente per interrogare
+        // il DB e minimizza il costo nel caso comune di album realmente nuovo.
+        $probeAbs = '';
+        $probeSize = null;
+
+        foreach ($tracks as $track) {
+            $abs = trim((string)($track['abs'] ?? ''));
+            if ($abs === '' || !is_file($abs) || !is_readable($abs)) {
+                return null;
+            }
+
+            $size = @filesize($abs);
+            if ($size === false) {
+                return null;
+            }
+
+            $size = (int)$size;
+            if ($probeAbs === '' || $probeSize === null || $size < $probeSize) {
+                $probeAbs = $abs;
+                $probeSize = $size;
+            }
+        }
+
+        if ($probeAbs === '') {
+            return null;
+        }
+
+        $probeHash = @sha1_file($probeAbs);
+        if ($probeHash === false || $probeHash === '') {
+            return null;
+        }
+        $probeHash = strtolower($probeHash);
+
+        $probeStmt = $this->db->prepare("
+            SELECT DISTINCT album_id
+            FROM audio_files
+            WHERE storage_type = 'external'
+              AND album_id IS NOT NULL
+              AND source_hash = :source_hash
+            ORDER BY album_id ASC
+        ");
+        $probeStmt->execute([':source_hash' => $probeHash]);
+
+        $candidateIds = [];
+        foreach ($probeStmt->fetchAll(PDO::FETCH_COLUMN) as $candidateId) {
+            $candidateId = (int)$candidateId;
+            if ($candidateId > 0) {
+                $candidateIds[$candidateId] = true;
+            }
+        }
+
+        if (empty($candidateIds)) {
+            return null;
+        }
+
+        // Calcolato solo se il probe ha trovato almeno un candidato storico.
+        $scannedHashes = [$probeHash => true];
+        foreach ($tracks as $track) {
+            $abs = trim((string)($track['abs'] ?? ''));
+            if ($abs === $probeAbs) {
+                continue;
+            }
+
+            $hash = @sha1_file($abs);
+            if ($hash === false || $hash === '') {
+                return null;
+            }
+            $scannedHashes[strtolower($hash)] = true;
+        }
+
+        $audioStmt = $this->db->prepare("
+            SELECT id, source_hash, source_path
+            FROM audio_files
+            WHERE album_id = :album_id
+              AND storage_type = 'external'
+            ORDER BY id ASC
+        ");
+        $albumStmt = $this->db->prepare("
+            SELECT a.id, a.artist_id, a.title, a.year, ar.name AS artist_name
+            FROM albums a
+            JOIN artists ar ON ar.id = a.artist_id
+            WHERE a.id = :id
+            LIMIT 1
+        ");
+
+        $matched = [];
+
+        foreach (array_keys($candidateIds) as $candidateId) {
+            $audioStmt->execute([':album_id' => $candidateId]);
+            $audioRows = $audioStmt->fetchAll(PDO::FETCH_ASSOC);
+            if (empty($audioRows)) {
+                continue;
+            }
+
+            $oldHashes = [];
+            $hasLiveOldSource = false;
+
+            foreach ($audioRows as $audioRow) {
+                $oldPath = trim((string)($audioRow['source_path'] ?? ''));
+                $runtime = $oldPath !== '' ? $this->sourcePathForRuntime($oldPath) : '';
+
+                // Se almeno una vecchia sorgente esiste ancora, potrebbe essere
+                // una seconda copia valida: non la trattiamo come spostamento.
+                if ($runtime !== '' && is_file($runtime) && is_readable($runtime)) {
+                    $hasLiveOldSource = true;
+                    break;
+                }
+
+                $oldHash = strtolower(trim((string)($audioRow['source_hash'] ?? '')));
+                if ($oldHash !== '') {
+                    $oldHashes[$oldHash] = true;
+                }
+            }
+
+            if ($hasLiveOldSource || empty($oldHashes)) {
+                continue;
+            }
+
+            // Deve coincidere l'INTERO insieme, non una singola traccia.
+            if (count($oldHashes) !== count($scannedHashes)) {
+                continue;
+            }
+
+            $sameSet = true;
+            foreach ($scannedHashes as $hash => $_) {
+                if (!isset($oldHashes[$hash])) {
+                    $sameSet = false;
+                    break;
+                }
+            }
+            if (!$sameSet) {
+                continue;
+            }
+
+            $albumStmt->execute([':id' => $candidateId]);
+            $row = $albumStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$row) {
+                continue;
+            }
+
+            // Un solo fingerprint e' un segnale piu' debole: aggiungiamo le
+            // verifiche strutturali senza applicarle ai normali album multi-track,
+            // cosi' una correzione manuale di titolo/artista resta protetta anche
+            // dopo lo spostamento fisico della cartella.
+            if (count($scannedHashes) === 1) {
+                $scanArtist = function_exists('mb_strtolower')
+                    ? mb_strtolower(trim($artist), 'UTF-8')
+                    : strtolower(trim($artist));
+                $candidateArtist = function_exists('mb_strtolower')
+                    ? mb_strtolower(trim((string)($row['artist_name'] ?? '')), 'UTF-8')
+                    : strtolower(trim((string)($row['artist_name'] ?? '')));
+
+                if ($scanArtist === '' || $candidateArtist === '' || $scanArtist !== $candidateArtist) {
+                    continue;
+                }
+
+                $scanTitleKey = $this->scannerAlbumBaseKey($title);
+                $candidateTitleKey = $this->scannerAlbumBaseKey((string)($row['title'] ?? ''));
+                if ($scanTitleKey === '' || $candidateTitleKey === '' || $scanTitleKey !== $candidateTitleKey) {
+                    continue;
+                }
+
+                $candidateYear = !empty($row['year']) ? (int)$row['year'] : null;
+                if ($year !== null && $candidateYear !== null && $candidateYear !== $year) {
+                    continue;
+                }
+            }
+
+            $matched[$candidateId] = $row;
+
+            // Due album storici con lo stesso identico set di fingerprint sono
+            // ambigui: non prendere decisioni automatiche.
+            if (count($matched) > 1) {
+                return null;
+            }
+        }
+
+        if (count($matched) !== 1) {
+            return null;
+        }
+
+        return reset($matched) ?: null;
     }
 
     private function audioSourcePathExists(string $importDir, string $srcAbs): bool
