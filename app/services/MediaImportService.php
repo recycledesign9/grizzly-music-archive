@@ -2250,7 +2250,7 @@ class MediaImportService
                 // dai tag o dal lookup API non puo' scavalcare anno/tracklist.
                 //
                 // Regola conservativa:
-                //   - anno identico;
+                //   - anno identico (anno mancante: vedi $yearCompatible);
                 //   - tracklist completa e associabile 1:1 in modo affidabile;
                 //     il match letterale resta il segnale piu' forte, ma una
                 //     variante editoriale del titolo non deve scartare un album
@@ -2263,9 +2263,18 @@ class MediaImportService
                 // di identita'.
                 $structuralTrackMatch = $strictTrackMatch || $fullTrackMatch || $editionTrackMatch;
 
+                // Anno: deve coincidere quando e' noto da entrambe le parti.
+                // Se manca da una delle due (file senza alcun tag anno, oppure
+                // scheda senza anno), l'assenza non vale come prova negativa,
+                // ma solo con le due prove indipendenti piu' forti insieme:
+                // titolo-base uguale E release-group MusicBrainz uguale.
+                // Anni presenti e diversi restano un veto (es. reincisioni
+                // con lo stesso titolo-base e la stessa tracklist).
+                $yearCompatible = ($yearDiff !== null && $yearDiff === 0)
+                    || ($yearDiff === null && $sameTitleBase && $sameGroupCandidate);
+
                 $structuralIdentity = $structuralTrackMatch
-                    && $yearDiff !== null
-                    && $yearDiff === 0
+                    && $yearCompatible
                     && ($sameTitleBase || $sameGroupCandidate);
 
                 if (!$structuralIdentity) {
@@ -3829,7 +3838,31 @@ class MediaImportService
         $out['genre']       = $this->firstComment($c, ['genre']);
         $out['label']       = $this->firstComment($c, ['label', 'publisher', 'organization', 'record_label']);
 
-        $out['year']  = $this->parseYear($this->firstComment($c, ['date', 'year', 'originaldate', 'original_year', 'creation_date', 'recording_time']));
+        // Anno dell'album. Ogni scheda rappresenta l'album, non la singola
+        // stampa: l'anno ORIGINALE ha quindi la precedenza su quello della
+        // ristampa (es. MoFi 1983 di un album del 1967).
+        //
+        // Ogni chiave viene provata finche' non contiene un anno valido. In
+        // precedenza si usava solo il primo valore non vuoto: nei tag ID3v2.3
+        // 'date' contiene TDAT (giorno/mese, es. "0106") e l'anno andava perso
+        // anche se presente in 'year' e 'original_year'.
+        //
+        // Chiavi verificate con getID3 1.9.26:
+        //   ID3v2.3 TORY -> original_year      ID3v2.4 TDOR -> original_release_time
+        //   TXXX ORIGINALYEAR/ORIGINALDATE -> comments['text'][...]
+        //   Vorbis ORIGINALDATE/ORIGINALYEAR -> originaldate / originalyear
+        $out['year'] = $this->firstYearFromComments(
+            $c,
+            ['original_year', 'originalyear', 'originaldate', 'original_release_time'],
+            ['ORIGINALYEAR', 'ORIGINALDATE', 'ORIGINAL YEAR', 'ORIGINAL DATE']
+        );
+        if ($out['year'] === null) {
+            $out['year'] = $this->firstYearFromComments(
+                $c,
+                ['year', 'date', 'recording_time', 'creation_date'],
+                []
+            );
+        }
         $out['track'] = $this->parseLeadingInt($this->firstComment($c, ['track_number', 'tracknumber', 'track']));
         $out['disc']  = $this->parseLeadingInt($this->firstComment($c, ['part_of_a_set', 'discnumber', 'disc_number', 'disc']));
 
@@ -3918,6 +3951,49 @@ class MediaImportService
     private function isUuid(string $value): bool
     {
         return (bool)preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', trim($value));
+    }
+
+    /**
+     * Primo anno valido trovato nelle chiavi indicate, nell'ordine dato.
+     * Considera tutti i valori di ogni chiave (getID3 puo' esporne piu' di
+     * uno) e, per i TXXX ID3, i campi in comments['text'] confrontati senza
+     * distinzione tra maiuscole e minuscole. Valori senza un anno 19xx/20xx
+     * (es. TDAT "0106") vengono saltati.
+     */
+    private function firstYearFromComments(array $comments, array $keys, array $textKeys): ?int
+    {
+        foreach ($keys as $k) {
+            if (!isset($comments[$k])) {
+                continue;
+            }
+            $values = is_array($comments[$k]) ? $comments[$k] : [$comments[$k]];
+            foreach ($values as $v) {
+                if (is_array($v)) {
+                    continue;
+                }
+                $year = $this->parseYear(trim((string)$v));
+                if ($year !== null) {
+                    return $year;
+                }
+            }
+        }
+
+        if (!empty($textKeys) && isset($comments['text']) && is_array($comments['text'])) {
+            foreach ($textKeys as $wanted) {
+                $wanted = strtoupper($wanted);
+                foreach ($comments['text'] as $desc => $v) {
+                    if (!is_string($desc) || strtoupper(trim($desc)) !== $wanted || is_array($v)) {
+                        continue;
+                    }
+                    $year = $this->parseYear(trim((string)$v));
+                    if ($year !== null) {
+                        return $year;
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 
     private function parseYear(string $raw): ?int
