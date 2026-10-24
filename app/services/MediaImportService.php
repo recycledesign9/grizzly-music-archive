@@ -64,6 +64,9 @@ class MediaImportService
     /** @var array<string,?int> cache: nome-etichetta-minuscolo => id|null */
     private $labelCache = [];
 
+    /** @var AlbumImportFilesystemJournal|null journal attivo solo per import bound. */
+    private $filesystemJournal = null;
+
     public function __construct()
     {
         $this->db  = Database::getInstance();
@@ -204,6 +207,235 @@ class MediaImportService
 
         $root = rtrim(str_replace('\\', '/', $real), '/');
         return array_keys($this->discoverAlbums($root));
+    }
+
+    /**
+     * Esegue un AlbumImportPlan gia' autorizzato senza rifare identity matching.
+     *
+     * Il callback di revalidazione viene invocato:
+     * - before-write: subito dopo BEGIN e prima della prima scrittura;
+     * - before-commit: dopo tutte le scritture ma prima di COMMIT.
+     *
+     * @return array<string,mixed>
+     */
+    public function executeBoundAlbum(
+        AlbumImportPlan $plan,
+        AlbumImportFilesystemJournal $journal,
+        callable $revalidate
+    ): array {
+        if ($this->db->inTransaction()) {
+            throw new RuntimeException(
+                'Bound import requires no active caller transaction.'
+            );
+        }
+
+        $action = strtoupper(trim($plan->action()));
+        if (!in_array($action, ['CREATE', 'RECONCILE'], true)) {
+            throw new RuntimeException('Unsupported bound action: ' . $action);
+        }
+
+        $targetAlbumId = $plan->targetAlbumId();
+        if ($action === 'CREATE' && $targetAlbumId !== null) {
+            throw new RuntimeException(
+                'CREATE bound import must not carry target_album_id.'
+            );
+        }
+        if ($action === 'RECONCILE' && ($targetAlbumId === null || $targetAlbumId <= 0)) {
+            throw new RuntimeException(
+                'RECONCILE bound import requires target_album_id.'
+            );
+        }
+
+        $importRootReal = realpath($plan->importRoot());
+        $candidateReal = realpath($plan->candidatePath());
+
+        if (
+            $importRootReal === false
+            || !is_dir($importRootReal)
+            || !is_readable($importRootReal)
+        ) {
+            throw new RuntimeException('Bound import root is missing or unreadable.');
+        }
+
+        if (
+            $candidateReal === false
+            || !is_dir($candidateReal)
+            || !is_readable($candidateReal)
+        ) {
+            throw new RuntimeException('Bound candidate is missing or unreadable.');
+        }
+
+        $importRoot = rtrim(str_replace('\\', '/', $importRootReal), '/');
+        $candidatePath = rtrim(str_replace('\\', '/', $candidateReal), '/');
+
+        if (!$this->pathWithinRoot($candidatePath, $importRoot)) {
+            throw new RuntimeException('Bound candidate is outside import root.');
+        }
+
+        $parts = [];
+        foreach ($plan->parts() as $index => $part) {
+            if (!is_array($part)) {
+                throw new RuntimeException('Invalid bound candidate part #' . $index);
+            }
+
+            $partReal = realpath((string)($part['dir'] ?? ''));
+            if (
+                $partReal === false
+                || !is_dir($partReal)
+                || !is_readable($partReal)
+            ) {
+                throw new RuntimeException(
+                    'Bound candidate part is missing or unreadable #' . $index
+                );
+            }
+
+            $dir = rtrim(str_replace('\\', '/', $partReal), '/');
+            if (
+                !$this->pathWithinRoot($dir, $importRoot)
+                || !$this->pathWithinRoot($dir, $candidatePath)
+            ) {
+                throw new RuntimeException(
+                    'Bound candidate part is outside authorized candidate.'
+                );
+            }
+
+            $parts[] = [
+                'dir' => $dir,
+                'disc' => max(1, (int)($part['disc'] ?? 1)),
+            ];
+        }
+
+        if (empty($parts)) {
+            throw new RuntimeException('Bound import has no candidate parts.');
+        }
+
+        usort($parts, static function (array $a, array $b): int {
+            $discCmp = ((int)$a['disc']) <=> ((int)$b['disc']);
+            if ($discCmp !== 0) {
+                return $discCmp;
+            }
+            return strcmp((string)$a['dir'], (string)$b['dir']);
+        });
+
+        $snapshot = $plan->candidateSnapshot();
+        $snapshotExternalEvidence = isset($snapshot['external_evidence'])
+            && is_array($snapshot['external_evidence'])
+                ? $snapshot['external_evidence']
+                : [];
+
+        $binding = [
+            'action' => $action,
+            'target_album_id' => $targetAlbumId,
+
+            // GRIZZLY_BOUND_IDENTITY_V1
+            // Carry the exact identity already frozen in AlbumImportPlan.
+            // MediaImportService must not rediscover album identity during a
+            // bound CREATE/RECONCILE.
+            'release_mbid' => (string)(
+                $snapshot['release_mbid']
+                ?? $snapshotExternalEvidence['release_mbid']
+                ?? ''
+            ),
+            'release_group' => (string)(
+                $snapshot['release_group']
+                ?? $snapshotExternalEvidence['release_group']
+                ?? ''
+            ),
+            'artist_mbid' => (string)(
+                $snapshot['artist_mbid']
+                ?? $snapshotExternalEvidence['artist_mbid']
+                ?? ''
+            ),
+        ];
+
+        $transactionStarted = false;
+        $previousJournal = $this->filesystemJournal;
+        $this->filesystemJournal = $journal;
+
+        $beginWrite = function () use (&$transactionStarted, $revalidate): void {
+            if ($this->db->inTransaction()) {
+                throw new RuntimeException(
+                    'Database transaction unexpectedly active before bound BEGIN.'
+                );
+            }
+
+            // BEGIN precede il final write preflight: i lock DB acquisiti dal
+            // callback (es. SELECT ... FOR UPDATE su RECONCILE) devono vivere
+            // nella stessa transazione che applichera' le mutazioni.
+            $this->db->beginTransaction();
+            $transactionStarted = true;
+
+            $revalidate('before-write');
+        };
+
+        try {
+            $entry = $this->processAlbum(
+                $importRoot,
+                $candidatePath,
+                $parts,
+                false,
+                $binding,
+                $beginWrite
+            );
+
+            if (!$transactionStarted || !$this->db->inTransaction()) {
+                throw new RuntimeException(
+                    'Bound import reached completion without an active transaction.'
+                );
+            }
+
+            if (!empty($entry['errors'])) {
+                throw new RuntimeException(
+                    'Bound import reported errors: '
+                    . implode('; ', array_map('strval', (array)$entry['errors']))
+                );
+            }
+
+            if (!empty($entry['audio_deferred'])) {
+                if ($transactionStarted && $this->db->inTransaction()) {
+                    $this->db->rollBack();
+                }
+                $transactionStarted = false;
+
+                // Deferred relocation is an expected non-commit outcome, not a
+                // generic execution failure. Preserve the exact source paths so
+                // the worker can wait until the previous external disappears.
+                $entry['execution_outcome'] = 'deferred';
+                $entry['execution_reason'] = 'live-external-source-still-present';
+
+                return $entry;
+            }
+
+            if (!empty($entry['unmatched_tracks'])) {
+                if ($transactionStarted && $this->db->inTransaction()) {
+                    $this->db->rollBack();
+                }
+                $transactionStarted = false;
+
+                // A deterministic RECONCILE that cannot safely map every track
+                // must not partially write. Surface it as REVIEW after rollback.
+                $entry['execution_outcome'] = 'review';
+                $entry['execution_reason'] = 'unmatched-tracks';
+
+                return $entry;
+            }
+
+            $revalidate('before-commit');
+
+            $this->db->commit();
+            $transactionStarted = false;
+
+            $entry['execution_outcome'] = 'committed';
+
+            return $entry;
+        } catch (Throwable $e) {
+            if ($transactionStarted && $this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $e;
+        } finally {
+            $this->filesystemJournal = $previousJournal;
+        }
     }
 
     // ==========================================================
@@ -356,8 +588,42 @@ class MediaImportService
     // ELABORAZIONE DI UN ALBUM
     // ==========================================================
 
-    private function processAlbum(string $importDir, string $albumKey, array $parts, bool $dryRun): array
-    {
+    private function processAlbum(
+        string $importDir,
+        string $albumKey,
+        array $parts,
+        bool $dryRun,
+        ?array $executionBinding = null,
+        ?callable $beforeWrite = null
+    ): array {
+        $boundExecution = is_array($executionBinding);
+        $boundAction = $boundExecution
+            ? strtoupper(trim((string)($executionBinding['action'] ?? '')))
+            : '';
+        $boundTargetAlbumId = $boundExecution
+            && isset($executionBinding['target_album_id'])
+            && $executionBinding['target_album_id'] !== null
+                ? (int)$executionBinding['target_album_id']
+                : null;
+
+        if ($boundExecution) {
+            if ($dryRun) {
+                throw new RuntimeException('Bound execution cannot run in dry-run mode.');
+            }
+            if (!in_array($boundAction, ['CREATE', 'RECONCILE'], true)) {
+                throw new RuntimeException('Invalid bound action: ' . $boundAction);
+            }
+            if ($boundAction === 'CREATE' && $boundTargetAlbumId !== null) {
+                throw new RuntimeException('Bound CREATE unexpectedly has target_album_id.');
+            }
+            if (
+                $boundAction === 'RECONCILE'
+                && ($boundTargetAlbumId === null || $boundTargetAlbumId <= 0)
+            ) {
+                throw new RuntimeException('Bound RECONCILE requires target_album_id.');
+            }
+        }
+
         // --- 1) Analizza tutte le tracce del gruppo (tutti i dischi) ---
         $files = [];
         foreach ($parts as $p) {
@@ -498,28 +764,46 @@ class MediaImportService
             $reasons[] = 'tag non letti (getID3 assente)';
         }
 
-        // Se questi stessi file external sono gia' indicizzati, il source_path
-        // e' un'identita' piu' forte dei tag embedded. Questo protegge le
-        // correzioni manuali dell'utente (es. albumartist errato "Various
-        // Artists" corretto in "Why") dalle scansioni successive.
-        $sourceLinkedAlbum = $this->findExistingAlbumBySourcePaths($importDir, $tracks);
-
-        // Se la cartella e' stata spostata, i source_path nuovi non possono
-        // coincidere con quelli salvati in precedenza. Prima di fare lookup
-        // esterni proviamo quindi una relocation conservativa: stesso album
-        // locale (titolo/anno compatibili), tutti gli external precedenti non
-        // piu' raggiungibili e fingerprint dei file coincidenti.
+        // Nel percorso bound l'identita' album e' gia' stata decisa da
+        // AlbumIdentityResolver e NON deve essere calcolata di nuovo.
         //
-        // Questo NON rende source_hash una chiave globale: il fingerprint viene
-        // usato soltanto per riconoscere un MOVE di un album gia' noto. Se il
-        // vecchio file esiste ancora, il candidato viene rifiutato come copia.
-        if ($sourceLinkedAlbum === null) {
-            $sourceLinkedAlbum = $this->findExistingAlbumByRelocatedExternalFingerprints(
-                $tracks,
-                $artist,
-                $title,
-                $year
-            );
+        // RECONCILE carica esclusivamente il target autorizzato dal piano.
+        // CREATE non esegue source-path, relocation o fallback album matching.
+        if ($boundExecution) {
+            $sourceLinkedAlbum = $boundAction === 'RECONCILE'
+                ? $this->loadBoundAlbumContext((int)$boundTargetAlbumId)
+                : null;
+
+            if ($boundAction === 'RECONCILE' && $sourceLinkedAlbum === null) {
+                throw new RuntimeException(
+                    'Bound RECONCILE target album no longer exists: '
+                    . (int)$boundTargetAlbumId
+                );
+            }
+        } else {
+            // Se questi stessi file external sono gia' indicizzati, il source_path
+            // e' un'identita' piu' forte dei tag embedded. Questo protegge le
+            // correzioni manuali dell'utente (es. albumartist errato "Various
+            // Artists" corretto in "Why") dalle scansioni successive.
+            $sourceLinkedAlbum = $this->findExistingAlbumBySourcePaths($importDir, $tracks);
+
+            // Se la cartella e' stata spostata, i source_path nuovi non possono
+            // coincidere con quelli salvati in precedenza. Prima di fare lookup
+            // esterni proviamo quindi una relocation conservativa: stesso album
+            // locale (titolo/anno compatibili), tutti gli external precedenti non
+            // piu' raggiungibili e fingerprint dei file coincidenti.
+            //
+            // Questo NON rende source_hash una chiave globale: il fingerprint viene
+            // usato soltanto per riconoscere un MOVE di un album gia' noto. Se il
+            // vecchio file esiste ancora, il candidato viene rifiutato come copia.
+            if ($sourceLinkedAlbum === null) {
+                $sourceLinkedAlbum = $this->findExistingAlbumByRelocatedExternalFingerprints(
+                    $tracks,
+                    $artist,
+                    $title,
+                    $year
+                );
+            }
         }
 
         if ($sourceLinkedAlbum !== null) {
@@ -564,55 +848,126 @@ class MediaImportService
         // restituito da una ricerca API e' invece soltanto un suggerimento e
         // non deve scavalcare un artista locale omonimo gia' identificato.
         $externalArtistMbidFromTags = $externalArtistMbid !== null;
+
+        // GRIZZLY_BOUND_IDENTITY_V1
+        // In a bound execution AlbumImportPlan is the identity authority.
+        // Tags remain first priority; missing identity fields are completed
+        // only from the frozen plan snapshot. No cache lookup and no network.
+        $externalMbidFromBound = false;
+        $externalReleaseGroupFromBound = false;
+        $externalArtistMbidFromBound = false;
+
+        if ($boundExecution) {
+            $boundReleaseMbid = strtolower(trim((string)(
+                $executionBinding['release_mbid'] ?? ''
+            )));
+            $boundReleaseGroup = strtolower(trim((string)(
+                $executionBinding['release_group'] ?? ''
+            )));
+            $boundArtistMbid = strtolower(trim((string)(
+                $executionBinding['artist_mbid'] ?? ''
+            )));
+
+            if ($externalMbid === null && $this->isUuid($boundReleaseMbid)) {
+                $externalMbid = $boundReleaseMbid;
+                $externalMbidFromBound = true;
+            }
+
+            if (
+                $externalReleaseGroup === null
+                && $this->isUuid($boundReleaseGroup)
+            ) {
+                $externalReleaseGroup = $boundReleaseGroup;
+                $externalReleaseGroupFromBound = true;
+            }
+
+            if (
+                $externalArtistMbid === null
+                && $this->isUuid($boundArtistMbid)
+            ) {
+                $externalArtistMbid = $boundArtistMbid;
+                $externalArtistMbidFromBound = true;
+            }
+        }
+
         $externalMetadataAttempted = false;
 
-        if ($tagGenre === '' || $tagLabel === '' || $coverSource['type'] === 'none') {
+        $boundExistingAlbum = $boundExecution && $boundAction === 'RECONCILE'
+            ? $sourceLinkedAlbum
+            : null;
+
+        $boundExistingHasCover = is_array($boundExistingAlbum)
+            && (
+                trim((string)($boundExistingAlbum['cover_local'] ?? '')) !== ''
+                || trim((string)($boundExistingAlbum['cover_url'] ?? '')) !== ''
+            );
+
+        $needExternalGenre = $tagGenre === ''
+            && (
+                !$boundExecution
+                || $boundAction === 'CREATE'
+                || empty($boundExistingAlbum['genre_id'])
+            );
+
+        $needExternalLabel = $tagLabel === ''
+            && (
+                !$boundExecution
+                || $boundAction === 'CREATE'
+                || empty($boundExistingAlbum['label_id'])
+            );
+
+        $needExternalCover = $coverSource['type'] === 'none'
+            && !$boundExistingHasCover;
+
+        if ($needExternalGenre || $needExternalLabel || $needExternalCover) {
             $externalMetadataAttempted = true;
             $externalMeta = $this->fetchExternalMetadata(
                 $artist,
                 $title,
                 $year,
-                $coverSource['type'] === 'none',
+                $needExternalCover,
                 !$dryRun
             );
 
-            if ($tagGenre === '' && !empty($externalMeta['genre'])) {
+            if ($needExternalGenre && !empty($externalMeta['genre'])) {
                 $tagGenre = trim((string)$externalMeta['genre']);
             }
-            if ($tagLabel === '' && !empty($externalMeta['label'])) {
+            if ($needExternalLabel && !empty($externalMeta['label'])) {
                 $tagLabel = trim((string)$externalMeta['label']);
             }
-            if ($year === null && !empty($externalMeta['year'])) {
-                $apiYear = (int)$externalMeta['year'];
-                if ($apiYear >= 1900 && $apiYear <= ((int)date('Y') + 1)) {
-                    $year = $apiYear;
+
+            // Nel percorso bound le API possono arricchire solo metadata
+            // descrittivi. Non possono cambiare l'identita' album gia'
+            // autorizzata da AlbumIdentityResolver.
+            if (!$boundExecution) {
+                if ($year === null && !empty($externalMeta['year'])) {
+                    $apiYear = (int)$externalMeta['year'];
+                    if ($apiYear >= 1900 && $apiYear <= ((int)date('Y') + 1)) {
+                        $year = $apiYear;
+                    }
+                }
+
+                if ($externalMbid === null && !empty($externalMeta['mbid'])) {
+                    $apiMbid = strtolower(trim((string)$externalMeta['mbid']));
+                    if ($this->isUuid($apiMbid)) {
+                        $externalMbid = $apiMbid;
+                    }
+                }
+                if ($externalReleaseGroup === null && !empty($externalMeta['release_group'])) {
+                    $rg = strtolower(trim((string)$externalMeta['release_group']));
+                    if ($this->isUuid($rg)) {
+                        $externalReleaseGroup = $rg;
+                    }
+                }
+                if ($externalArtistMbid === null && !empty($externalMeta['artist_mbid'])) {
+                    $apiArtistMbid = strtolower(trim((string)$externalMeta['artist_mbid']));
+                    if ($this->isUuid($apiArtistMbid)) {
+                        $externalArtistMbid = $apiArtistMbid;
+                    }
                 }
             }
 
-            // I tag embedded descrivono la release realmente presente nei file
-            // e hanno priorita' sul risultato generico della ricerca API.
-            // L'API completa soltanto un'identita' mancante: non deve sostituire
-            // un MBID/release-group esplicito scritto nei file.
-            if ($externalMbid === null && !empty($externalMeta['mbid'])) {
-                $apiMbid = strtolower(trim((string)$externalMeta['mbid']));
-                if ($this->isUuid($apiMbid)) {
-                    $externalMbid = $apiMbid;
-                }
-            }
-            if ($externalReleaseGroup === null && !empty($externalMeta['release_group'])) {
-                $rg = strtolower(trim((string)$externalMeta['release_group']));
-                if ($this->isUuid($rg)) {
-                    $externalReleaseGroup = $rg;
-                }
-            }
-            if ($externalArtistMbid === null && !empty($externalMeta['artist_mbid'])) {
-                $apiArtistMbid = strtolower(trim((string)$externalMeta['artist_mbid']));
-                if ($this->isUuid($apiArtistMbid)) {
-                    $externalArtistMbid = $apiArtistMbid;
-                }
-            }
-
-            if ($coverSource['type'] === 'none') {
+            if ($needExternalCover && $coverSource['type'] === 'none') {
                 if (!empty($externalMeta['cover_local'])) {
                     $externalCoverLocal = trim((string)$externalMeta['cover_local']);
                 } elseif (!empty($externalMeta['cover'])) {
@@ -634,7 +989,8 @@ class MediaImportService
         $needArtistIdentity = $externalArtistMbid === null && $artistFoundByName === null;
         $needAlbumIdentity  = $externalReleaseGroup === null;
 
-        if (($needAlbumIdentity || $needArtistIdentity)
+        if (!$boundExecution
+            && ($needAlbumIdentity || $needArtistIdentity)
             && $sourceLinkedAlbum === null
             && !$externalMetadataAttempted) {
             $identity = $this->fetchExternalIdentity($artist, $title, $year);
@@ -662,7 +1018,10 @@ class MediaImportService
         // anche release MBID / release-group ottenuti SOLO dalla stessa ricerca
         // esterna: l'intero blocco di identita' e' sospetto. I valori espliciti
         // scritti nei file non vengono mai rimossi.
-        if (!$externalArtistMbidFromTags
+        $externalArtistIdentityAuthoritative = $externalArtistMbidFromTags
+            || $externalArtistMbidFromBound;
+
+        if (!$externalArtistIdentityAuthoritative
             && $artistFoundByName !== null
             && $externalArtistMbid !== null) {
             $localArtistRow = $artistModel->getById((int)$artistFoundByName);
@@ -674,10 +1033,13 @@ class MediaImportService
                 && !hash_equals($localArtistMbid, strtolower($externalArtistMbid))) {
                 $externalArtistMbid = null;
 
-                if (!$externalMbidFromTags) {
+                if (!$externalMbidFromTags && !$externalMbidFromBound) {
                     $externalMbid = null;
                 }
-                if (!$externalReleaseGroupFromTags) {
+                if (
+                    !$externalReleaseGroupFromTags
+                    && !$externalReleaseGroupFromBound
+                ) {
                     $externalReleaseGroup = null;
                 }
             }
@@ -686,7 +1048,7 @@ class MediaImportService
         // Anche quando l'artista locale non ha ancora un MBID, una risposta API
         // non e' abbastanza forte da creare automaticamente un omonimo separato.
         // Solo un MBID artista presente nei tag puo' scavalcare il nome locale.
-        $preferLocalArtistByName = !$externalArtistMbidFromTags
+        $preferLocalArtistByName = !$externalArtistIdentityAuthoritative
             && $artistFoundByName !== null;
         $artistIdentityMbid = $externalArtistMbid !== null
             ? $externalArtistMbid
@@ -790,9 +1152,46 @@ class MediaImportService
         }
 
         // --- 5b) IMPORT REALE ---
+        // Nel percorso bound la transazione parte ESATTAMENTE qui, dopo lettura
+        // tag / metadata enrichment e dopo una nuova revalidazione.
+        if ($boundExecution) {
+            if ($beforeWrite === null) {
+                throw new RuntimeException(
+                    'Bound execution requires a before-write callback.'
+                );
+            }
+
+            $beforeWrite();
+
+            if (!$this->db->inTransaction()) {
+                throw new RuntimeException(
+                    'Bound execution write phase requires an active transaction.'
+                );
+            }
+        }
+
         $existing = null;
         $artistId = 0;
 
+        if ($boundExecution) {
+            if ($boundAction === 'RECONCILE') {
+                $existing = $albumModel->getById((int)$boundTargetAlbumId);
+                if (!$existing) {
+                    throw new RuntimeException(
+                        'Bound RECONCILE target disappeared before write: '
+                        . (int)$boundTargetAlbumId
+                    );
+                }
+                $artistId = (int)($existing['artist_id'] ?? 0);
+            } else {
+                // CREATE e' vincolante: risolve soltanto l'artista.
+                // Nessun matcher album viene eseguito.
+                $artistId = $preferLocalArtistByName
+                    ? (int)$artistFoundByName
+                    : $artistModel->findOrCreate($artist, $artistIdentityMbid);
+                $existing = null;
+            }
+        } else {
         // Prima prova il legame gia' noto tramite source_path. In questo modo
         // una correzione manuale di artista/titolo non crea una seconda scheda
         // quando i tag embedded continuano a contenere valori sbagliati.
@@ -818,6 +1217,7 @@ class MediaImportService
                 $externalMbidFromTags,
                 $tracks
             );
+        }
         }
 
         if ($existing) {
@@ -849,12 +1249,17 @@ class MediaImportService
                 );
             }
 
-            if ($sameMbIdentity
-                && $year !== null && !empty($existing['year']) && (int)$existing['year'] !== (int)$year) {
-                $yearNote = 'release-group coincidente ma anno differente (archivio '
-                    . (int)$existing['year'] . ', scanner ' . (int)$year . ')';
+            if ($year !== null
+                && !empty($existing['year'])
+                && (int)$existing['year'] !== (int)$year) {
+                $yearNote = $sameMbIdentity
+                    ? 'release-group coincidente ma anno differente (archivio '
+                        . (int)$existing['year'] . ', scanner ' . (int)$year . ')'
+                    : 'album riconciliato ma anno differente (archivio '
+                        . (int)$existing['year'] . ', scanner ' . (int)$year . ')';
+
                 $entry['review_note'] = $this->appendReviewText($entry['review_note'], $yearNote);
-                $this->setReview($albumId, $yearNote);
+                $this->updateReviewIfScannerOwned($albumId, $yearNote);
             }
 
             $this->maybeFillAlbumMetadataIfMissing($albumId, $tagGenre, $tagLabel, $year, $externalMbid, $externalReleaseGroup);
@@ -933,7 +1338,7 @@ class MediaImportService
 
                 // Rimuove l'eventuale vecchia nota "N tracce non associate..."
                 // riscrivendo la review corrente calcolata dai metadati.
-                $this->setReview($albumId, $entry['review_note']);
+                $this->updateReviewIfScannerOwned($albumId, $entry['review_note']);
             }
 
             $unmatched = 0;
@@ -985,7 +1390,11 @@ class MediaImportService
             if ($unmatched > 0) {
                 $note = $unmatched . ' tracce non associate automaticamente alla tracklist esistente';
                 $entry['review_note'] = $this->appendReviewText($entry['review_note'], $note);
-                $this->setReview($albumId, $entry['review_note']);
+                $this->updateReviewIfScannerOwned($albumId, $entry['review_note']);
+            }
+
+            if ($boundExecution) {
+                $entry['unmatched_tracks'] = $unmatched;
             }
 
             // Cleanup negativo soltanto a riconciliazione conclusa. Se ci sono
@@ -1035,6 +1444,12 @@ class MediaImportService
             $byPos[(int)$row['position']] = (int)$row['id'];
         }
 
+        if ($boundExecution && count($byPos) !== count($tracks)) {
+            throw new RuntimeException(
+                'Bound CREATE could not map every saved track position.'
+            );
+        }
+
         $pos = 0;
         foreach ($tracks as $t) {
             $pos++;
@@ -1045,6 +1460,64 @@ class MediaImportService
 
         $entry['status'] = 'created';
         return $entry;
+    }
+
+    private function pathWithinRoot(string $path, string $root): bool
+    {
+        $path = rtrim(str_replace('\\', '/', $path), '/');
+        $root = rtrim(str_replace('\\', '/', $root), '/');
+
+        return $path === $root
+            || strpos($path . '/', $root . '/') === 0;
+    }
+
+    private function journalCreatedFile(string $absolutePath): void
+    {
+        if ($this->filesystemJournal === null) {
+            return;
+        }
+
+        $this->filesystemJournal->recordCreatedFile($absolutePath);
+    }
+
+    private function journalRelativeUploadFile(string $path): void
+    {
+        if ($this->filesystemJournal === null) {
+            return;
+        }
+
+        $path = trim(str_replace('\\', '/', $path));
+        if ($path === '') {
+            return;
+        }
+
+        if (strpos($path, '/') === 0) {
+            $candidate = $path;
+        } elseif (defined('UPLOAD_PATH')) {
+            $candidate = rtrim(str_replace('\\', '/', (string)UPLOAD_PATH), '/')
+                . '/' . ltrim($path, '/');
+        } else {
+            return;
+        }
+
+        $real = realpath($candidate);
+        if ($real === false || !is_file($real)) {
+            return;
+        }
+
+        $real = str_replace('\\', '/', $real);
+
+        if (defined('UPLOAD_PATH')) {
+            $uploadRoot = realpath((string)UPLOAD_PATH);
+            if ($uploadRoot !== false) {
+                $uploadRoot = rtrim(str_replace('\\', '/', $uploadRoot), '/');
+                if (!$this->pathWithinRoot($real, $uploadRoot)) {
+                    return;
+                }
+            }
+        }
+
+        $this->filesystemJournal->recordCreatedFile($real);
     }
 
     // ==========================================================
@@ -2249,32 +2722,24 @@ class MediaImportService
                 // confermato dai dati locali reali. Il fatto che il MBID provenga
                 // dai tag o dal lookup API non puo' scavalcare anno/tracklist.
                 //
-                // Regola conservativa:
-                //   - anno identico (anno mancante: vedi $yearCompatible);
+                // Regola conservativa sul concetto di ALBUM LOGICO:
                 //   - tracklist completa e associabile 1:1 in modo affidabile;
                 //     il match letterale resta il segnale piu' forte, ma una
                 //     variante editoriale del titolo non deve scartare un album
                 //     quando tutte le tracce sono comunque abbinate;
                 //   - inoltre deve coincidere il titolo-base OPPURE il release-group.
                 //
+                // L'anno non e' una chiave di identita': una scheda manuale puo'
+                // avere un anno di stampa diverso dall'anno canonico dell'album.
+                // Un year mismatch resta disponibile come warning/ranking, ma non
+                // puo' annullare una tracklist completa gia' verificata.
+                //
                 // Questo copre alias reali dello stesso album (es. "The Beatles"
-                // / "The White Album") e tracklist manuali piu' descrittive,
-                // senza rendere il release-group, da solo, una prova sufficiente
-                // di identita'.
+                // / "The White Album") e release/edizioni diverse senza rendere
+                // il release-group, da solo, una prova sufficiente di identita'.
                 $structuralTrackMatch = $strictTrackMatch || $fullTrackMatch || $editionTrackMatch;
 
-                // Anno: deve coincidere quando e' noto da entrambe le parti.
-                // Se manca da una delle due (file senza alcun tag anno, oppure
-                // scheda senza anno), l'assenza non vale come prova negativa,
-                // ma solo con le due prove indipendenti piu' forti insieme:
-                // titolo-base uguale E release-group MusicBrainz uguale.
-                // Anni presenti e diversi restano un veto (es. reincisioni
-                // con lo stesso titolo-base e la stessa tracklist).
-                $yearCompatible = ($yearDiff !== null && $yearDiff === 0)
-                    || ($yearDiff === null && $sameTitleBase && $sameGroupCandidate);
-
                 $structuralIdentity = $structuralTrackMatch
-                    && $yearCompatible
                     && ($sameTitleBase || $sameGroupCandidate);
 
                 if (!$structuralIdentity) {
@@ -2283,8 +2748,8 @@ class MediaImportService
 
                 // Release-group diversi restano normalmente un veto.
                 // L'unica eccezione e' il caso editoriale verificato sopra:
-                // stesso titolo-base, anno identico, stesso numero di tracce,
-                // qualificatore comune all'intera tracklist e match 1:1 completo.
+                // stesso titolo-base, stesso numero di tracce, qualificatore
+                // comune all'intera tracklist e match 1:1 completo.
                 if ($releaseGroup !== ''
                     && $candidateGroup !== ''
                     && !$sameGroupCandidate
@@ -2363,6 +2828,34 @@ class MediaImportService
         }
 
         return $ranked[0]['row'];
+    }
+
+    /**
+     * Carica ESCLUSIVAMENTE il target gia' deciso da AlbumIdentityResolver.
+     * Nessun fallback o secondo album matching.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function loadBoundAlbumContext(int $albumId): ?array
+    {
+        if ($albumId <= 0) {
+            return null;
+        }
+
+        $stmt = $this->db->prepare("
+            SELECT a.id, a.artist_id, a.genre_id, a.label_id, a.format_id,
+                   a.title, a.year, a.cover_local, a.cover_url,
+                   a.mbid, a.mb_release_group,
+                   ar.name AS artist_name
+            FROM albums a
+            JOIN artists ar ON ar.id = a.artist_id
+            WHERE a.id = :id
+            LIMIT 1
+        ");
+        $stmt->execute([':id' => $albumId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return $row ?: null;
     }
 
     /**
@@ -2865,7 +3358,12 @@ class MediaImportService
             $token = 'external-' . sha1('audio:' . $chosenId) . '.' . $cleanExt;
         }
 
-        $this->db->beginTransaction();
+        $ownTransaction = !$this->db->inTransaction();
+
+        if ($ownTransaction) {
+            $this->db->beginTransaction();
+        }
+
         try {
             $upd = $this->db->prepare("
                 UPDATE audio_files
@@ -2909,9 +3407,11 @@ class MediaImportService
                 $del->execute($staleIds);
             }
 
-            $this->db->commit();
+            if ($ownTransaction) {
+                $this->db->commit();
+            }
         } catch (Throwable $e) {
-            if ($this->db->inTransaction()) {
+            if ($ownTransaction && $this->db->inTransaction()) {
                 $this->db->rollBack();
             }
             throw $e;
@@ -3343,6 +3843,28 @@ class MediaImportService
         ]);
     }
 
+
+    /**
+     * RECONCILE: aggiorna la nota soltanto per album gia' scanner-owned.
+     *
+     * Un album manuale/curato (needs_review=0) non deve mai essere degradato
+     * automaticamente a needs_review=1 dal semplice collegamento di audio
+     * esterno o da metadati raw dei file.
+     */
+    private function updateReviewIfScannerOwned(int $albumId, string $note): void
+    {
+        $stmt = $this->db->prepare(
+            "UPDATE albums
+             SET review_note = :n
+             WHERE id = :id
+               AND needs_review = 1"
+        );
+        $stmt->execute([
+            ':n'  => ($note === '' ? null : $note),
+            ':id' => $albumId,
+        ]);
+    }
+
     // ==========================================================
     // COVER
     // ==========================================================
@@ -3400,13 +3922,27 @@ class MediaImportService
                 $ext = 'jpg';
             }
             $name = bin2hex(random_bytes(10)) . '.' . $ext;
-            return @copy($cover['path'], COVERS_PATH . '/' . $name) ? ('covers/' . $name) : null;
+            $dest = COVERS_PATH . '/' . $name;
+
+            if (!@copy($cover['path'], $dest)) {
+                return null;
+            }
+
+            $this->journalCreatedFile($dest);
+            return 'covers/' . $name;
         }
 
         // embedded
         $ext  = $cover['ext'] !== '' ? $cover['ext'] : 'jpg';
         $name = bin2hex(random_bytes(10)) . '.' . $ext;
-        return (@file_put_contents(COVERS_PATH . '/' . $name, $cover['data']) !== false) ? ('covers/' . $name) : null;
+        $dest = COVERS_PATH . '/' . $name;
+
+        if (@file_put_contents($dest, $cover['data']) === false) {
+            return null;
+        }
+
+        $this->journalCreatedFile($dest);
+        return 'covers/' . $name;
     }
 
     /**
@@ -3526,6 +4062,7 @@ class MediaImportService
                 $local = $service->downloadCover((string)$data['cover']);
                 if ($local !== null) {
                     $data['cover_local'] = $local;
+                    $this->journalRelativeUploadFile((string)$local);
                 }
             }
 
@@ -3670,6 +4207,8 @@ class MediaImportService
                 return 'error';
             }
 
+            $this->journalCreatedFile($dest);
+
             $oldFilename = isset($existing['filename']) ? (string)$existing['filename'] : '';
 
             try {
@@ -3696,12 +4235,20 @@ class MediaImportService
                     ':id'            => (int)$existing['id'],
                 ]);
             } catch (Throwable $e) {
-                @unlink($dest);
+                if ($this->filesystemJournal === null) {
+                    @unlink($dest);
+                }
                 throw $e;
             }
 
             if ($oldFilename !== '' && $oldFilename !== $stored) {
-                @unlink($audioDir . '/' . basename($oldFilename));
+                $oldPath = $audioDir . '/' . basename($oldFilename);
+
+                if ($this->filesystemJournal !== null) {
+                    $this->filesystemJournal->deferDeleteFile($oldPath);
+                } else {
+                    @unlink($oldPath);
+                }
             }
 
             return 'imported';

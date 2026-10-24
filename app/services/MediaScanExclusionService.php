@@ -80,7 +80,7 @@ class MediaScanExclusionService
     /**
      * True se $path coincide con $root oppure è un suo discendente reale
      * dal punto di vista lessicale del path. Il separatore evita falsi match
-     * come /import/cache-old per /import/cache.
+     * come /import/downloading-old per /import/downloading.
      */
     public static function isSameOrDescendant(string $path, string $root): bool
     {

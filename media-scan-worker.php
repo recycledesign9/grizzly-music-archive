@@ -300,7 +300,9 @@ function settingBool(PDO $db, string $key, bool $default): bool
 
 function normalizedConfiguredPath(string $path): string
 {
-    $path = trim(str_replace('\\', '/', $path));
+    // Filesystem paths are byte-significant. Do NOT trim whitespace:
+    // a directory name may legitimately end with a space on Unix/macOS.
+    $path = str_replace('\\', '/', $path);
     if ($path === '') {
         return '';
     }
@@ -396,8 +398,9 @@ function configuredAlbumPathFromRuntime(
     string $runtimeRoot,
     string $configuredRoot
 ): string {
-    $runtimeAlbumPath = rtrim(str_replace('\\', '/', trim($runtimeAlbumPath)), '/');
-    $runtimeRoot      = rtrim(str_replace('\\', '/', trim($runtimeRoot)), '/');
+    // Preserve whitespace that belongs to real filesystem names.
+    $runtimeAlbumPath = rtrim(str_replace('\\', '/', $runtimeAlbumPath), '/');
+    $runtimeRoot      = rtrim(str_replace('\\', '/', $runtimeRoot), '/');
     $configuredRoot   = normalizedConfiguredPath($configuredRoot);
 
     if ($runtimeAlbumPath === '' || $runtimeRoot === '' || $configuredRoot === '') {
@@ -525,6 +528,112 @@ function cleanupOrphanIgnoredMediaSources(PDO $db, string $configuredRoot): int
     return $deleted;
 }
 
+/**
+ * Sposta una path runtime da una watched root a un'altra mantenendo il relativo.
+ */
+function rebaseWorkerPath(string $path, string $oldRoot, string $newRoot): string
+{
+    // Preserve whitespace in discovered candidate paths. Only slash
+    // normalization/trailing slash removal is allowed here.
+    $path = rtrim(str_replace('\\', '/', $path), '/');
+    $oldRoot = rtrim(str_replace('\\', '/', $oldRoot), '/');
+    $newRoot = rtrim(str_replace('\\', '/', $newRoot), '/');
+
+    if ($path === '' || $oldRoot === '' || $newRoot === '') {
+        return '';
+    }
+    if ($path !== $oldRoot && strpos($path, $oldRoot . '/') !== 0) {
+        return '';
+    }
+
+    return $newRoot . substr($path, strlen($oldRoot));
+}
+
+/**
+ * Migra lo state del worker dopo un root rebind verificato.
+ *
+ * Gli album gia' importati restano no-op, ma la signature viene ricalcolata
+ * sulla nuova posizione. Stati non conclusi tornano pending e dovranno passare
+ * nuovamente dalla stability/readiness window.
+ */
+function migrateWorkerStateRoot(
+    array $state,
+    string $oldRuntimeRoot,
+    string $newRuntimeRoot,
+    string $newConfiguredRoot
+): array {
+    $now = time();
+    $out = [
+        'configured_path' => $newConfiguredRoot,
+        'albums' => [],
+    ];
+
+    $albums = isset($state['albums']) && is_array($state['albums'])
+        ? $state['albums']
+        : [];
+
+    foreach ($albums as $oldKey => $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+
+        $newKey = rebaseWorkerPath(
+            (string)$oldKey,
+            $oldRuntimeRoot,
+            $newRuntimeRoot
+        );
+        if ($newKey === '' || !is_dir($newKey) || !is_readable($newKey)) {
+            continue;
+        }
+
+        $newSignature = albumSnapshot($newKey);
+        if ($newSignature === '') {
+            continue;
+        }
+
+        $oldSignature = trim((string)($entry['signature'] ?? ''));
+        $oldImported = trim((string)($entry['imported_signature'] ?? ''));
+        $oldBootstrap = trim((string)($entry['readiness_bootstrap_signature'] ?? ''));
+
+        $wasImported = $oldSignature !== ''
+            && $oldImported !== ''
+            && hash_equals($oldSignature, $oldImported);
+        $wasBootstrap = $oldSignature !== ''
+            && $oldBootstrap !== ''
+            && hash_equals($oldSignature, $oldBootstrap);
+
+        $entry['signature'] = $newSignature;
+        $entry['deferred_sources'] = [];
+
+        if ($wasImported) {
+            $entry['imported_signature'] = $newSignature;
+            $entry['last_result'] = 'ok';
+            if ($wasBootstrap) {
+                $entry['readiness_bootstrap_signature'] = $newSignature;
+                $entry['readiness_stable'] = true;
+            } else {
+                unset($entry['readiness_bootstrap_signature']);
+            }
+        } else {
+            $entry['imported_signature'] = null;
+            $entry['last_result'] = 'pending';
+            $entry['stable_since'] = $now;
+            $entry['last_scan'] = null;
+            unset(
+                $entry['readiness_bootstrap_signature'],
+                $entry['readiness_stable'],
+                $entry['readiness_status'],
+                $entry['candidate_signature'],
+                $entry['gate_key']
+            );
+        }
+
+        $out['albums'][$newKey] = $entry;
+    }
+
+    return $out;
+}
+
 function loadWorkerState(string $file): array
 {
     if (!is_file($file)) {
@@ -602,322 +711,6 @@ function albumSnapshot(string $albumDir): string
     return sha1(implode("\n", $rows));
 }
 
-/**
- * Normalizzazione conservativa usata esclusivamente per correlare una
- * directory-album scoperta fuori dalle esclusioni con attività ancora
- * presente dentro una root esclusa.
- *
- * Non entra nel matching degli album e non modifica metadati persistiti.
- */
-function workerActivityNameKey(string $value): string
-{
-    $value = trim($value);
-    if ($value === '') {
-        return '';
-    }
-
-    if (function_exists('mb_strtolower')) {
-        $value = mb_strtolower($value, 'UTF-8');
-    } else {
-        $value = strtolower($value);
-    }
-
-    $value = str_replace(
-        ["\xE2\x80\x98", "\xE2\x80\x99", "\xE2\x80\x9C", "\xE2\x80\x9D", "\xE2\x80\x93", "\xE2\x80\x94", '_'],
-        ["'", "'", '"', '"', '-', '-', ' '],
-        $value
-    );
-
-    $normalized = preg_replace('/[^\\p{L}\\p{N}]+/u', ' ', $value);
-    if (!is_string($normalized)) {
-        $normalized = preg_replace('/[^a-z0-9]+/i', ' ', $value);
-    }
-
-    $normalized = is_string($normalized) ? $normalized : $value;
-    $normalized = preg_replace('/\\s+/u', ' ', $normalized);
-
-    return trim(is_string($normalized) ? $normalized : $value);
-}
-
-function workerIsDiscDirectoryName(string $name): bool
-{
-    return (bool)preg_match('/^(cd|disc|disco|disk)\\s*[-_. ]?\\s*\\d{1,2}$/i', trim($name));
-}
-
-/**
- * Per un file/cartella sotto una root esclusa individua la directory che più
- * probabilmente rappresenta l'album. Le directory CD1/Disc 2 confluiscono nel
- * loro genitore, come avviene già nella discovery principale.
- */
-function workerExcludedAlbumDir(string $dir, string $excludedRoot): string
-{
-    $dir = MediaScanExclusionService::normalizePath($dir);
-    $excludedRoot = MediaScanExclusionService::normalizePath($excludedRoot);
-
-    if ($dir === '' || $excludedRoot === '') {
-        return '';
-    }
-
-    if (!MediaScanExclusionService::isSameOrDescendant($dir, $excludedRoot)) {
-        return '';
-    }
-
-    if ($dir !== $excludedRoot && workerIsDiscDirectoryName(basename($dir))) {
-        $parent = MediaScanExclusionService::normalizePath(dirname($dir));
-        if ($parent !== '' && MediaScanExclusionService::isSameOrDescendant($parent, $excludedRoot)) {
-            $dir = $parent;
-        }
-    }
-
-    return $dir;
-}
-
-/**
- * Chiave filename per una correlazione di fallback. Rimuove soltanto
- * estensioni e prefissi numerici di traccia; non prova a indovinare artista o
- * album dal nome del file.
- */
-function workerActivityFileKey(string $filename): string
-{
-    $name = trim(basename($filename));
-    if ($name === '' || $name[0] === '.') {
-        return '';
-    }
-
-    // Alcuni downloader aggiungono un'estensione temporanea sopra quella audio.
-    for ($i = 0; $i < 2; $i++) {
-        $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
-        if ($ext === '') {
-            break;
-        }
-        if (in_array($ext, ['part', 'partial', 'tmp', 'download', 'crdownload', 'mp3', 'flac'], true)) {
-            $name = pathinfo($name, PATHINFO_FILENAME);
-            continue;
-        }
-        break;
-    }
-
-    // 01 - Titolo, 1-01 Titolo, 01. Titolo, ecc.
-    $stripped = preg_replace('/^\\s*(?:\\d{1,2}\\s*[-_.]\\s*)?\\d{1,3}\\s*[-_. )]+\\s*/u', '', $name);
-    if (is_string($stripped) && trim($stripped) !== '') {
-        $name = $stripped;
-    }
-
-    $key = workerActivityNameKey($name);
-
-    // Evita correlazioni basate su nomi troppo corti/generici.
-    if (strlen($key) < 5 || in_array($key, ['cover', 'folder', 'front', 'back', 'scan', 'booklet'], true)) {
-        return '';
-    }
-
-    return $key;
-}
-
-/**
- * Indicizza l'attività presente nelle root escluse senza assumere alcuna
- * struttura tipo root/utente/album. Gli elementi intermedi possono cambiare,
- * mancare o essere diversi tra area temporanea e area finale.
- *
- * Ogni directory viene indicizzata per nome (così sono visibili anche cartelle
- * di coda ancora vuote); i file aggiungono un secondo segnale basato sul nome
- * traccia. Nessun contenuto viene modificato.
- *
- * @return array{by_name:array<string,array<string,bool>>,by_file:array<string,array<string,bool>>,names:array<string,string>}
- */
-function buildExcludedActivityIndex(array $excludedRoots): array
-{
-    $index = [
-        'by_name' => [],
-        'by_file' => [],
-        'names'   => [],
-    ];
-
-    foreach ($excludedRoots as $excludedRoot) {
-        $excludedRoot = MediaScanExclusionService::normalizePath((string)$excludedRoot);
-        if ($excludedRoot === '' || !is_dir($excludedRoot) || !is_readable($excludedRoot)) {
-            continue;
-        }
-
-        $stack = [$excludedRoot];
-        while (!empty($stack)) {
-            $dir = array_pop($stack);
-            $entries = @scandir($dir);
-            if ($entries === false) {
-                continue;
-            }
-
-            foreach ($entries as $entry) {
-                if ($entry === '.' || $entry === '..' || ($entry !== '' && $entry[0] === '.')) {
-                    continue;
-                }
-
-                $path = $dir . '/' . $entry;
-                if (is_link($path)) {
-                    continue;
-                }
-
-                if (is_dir($path)) {
-                    $stack[] = $path;
-
-                    $albumDir = workerExcludedAlbumDir($path, $excludedRoot);
-                    if ($albumDir !== '' && $albumDir !== $excludedRoot) {
-                        $nameKey = workerActivityNameKey(basename($albumDir));
-                        if ($nameKey !== '') {
-                            if (!isset($index['by_name'][$nameKey])) {
-                                $index['by_name'][$nameKey] = [];
-                            }
-                            $index['by_name'][$nameKey][$albumDir] = true;
-                            $index['names'][$albumDir] = $nameKey;
-                        }
-                    }
-                    continue;
-                }
-
-                if (!is_file($path)) {
-                    continue;
-                }
-
-                $albumDir = workerExcludedAlbumDir(dirname($path), $excludedRoot);
-                if ($albumDir === '' || $albumDir === $excludedRoot) {
-                    continue;
-                }
-
-                $nameKey = workerActivityNameKey(basename($albumDir));
-                if ($nameKey !== '') {
-                    if (!isset($index['by_name'][$nameKey])) {
-                        $index['by_name'][$nameKey] = [];
-                    }
-                    $index['by_name'][$nameKey][$albumDir] = true;
-                    $index['names'][$albumDir] = $nameKey;
-                }
-
-                $fileKey = workerActivityFileKey($entry);
-                if ($fileKey !== '') {
-                    if (!isset($index['by_file'][$fileKey])) {
-                        $index['by_file'][$fileKey] = [];
-                    }
-                    $index['by_file'][$fileKey][$albumDir] = true;
-                }
-            }
-        }
-    }
-
-    return $index;
-}
-
-function workerCandidateFileKeys(string $albumDir): array
-{
-    $keys = [];
-
-    try {
-        $it = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($albumDir, FilesystemIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::LEAVES_ONLY
-        );
-
-        foreach ($it as $file) {
-            if (!$file->isFile() || $file->isLink()) {
-                continue;
-            }
-
-            $ext = strtolower(pathinfo($file->getFilename(), PATHINFO_EXTENSION));
-            if (!in_array($ext, ['mp3', 'flac'], true)) {
-                continue;
-            }
-
-            $key = workerActivityFileKey($file->getFilename());
-            if ($key !== '') {
-                $keys[$key] = true;
-            }
-        }
-    } catch (Throwable $e) {
-        return [];
-    }
-
-    return array_keys($keys);
-}
-
-function workerAlbumNamesCompatible(string $a, string $b): bool
-{
-    if ($a === '' || $b === '') {
-        return false;
-    }
-
-    if ($a === $b) {
-        return true;
-    }
-
-    $shorter = strlen($a) <= strlen($b) ? $a : $b;
-    $longer  = strlen($a) <= strlen($b) ? $b : $a;
-
-    // Solo titoli sufficientemente distintivi: evita containment fragili su
-    // nomi corti come "III", "Live", "AM", ecc.
-    return strlen($shorter) >= 10 && strpos($longer, $shorter) !== false;
-}
-
-/**
- * Cerca attività correlata a un candidate album fuori dalle root escluse.
- *
- * Ordine dei segnali:
- *   1. stesso nome album normalizzato, a qualsiasi profondità;
- *   2. nome compatibile (uno contiene l'altro) per titoli >= 10 caratteri;
- *   3. almeno due filename-traccia distintivi in comune;
- *   4. un filename in comune + nomi album compatibili.
- *
- * Il parent (es. username del downloader) NON partecipa mai al confronto.
- * Un falso positivo può soltanto ritardare un import; non modifica il DB.
- *
- * @return array{path:string,reason:string}|null
- */
-function findExcludedActivityMatch(string $albumKey, array $activity): ?array
-{
-    $candidateName = workerActivityNameKey(basename($albumKey));
-    if ($candidateName === '') {
-        return null;
-    }
-
-    if (!empty($activity['by_name'][$candidateName])) {
-        $paths = array_keys($activity['by_name'][$candidateName]);
-        sort($paths, SORT_STRING);
-        return ['path' => $paths[0], 'reason' => 'same-album-name'];
-    }
-
-    foreach (($activity['names'] ?? []) as $activePath => $activeName) {
-        if (workerAlbumNamesCompatible($candidateName, (string)$activeName)) {
-            return ['path' => (string)$activePath, 'reason' => 'compatible-album-name'];
-        }
-    }
-
-    $candidateFiles = workerCandidateFileKeys($albumKey);
-    if (empty($candidateFiles)) {
-        return null;
-    }
-
-    $hits = [];
-    foreach ($candidateFiles as $fileKey) {
-        foreach (array_keys($activity['by_file'][$fileKey] ?? []) as $activePath) {
-            if (!isset($hits[$activePath])) {
-                $hits[$activePath] = [];
-            }
-            $hits[$activePath][$fileKey] = true;
-        }
-    }
-
-    foreach ($hits as $activePath => $fileHits) {
-        $count = count($fileHits);
-        if ($count >= 2) {
-            return ['path' => (string)$activePath, 'reason' => 'track-filenames'];
-        }
-
-        $activeName = (string)($activity['names'][$activePath] ?? '');
-        if ($count >= 1 && workerAlbumNamesCompatible($candidateName, $activeName)) {
-            return ['path' => (string)$activePath, 'reason' => 'album-name+track'];
-        }
-    }
-
-    return null;
-}
-
 // One worker per Grizzly installation, regardless of which folder is selected.
 $tmpDir    = rtrim(sys_get_temp_dir(), '/');
 $stateFile = $tmpDir . '/grizzly-media-import-state.json';
@@ -979,6 +772,18 @@ $exitCode = 0;
 
 $service = new MediaImportService();
 $exclusionService = new MediaScanExclusionService($db);
+$rootRelocationService = new MediaRootRelocationService($db);
+
+// Canonical production gate state. It is deliberately separate from the
+// historical worker snapshot and from shadow/diagnostic readiness state.
+$readinessStateFile = $root . '/storage/media-scan-readiness-state.json';
+$readinessStateRepository = new AlbumReadinessStateRepository($readinessStateFile);
+$readinessService = new AlbumReadinessService($db, $root);
+$readinessService->setStateRepository($readinessStateRepository);
+
+$scanGate = new AlbumScanGate($db, $root);
+$importExecutor = new AlbumImportExecutor($db, $root);
+
 $state   = loadWorkerState($stateFile);
 $lastNotice = null;
 $lastActiveConfiguredPath = null;
@@ -1107,17 +912,114 @@ while (true) {
             isset($state['configured_path']) ? (string)$state['configured_path'] : ''
         );
 
-        if ($stateConfiguredPath !== $configuredPath) {
-            workerLog('[CONFIG] Watched folder cambiata: reset dello state scanner.');
-            $state = [
-                'configured_path' => $configuredPath,
-                'albums'          => [],
-            ];
+        if ($options['dir_override'] === null && $hasScannerSettings) {
+            try {
+                // Durable source of truth: the DB binding, not /tmp worker state.
+                // legacy state is consulted only once for upgrade/bootstrap and
+                // only after every current external source_path proves that root.
+                $boundConfiguredPath = $rootRelocationService->resolveBoundRoot(
+                    $configuredPath,
+                    $stateConfiguredPath
+                );
+            } catch (Throwable $e) {
+                workerLog(
+                    '[ERROR] Binding watched folder non determinabile: '
+                    . $e->getMessage()
+                );
+                $stopReason = 'scanner root binding non verificato';
+                $exitCode = 1;
+                break;
+            }
+
+            if ($boundConfiguredPath !== $configuredPath) {
+                $oldRuntimeRoot = runtimeScanPath($boundConfiguredPath);
+                $oldRuntimeReal = realpath($oldRuntimeRoot);
+                if ($oldRuntimeReal !== false && is_dir($oldRuntimeReal)) {
+                    $oldRuntimeRoot = rtrim(str_replace('\\', '/', $oldRuntimeReal), '/');
+                }
+
+                workerLog(
+                    '[CONFIG] Watched folder cambiata: root relocation '
+                    . $boundConfiguredPath . ' -> ' . $configuredPath
+                );
+
+                try {
+                    $relocation = $rootRelocationService->rebind(
+                        $boundConfiguredPath,
+                        $configuredPath
+                    );
+
+                    // /tmp state is only cache: migrate it when available. If it
+                    // is absent/stale, DB-backed [STATE] recovery below rebuilds it.
+                    $state = migrateWorkerStateRoot(
+                        $state,
+                        $oldRuntimeRoot,
+                        $realImport,
+                        $configuredPath
+                    );
+                    saveWorkerState($stateFile, $state);
+
+                    workerLog(
+                        '[CONFIG] Root relocation completata'
+                        . ' | audio_paths=' . (int)($relocation['audio_paths_rebound'] ?? 0)
+                        . ' | ignored_paths=' . (int)($relocation['ignored_paths_rebound'] ?? 0)
+                        . ' | verified_files=' . (int)($relocation['verified_files'] ?? 0)
+                    );
+                } catch (Throwable $e) {
+                    workerLog(
+                        '[ERROR] Cambio watched folder rifiutato: '
+                        . $e->getMessage()
+                    );
+                    $stopReason = 'root relocation non verificata';
+                    $exitCode = 1;
+                    break;
+                }
+            } elseif ($stateConfiguredPath !== $configuredPath) {
+                // DB e' gia' legato alla root corrente ma il cache state e'
+                // assente/stale (es. /tmp pulito o crash dopo COMMIT). Non c'e'
+                // nessuna operazione sull'archivio: riallinea solo il cache.
+                if ($stateConfiguredPath !== '') {
+                    $oldRuntimeRoot = runtimeScanPath($stateConfiguredPath);
+                    $oldRuntimeReal = realpath($oldRuntimeRoot);
+                    if ($oldRuntimeReal !== false && is_dir($oldRuntimeReal)) {
+                        $oldRuntimeRoot = rtrim(str_replace('\\', '/', $oldRuntimeReal), '/');
+                    }
+
+                    $state = migrateWorkerStateRoot(
+                        $state,
+                        $oldRuntimeRoot,
+                        $realImport,
+                        $configuredPath
+                    );
+                } else {
+                    $state = [
+                        'configured_path' => $configuredPath,
+                        'albums' => [],
+                    ];
+                }
+
+                saveWorkerState($stateFile, $state);
+                workerLog('[CONFIG] Worker state riallineato alla watched folder corrente.');
+            } else {
+                $state['configured_path'] = $configuredPath;
+                if (!isset($state['albums']) || !is_array($state['albums'])) {
+                    $state['albums'] = [];
+                }
+            }
         } else {
-            // Stessa root del file state: conserva signature/imported_signature.
-            $state['configured_path'] = $configuredPath;
-            if (!isset($state['albums']) || !is_array($state['albums'])) {
-                $state['albums'] = [];
+            // CLI --dir is diagnostic/override state only. It must never change
+            // the durable DB root binding selected from Settings.
+            if ($stateConfiguredPath !== $configuredPath) {
+                workerLog('[CONFIG] Override CLI: inizializzazione state scanner diagnostico.');
+                $state = [
+                    'configured_path' => $configuredPath,
+                    'albums' => [],
+                ];
+            } else {
+                $state['configured_path'] = $configuredPath;
+                if (!isset($state['albums']) || !is_array($state['albums'])) {
+                    $state['albums'] = [];
+                }
             }
         }
 
@@ -1137,9 +1039,11 @@ while (true) {
         $state['albums'] = [];
     }
 
-    // Le esclusioni configurate sono subtree veri. Prima della discovery
-    // eliminiamo dallo state eventuali PENDING/WAIT/DEFER storici che ricadono
-    // in una directory ora esclusa: non devono più essere seguiti dal worker.
+    // Le esclusioni configurate sono HARD EXCLUSIONS:
+    // - MediaImportService le pota durante la discovery e non entra nei subtree;
+    // - il worker non ne legge contenuti e non le usa per correlare altri album;
+    // - qui eliminiamo soltanto eventuale state storico già presente sotto
+    //   una directory che l'utente ha appena escluso.
     $excludedRuntimeRoots = $exclusionService->runtimeExcludedRoots($realImport);
     if (!empty($excludedRuntimeRoots) && !empty($state['albums'])) {
         foreach (array_keys($state['albums']) as $knownAlbumKey) {
@@ -1149,11 +1053,6 @@ while (true) {
             }
         }
     }
-
-    // Indicizza ogni ciclo l'attività reale dentro le root escluse. Non
-    // assumiamo che i path temporanei e finali condividano username, profondità
-    // o struttura relativa: la correlazione avviene per identità del contenuto.
-    $excludedActivity = buildExcludedActivityIndex($excludedRuntimeRoots);
 
     $now        = time();
     $albumKeys  = $service->discoverAlbumKeys($realImport);
@@ -1192,90 +1091,107 @@ while (true) {
             ? $state['albums'][$albumKey]
             : [];
 
-        // Una cartella finale può iniziare a popolarsi mentre lo stesso album è
-        // ancora attivo dentro una root esclusa. Il parent (username o altra
-        // directory intermedia) non viene usato: può essere diverso.
-        $activityMatch = findExcludedActivityMatch($albumKey, $excludedActivity);
-        if ($activityMatch !== null) {
-            $wasBlocked = (($previous['last_result'] ?? '') === 'blocked');
-            $sameBlock  = $wasBlocked
-                && (($previous['blocked_by'] ?? '') === $activityMatch['path'])
-                && (($previous['blocked_reason'] ?? '') === $activityMatch['reason']);
+        $signatureChanged = !isset($previous['signature'])
+            || $previous['signature'] !== $signature;
 
-            $state['albums'][$albumKey] = [
-                'signature'          => $signature,
-                'stable_since'       => $now,
-                'imported_signature' => isset($previous['imported_signature']) ? $previous['imported_signature'] : null,
-                'last_result'        => 'blocked',
-                'last_scan'          => isset($previous['last_scan']) ? $previous['last_scan'] : null,
-                'deferred_sources'   => [],
-                'blocked_by'         => $activityMatch['path'],
-                'blocked_reason'     => $activityMatch['reason'],
-            ];
+        $stableSince = isset($previous['stable_since'])
+            ? (int)$previous['stable_since']
+            : $now;
+        $stableFor = max(0, $now - $stableSince);
 
-            if (!$sameBlock) {
-                workerLog('[BLOCKED] ' . $albumKey
-                    . ' | attivita esclusa=' . $activityMatch['path']
-                    . ' | match=' . $activityMatch['reason']);
-            }
-            continue;
-        }
-
-        // Se l'album era bloccato, la stability window deve partire DA ADESSO,
-        // non dal momento in cui i primi file erano comparsi nella cartella
-        // finale. Questo chiude il race tra trasferimento e cartella completa.
-        if (($previous['last_result'] ?? '') === 'blocked') {
-            $state['albums'][$albumKey] = [
-                'signature'          => $signature,
-                'stable_since'       => $now,
-                'imported_signature' => isset($previous['imported_signature']) ? $previous['imported_signature'] : null,
-                'last_result'        => 'pending',
-                'last_scan'          => isset($previous['last_scan']) ? $previous['last_scan'] : null,
-                'deferred_sources'   => [],
-            ];
-
-            workerLog('[PENDING] Attivita esclusa terminata, avvio stabilita: ' . $albumKey);
-            continue;
-        }
-
-        if (!isset($previous['signature']) || $previous['signature'] !== $signature) {
-            $state['albums'][$albumKey] = [
-                'signature'          => $signature,
-                'stable_since'       => $now,
-                'imported_signature' => isset($previous['imported_signature']) ? $previous['imported_signature'] : null,
-                'last_result'        => 'pending',
-                'last_scan'          => isset($previous['last_scan']) ? $previous['last_scan'] : null,
-                'deferred_sources'   => [],
-            ];
-
-            workerLog('[PENDING] Modifiche rilevate: ' . $albumKey);
-            continue;
-        }
-
-        $stableSince = isset($previous['stable_since']) ? (int)$previous['stable_since'] : $now;
-        $stableFor   = $now - $stableSince;
         $alreadyDone = isset($previous['imported_signature'])
             && $previous['imported_signature'] === $signature;
 
-        if ($alreadyDone) {
+        // Worker state is only a cache. After a verified root relocation,
+        // manual state cleanup or tmp-state loss, recover idempotency directly
+        // from DB source_path evidence. This check is read-only. If every current
+        // scanner-selected audio is already indexed and unchanged, rebuild the
+        // imported signatures and skip Readiness/Identity/Executor completely.
+        if (!$alreadyDone) {
+            try {
+                $indexedCandidate = $rootRelocationService->inspectIndexedCandidate(
+                    $realImport,
+                    $albumKey
+                );
+            } catch (Throwable $e) {
+                $indexedCandidate = [
+                    'fully_indexed' => false,
+                    'reason' => 'inspection-error:' . $e->getMessage(),
+                ];
+            }
+
+            if (!empty($indexedCandidate['fully_indexed'])) {
+                $state['albums'][$albumKey] = array_merge($previous, [
+                    'signature' => $signature,
+                    'stable_since' => isset($previous['stable_since'])
+                        ? (int)$previous['stable_since']
+                        : $now,
+                    'imported_signature' => $signature,
+                    'readiness_bootstrap_signature' => $signature,
+                    'readiness_stable' => true,
+                    'last_result' => 'ok',
+                    'last_scan' => $now,
+                    'deferred_sources' => [],
+                ]);
+
+                if (($previous['last_result'] ?? '') !== 'ok'
+                    || (($previous['imported_signature'] ?? '') !== $signature)) {
+                    workerLog(
+                        '[STATE] ' . basename($albumKey)
+                        . ' | gia indicizzato album_id='
+                        . (int)($indexedCandidate['album_id'] ?? 0)
+                        . ' | audio='
+                        . (int)($indexedCandidate['audio_files'] ?? 0)
+                    );
+                }
+
+                continue;
+            }
+        }
+
+        // Un album già importato e invariato resta un no-op SOLO dopo che il
+        // nuovo Readiness repository ha osservato e stabilizzato questa stessa
+        // worker signature. Questo permette il bootstrap del nuovo state sulle
+        // librerie già completamente importate senza rieseguire il gate.
+        $readinessBootstrapDone = isset($previous['readiness_bootstrap_signature'])
+            && hash_equals(
+                (string)$previous['readiness_bootstrap_signature'],
+                $signature
+            );
+
+        if (
+            $alreadyDone
+            && $readinessBootstrapDone
+        ) {
             continue;
         }
 
-        // Se il service ha rinviato un rebind perché il vecchio external era
-        // ancora raggiungibile, controlliamo solo quelle sorgenti. Appena almeno
-        // una scompare, rieseguiamo la riconciliazione anche se la directory
-        // corrente non ha cambiato signature.
-        if (($previous['last_result'] ?? '') === 'deferred') {
-            $waiting = isset($previous['deferred_sources']) && is_array($previous['deferred_sources'])
-                ? $previous['deferred_sources']
-                : [];
+        // Preserva il lifecycle relocation esistente. Finché tutte le vecchie
+        // sorgenti external sono ancora vive non serve rieseguire Readiness,
+        // Identity o l'Executor.
+        if (
+            !$signatureChanged
+            && (($previous['last_result'] ?? '') === 'deferred')
+        ) {
+            $waiting = isset($previous['deferred_sources'])
+                && is_array($previous['deferred_sources'])
+                    ? $previous['deferred_sources']
+                    : [];
 
             if (!empty($waiting)) {
                 $allStillLive = true;
+
                 foreach ($waiting as $waitPath) {
                     $waitPath = normalizedConfiguredPath((string)$waitPath);
-                    $runtimeWait = $waitPath !== '' ? runtimeScanPath($waitPath) : '';
-                    if ($runtimeWait === '' || !is_file($runtimeWait) || !is_readable($runtimeWait)) {
+                    $runtimeWait = $waitPath !== ''
+                        ? runtimeScanPath($waitPath)
+                        : '';
+
+                    if (
+                        $runtimeWait === ''
+                        || !is_file($runtimeWait)
+                        || !is_readable($runtimeWait)
+                    ) {
                         $allStillLive = false;
                         break;
                     }
@@ -1285,71 +1201,352 @@ while (true) {
                     continue;
                 }
 
-                workerLog("[RECONCILE] Sorgente precedente non piu' raggiungibile: " . basename($albumKey));
+                workerLog(
+                    "[RECONCILE] Sorgente precedente non piu' raggiungibile: "
+                    . basename($albumKey)
+                );
             }
         }
 
-        if ($stableFor < $stable) {
-            workerLog('[WAIT] ' . basename($albumKey) . ' stabile da ' . $stableFor . 's');
+        // Costruisce le stesse parti candidate usate dal Readiness engine.
+        // MediaImportService continua a essere la discovery authority per la
+        // lista albumKeys, quindi le esclusioni configurate restano applicate
+        // esattamente come prima.
+        try {
+            $candidateGroups = $readinessService->discoverCandidates($albumKey);
+            $readinessParts = null;
+
+            foreach ($candidateGroups as $candidateKey => $candidateParts) {
+                $candidateKey = rtrim(
+                    str_replace('\\\\', '/', (string)$candidateKey),
+                    '/'
+                );
+
+                if ($candidateKey === $albumKey) {
+                    $readinessParts = $candidateParts;
+                    break;
+                }
+            }
+
+            if (!is_array($readinessParts) || empty($readinessParts)) {
+                throw new RuntimeException(
+                    'Readiness grouping non coerente con discovery per: '
+                    . $albumKey
+                );
+            }
+
+            // Questa osservazione avviene anche mentre la vecchia stability
+            // window non è ancora trascorsa. Così la persistent signature
+            // parte dal primo ciclo utile e non raddoppia artificialmente
+            // media_scan_stable_seconds.
+            $readinessCandidate = $readinessService->analyzeCandidate(
+                $realImport,
+                $albumKey,
+                $readinessParts,
+                $stable
+            );
+        } catch (Throwable $e) {
+            $state['albums'][$albumKey]['last_result'] = 'error';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+
+            workerLog(
+                '[ERROR] ' . basename($albumKey)
+                . ' | readiness: ' . $e->getMessage()
+            );
             continue;
         }
 
-        workerLog('[IMPORT] ' . $albumKey);
+        $readinessStatus = strtoupper(
+            trim((string)($readinessCandidate['status'] ?? ''))
+        );
+        $candidateSignature = trim(
+            (string)($readinessCandidate['candidate_signature'] ?? '')
+        );
+        $readinessStable = !empty($readinessCandidate['stable']);
+
+        // Bootstrap/migrazione del nuovo readiness state per album già
+        // importati dal worker precedente. Questi candidati vengono osservati
+        // fino a quando la persistent signature è temporalmente stabile, ma
+        // NON passano mai da Identity/Gate/Executor finché la worker signature
+        // coincide con imported_signature.
+        if (
+            $alreadyDone
+            && !$signatureChanged
+        ) {
+            $firstBootstrapObservation =
+                empty($previous['candidate_signature']);
+
+            $state['albums'][$albumKey]['last_scan'] = $now;
+            $state['albums'][$albumKey]['readiness_status'] = $readinessStatus;
+            $state['albums'][$albumKey]['candidate_signature'] =
+                $candidateSignature;
+            $state['albums'][$albumKey]['readiness_stable'] =
+                $readinessStable;
+
+            if ($readinessStable) {
+                $state['albums'][$albumKey]['readiness_bootstrap_signature'] =
+                    $signature;
+            }
+
+            if ($firstBootstrapObservation) {
+                workerLog(
+                    '[READINESS] ' . basename($albumKey)
+                    . ' | bootstrap=observing'
+                    . ' | status='
+                    . ($readinessStatus !== '' ? $readinessStatus : 'UNKNOWN')
+                );
+            } elseif (
+                $readinessStable
+                && !$readinessBootstrapDone
+            ) {
+                workerLog(
+                    '[READINESS] ' . basename($albumKey)
+                    . ' | bootstrap=complete'
+                    . ' | status='
+                    . ($readinessStatus !== '' ? $readinessStatus : 'UNKNOWN')
+                );
+            }
+
+            continue;
+        }
+
+        // La lightweight snapshot del worker resta un ulteriore guardrail per
+        // restart/ignored/excluded lifecycle. Non decide più la completezza:
+        // quella decisione appartiene esclusivamente ad AlbumReadinessService.
+        if ($signatureChanged) {
+            $state['albums'][$albumKey] = [
+                'signature'           => $signature,
+                'stable_since'        => $now,
+                'imported_signature'  => isset($previous['imported_signature'])
+                    ? $previous['imported_signature']
+                    : null,
+                'last_result'         => 'pending',
+                'last_scan'           => isset($previous['last_scan'])
+                    ? $previous['last_scan']
+                    : null,
+                'deferred_sources'    => [],
+                'readiness_status'    => $readinessStatus,
+                'candidate_signature' => $candidateSignature,
+            ];
+
+            workerLog('[PENDING] Modifiche rilevate: ' . $albumKey);
+            continue;
+        }
+
+        // Manteniamo anche la stability window storica come guardrail locale.
+        // Non può rendere READY un candidato: può soltanto ritardarlo.
+        if ($stableFor < $stable) {
+            workerLog(
+                '[WAIT] ' . basename($albumKey)
+                . ' stabile da ' . $stableFor . 's'
+            );
+            continue;
+        }
+
+        // Canonical gate:
+        // non-READY => Identity NOT_RUN;
+        // READY => IdentityResolver;
+        // solo CREATE/RECONCILE producono un AlbumImportPlan eseguibile.
+        try {
+            $gateResult = $scanGate->evaluate(
+                $realImport,
+                $readinessCandidate
+            );
+        } catch (Throwable $e) {
+            $state['albums'][$albumKey]['last_result'] = 'error';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+
+            workerLog(
+                '[ERROR] ' . basename($albumKey)
+                . ' | gate: ' . $e->getMessage()
+            );
+            continue;
+        }
+
+        $gateAction = strtoupper(
+            trim((string)($gateResult['action'] ?? 'REVIEW'))
+        );
+        $gateReason = trim((string)($gateResult['reason'] ?? ''));
+        $gateKey = implode('|', [
+            $gateAction,
+            $gateReason,
+            $readinessStatus,
+            $candidateSignature,
+        ]);
+
+        $previousGateKey = (string)($previous['gate_key'] ?? '');
+
+        if ($gateAction === 'NONE') {
+            $state['albums'][$albumKey]['last_result'] =
+                $readinessStatus === 'INCOMPLETE'
+                    ? 'incomplete'
+                    : 'pending';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+            $state['albums'][$albumKey]['deferred_sources'] = [];
+            $state['albums'][$albumKey]['readiness_status'] = $readinessStatus;
+            $state['albums'][$albumKey]['candidate_signature'] =
+                $candidateSignature;
+            $state['albums'][$albumKey]['gate_key'] = $gateKey;
+
+            if ($previousGateKey !== $gateKey) {
+                workerLog(
+                    '[' . ($readinessStatus !== '' ? $readinessStatus : 'PENDING')
+                    . '] ' . basename($albumKey)
+                    . ($gateReason !== '' ? ' | ' . $gateReason : '')
+                );
+            }
+            continue;
+        }
+
+        if ($gateAction === 'REVIEW') {
+            $state['albums'][$albumKey]['last_result'] = 'review';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+            $state['albums'][$albumKey]['deferred_sources'] = [];
+            $state['albums'][$albumKey]['readiness_status'] = $readinessStatus;
+            $state['albums'][$albumKey]['candidate_signature'] =
+                $candidateSignature;
+            $state['albums'][$albumKey]['gate_key'] = $gateKey;
+
+            if ($previousGateKey !== $gateKey) {
+                $identityDecision = (string)(
+                    $gateResult['identity']['decision'] ?? 'NOT_RUN'
+                );
+
+                workerLog(
+                    '[REVIEW] ' . basename($albumKey)
+                    . ' | reason=' . $gateReason
+                    . ' | identity=' . $identityDecision
+                );
+            }
+            continue;
+        }
+
+        if (!in_array($gateAction, ['CREATE', 'RECONCILE'], true)) {
+            $state['albums'][$albumKey]['last_result'] = 'error';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+
+            workerLog(
+                '[ERROR] ' . basename($albumKey)
+                . ' | azione gate sconosciuta=' . $gateAction
+            );
+            continue;
+        }
+
+        $plan = $gateResult['plan'] ?? null;
+        if (!$plan instanceof AlbumImportPlan) {
+            $state['albums'][$albumKey]['last_result'] = 'error';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+
+            workerLog(
+                '[ERROR] ' . basename($albumKey)
+                . ' | piano import assente per ' . $gateAction
+            );
+            continue;
+        }
+
+        workerLog(
+            '[IMPORT] ' . $albumKey
+            . ' | action=' . $gateAction
+            . (
+                $plan->targetAlbumId() !== null
+                    ? ' target_album_id=' . $plan->targetAlbumId()
+                    : ''
+            )
+        );
+
         if ($heartbeatEnabled) {
             writeWorkerHeartbeat($root, $enabled, $configuredPath);
         }
 
-        $report = $service->scan($realImport, false, 0, [$albumKey]);
+        try {
+            $execution = $importExecutor->execute($plan);
+        } catch (Throwable $e) {
+            $state['albums'][$albumKey]['last_result'] = 'error';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+
+            workerLog(
+                '[ERROR] ' . basename($albumKey)
+                . ' | executor: ' . $e->getMessage()
+            );
+
+            if ($heartbeatEnabled) {
+                writeWorkerHeartbeat($root, $enabled, $configuredPath);
+            }
+
+            continue;
+        }
 
         if ($heartbeatEnabled) {
             writeWorkerHeartbeat($root, $enabled, $configuredPath);
         }
-
-        $ok = empty($report['error'])
-            && isset($report['totals'])
-            && (int)$report['totals']['errors'] === 0
-            && (int)$report['totals']['albums_found'] > 0;
-
-        $deferred = $ok ? (int)($report['totals']['audio_deferred'] ?? 0) : 0;
 
         $state['albums'][$albumKey]['last_scan'] = $now;
+        $state['albums'][$albumKey]['readiness_status'] = $readinessStatus;
+        $state['albums'][$albumKey]['candidate_signature'] =
+            $candidateSignature;
+        $state['albums'][$albumKey]['gate_key'] = $gateKey;
 
-        if ($ok && $deferred > 0) {
-            // Non marcare la signature come completata: il nuovo candidato resta
-            // in attesa finché il vecchio external non sparisce.
+        $executionStatus = strtolower(
+            trim((string)($execution['status'] ?? ''))
+        );
+        $entry = isset($execution['result']) && is_array($execution['result'])
+            ? $execution['result']
+            : [];
+
+        if (
+            !empty($execution['ok'])
+            && $executionStatus === 'committed'
+        ) {
+            $state['albums'][$albumKey]['last_result'] = 'ok';
+            $state['albums'][$albumKey]['imported_signature'] = $signature;
+            $state['albums'][$albumKey]['readiness_bootstrap_signature'] =
+                $signature;
+            $state['albums'][$albumKey]['readiness_stable'] = true;
+            $state['albums'][$albumKey]['deferred_sources'] = [];
+
+            workerLog(
+                '[OK] ' . basename($albumKey)
+                . ' | action=' . $gateAction
+                . ' audio+=' . (int)($entry['audio_imported'] ?? 0)
+                . ' skip=' . (int)($entry['audio_skipped'] ?? 0)
+            );
+        } elseif ($executionStatus === 'deferred') {
             $waitSources = [];
-            foreach (($report['albums'] ?? []) as $albumReport) {
-                if (!is_array($albumReport)) {
-                    continue;
-                }
-                foreach (($albumReport['deferred_sources'] ?? []) as $waitPath) {
-                    $waitPath = normalizedConfiguredPath((string)$waitPath);
-                    if ($waitPath !== '') {
-                        $waitSources[$waitPath] = true;
-                    }
+
+            foreach ((array)($entry['deferred_sources'] ?? []) as $waitPath) {
+                $waitPath = normalizedConfiguredPath((string)$waitPath);
+                if ($waitPath !== '') {
+                    $waitSources[$waitPath] = true;
                 }
             }
 
-            $state['albums'][$albumKey]['last_result']      = 'deferred';
-            $state['albums'][$albumKey]['deferred_sources'] = array_keys($waitSources);
+            $state['albums'][$albumKey]['last_result'] = 'deferred';
+            $state['albums'][$albumKey]['deferred_sources'] =
+                array_keys($waitSources);
 
-            workerLog('[DEFER] ' . basename($albumKey)
-                . ' | external in attesa=' . $deferred
-                . ' | sorgenti monitorate=' . count($waitSources));
-        } elseif ($ok) {
-            $state['albums'][$albumKey]['last_result']        = 'ok';
-            $state['albums'][$albumKey]['imported_signature'] = $signature;
-            $state['albums'][$albumKey]['deferred_sources']   = [];
+            workerLog(
+                '[DEFER] ' . basename($albumKey)
+                . ' | external in attesa='
+                . (int)($entry['audio_deferred'] ?? 0)
+                . ' | sorgenti monitorate=' . count($waitSources)
+            );
+        } elseif ($executionStatus === 'review') {
+            $state['albums'][$albumKey]['last_result'] = 'review';
+            $state['albums'][$albumKey]['deferred_sources'] = [];
 
-            workerLog('[OK] ' . basename($albumKey)
-                . ' | creati=' . (int)$report['totals']['albums_created']
-                . ' esistenti=' . (int)$report['totals']['albums_existing']
-                . ' audio+=' . (int)$report['totals']['audio_imported']
-                . ' skip=' . (int)$report['totals']['audio_skipped']);
+            workerLog(
+                '[REVIEW] ' . basename($albumKey)
+                . ' | executor='
+                . (string)($entry['execution_reason'] ?? 'review')
+            );
         } else {
             $state['albums'][$albumKey]['last_result'] = 'error';
-            $error = !empty($report['error']) ? $report['error'] : 'errore durante import';
-            workerLog('[ERROR] ' . basename($albumKey) . ' | ' . $error);
+
+            workerLog(
+                '[ERROR] ' . basename($albumKey)
+                . ' | risultato executor non valido: '
+                . ($executionStatus !== '' ? $executionStatus : '<empty>')
+            );
         }
 
         // Modalità gestita: tra un album e l'altro rispetta subito una
@@ -1373,7 +1570,23 @@ while (true) {
     }
 
     $state['configured_path'] = $configuredPath;
+
+    $readinessSaveError = '';
+    try {
+        $readinessStateRepository->save();
+    } catch (Throwable $e) {
+        $readinessSaveError = $e->getMessage();
+        workerLog('[ERROR] Readiness state non salvato: ' . $readinessSaveError);
+    }
+
+    // Il worker state viene comunque salvato anche se il readiness state fallisce:
+    // un import già COMMITtato non deve perdere imported_signature.
     saveWorkerState($stateFile, $state);
+
+    if ($readinessSaveError !== '' && $stopReason === '') {
+        $stopReason = 'impossibile salvare readiness state';
+        $exitCode = 1;
+    }
 
     if ($stopReason !== '') {
         break;

@@ -60,6 +60,9 @@ switch ($section) {
     case 'media':
         (new MediaController())->dispatch($action, $id);
         break;
+    case 'mix':
+        (new MixController())->dispatch($action, $id);
+        break;
     case 'settings':
         (new SettingsController())->dispatch($action, $id);
         break;

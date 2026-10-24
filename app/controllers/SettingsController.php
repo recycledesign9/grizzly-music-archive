@@ -142,7 +142,54 @@ class SettingsController
         // Il resolver non espone mai le credenziali complete alla view.
         $externalApiServices = ExternalApiConfig::getStatusAll();
 
+        // Cambio della cartella da scansionare: calcolato anche al
+        // caricamento, così rientrando nella pagina lo stato è subito visibile.
+        $mediaScanRelocation = $this->relocationState($db);
+
         require BASE_PATH . '/views/settings.php';
+    }
+
+    /**
+     * Cambio della cartella da scansionare non ancora concluso.
+     *
+     * Il worker esegue MediaRootRelocationService::rebind() quando
+     * media_scan_path è diverso da media_scan_bound_root; rebind() aggiorna
+     * media_scan_bound_root nella stessa transazione dei source_path. Il
+     * confronto dei due valori dice quindi se il cambio è ancora da fare,
+     * senza stato aggiuntivo. Con media_scan_bound_root assente il worker
+     * adotta la cartella al primo avvio senza spostare nulla: nessun cambio.
+     *
+     * @return array{pending: bool, from: string, to: string}
+     */
+    private function relocationState(PDO $db): array
+    {
+        $values = ['media_scan_path' => '', 'media_scan_bound_root' => ''];
+
+        $stmt = $db->prepare(
+            "SELECT `key`, `value`
+             FROM settings
+             WHERE `key` IN ('media_scan_path', 'media_scan_bound_root')"
+        );
+        $stmt->execute();
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $values[(string)$row['key']] = (string)($row['value'] ?? '');
+        }
+
+        // Stessa normalizzazione del worker: solo separatori e barra finale,
+        // nessun trim degli spazi (sono significativi nei nomi delle cartelle).
+        $normalize = function (string $path): string {
+            $path = str_replace('\\', '/', $path);
+            return $path === '/' ? '/' : rtrim($path, '/');
+        };
+
+        $to = $normalize($values['media_scan_path']);
+        $from = $normalize($values['media_scan_bound_root']);
+
+        return [
+            'pending' => $to !== '' && $from !== '' && $to !== $from,
+            'from'    => $from,
+            'to'      => $to,
+        ];
     }
 
     /**
@@ -176,6 +223,7 @@ class SettingsController
                 'heartbeat_age' => $worker['heartbeat_age'],
                 'heartbeat_at' => $worker['heartbeat_at'],
                 'worker' => $worker,
+                'relocation' => $this->relocationState($db),
             ]);
             exit;
         } catch (Throwable $e) {
@@ -387,6 +435,7 @@ class SettingsController
                 'ok' => true,
                 'message' => $message,
                 'rebound' => $rebound,
+                'relocation' => $this->relocationState($db),
                 'settings' => [
                     'enabled' => $enabled,
                     'path' => $path,

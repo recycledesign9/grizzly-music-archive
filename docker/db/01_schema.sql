@@ -321,12 +321,16 @@ CREATE TABLE `settings` (
 
 -- Default setting rows required by the application.
 -- Scanner is intentionally disabled on first start and media_scan_path is blank.
+-- media_scan_bound_root remains blank until the worker safely establishes the
+-- root corresponding to persisted external source_path records. Do not bind
+-- it blindly to a newly selected media_scan_path when upgrading.
 -- The user chooses the real host path from Settings; in Docker the worker/app
 -- resolve that path through MEDIA_SCAN_HOST_PREFIX without changing the DB value.
 INSERT INTO `settings` (`key`, `value`, `label`) VALUES
 ('audio_path', '', 'Audio folder path (leave empty to use default)'),
 ('media_scan_enabled', '0', 'Enable automatic media folder scan'),
 ('media_scan_path', '', 'Folder to scan automatically'),
+('media_scan_bound_root', '', 'Scanner root bound to indexed external audio paths'),
 ('media_scan_interval', '10', 'Scanner interval in seconds'),
 ('media_scan_stable_seconds', '30', 'Seconds a folder must remain unchanged before import');
 

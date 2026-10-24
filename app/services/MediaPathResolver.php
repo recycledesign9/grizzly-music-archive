@@ -24,6 +24,14 @@ class MediaPathResolver
     /** @var bool */
     private static $configuredDbPathLoaded = false;
 
+    /**
+     * Cache per la request corrente della root a cui sono legati i file
+     * external (realpath runtime). false = non ancora calcolata.
+     *
+     * @var string|null|false
+     */
+    private static $externalRealRoot = false;
+
     // ----------------------------------------------------------
     // Path audio
     // ----------------------------------------------------------
@@ -51,6 +59,40 @@ class MediaPathResolver
     public static function getAudioAbsPath(string $filename): string
     {
         return self::getAudioDir() . '/' . basename($filename);
+    }
+
+    // ----------------------------------------------------------
+    // Verifica di riproducibilità (usata dall'Instant Mix)
+    // ----------------------------------------------------------
+
+    /**
+     * Percorso fisico verificato di un file audio, managed o external.
+     *
+     * $audioRow contiene almeno filename, storage_type e source_path
+     * (colonne di audio_files). Restituisce null se il file non esiste,
+     * non è leggibile o, per gli external, ricade fuori dalla root della
+     * scansione.
+     *
+     * Le regole sono le stesse di MediaController::streamFile() e
+     * MediaController::resolveExternalPath(), che restano il codice usato
+     * dallo streaming: questo metodo serve a chi deve sapere in anticipo
+     * se un file si potrà riprodurre. Per gli external il prefisso runtime
+     * è letto, come nello streaming, solo da MEDIA_SCAN_HOST_PREFIX.
+     */
+    public static function resolveAudioFile(array $audioRow): ?string
+    {
+        $filename = basename((string)($audioRow['filename'] ?? ''));
+        if ($filename === '' || !preg_match('/\.(mp3|flac|ogg|wav|m4a)$/i', $filename)) {
+            return null;
+        }
+
+        if ((string)($audioRow['storage_type'] ?? 'managed') === 'external') {
+            return self::resolveExternalAudio((string)($audioRow['source_path'] ?? ''));
+        }
+
+        $path = self::getAudioAbsPath($filename);
+
+        return (is_file($path) && is_readable($path)) ? $path : null;
     }
 
     // ----------------------------------------------------------
@@ -389,6 +431,129 @@ class MediaPathResolver
         }
 
         return $prefix === '' ? '' : rtrim(self::normalizePath($prefix), '/');
+    }
+
+    /**
+     * Risoluzione di un file external, stessa logica di
+     * MediaController::resolveExternalPath().
+     */
+    private static function resolveExternalAudio(string $sourcePath): ?string
+    {
+        $sourcePath = trim($sourcePath);
+        if ($sourcePath === '') {
+            return null;
+        }
+
+        $realRoot = self::externalRealRoot();
+        if ($realRoot === null) {
+            return null;
+        }
+
+        $realSource = realpath(self::externalHostPathToRuntime($sourcePath));
+        if ($realSource === false || !is_file($realSource) || !is_readable($realSource)) {
+            return null;
+        }
+
+        $realSource = str_replace('\\', '/', $realSource);
+
+        if (!self::externalPathIsInside($realSource, $realRoot)) {
+            return null;
+        }
+
+        if (!preg_match('/\.(mp3|flac|ogg|wav|m4a)$/i', $realSource)) {
+            return null;
+        }
+
+        return $realSource;
+    }
+
+    /**
+     * Root committata per i file external (media_scan_bound_root, con
+     * fallback su media_scan_path), in coordinate runtime e già passata
+     * da realpath. Calcolata una volta per request.
+     */
+    private static function externalRealRoot(): ?string
+    {
+        if (self::$externalRealRoot !== false) {
+            return self::$externalRealRoot;
+        }
+
+        self::$externalRealRoot = null;
+
+        $root = self::readSetting('media_scan_bound_root');
+        if ($root === '') {
+            $root = self::readSetting('media_scan_path');
+        }
+        if ($root === '') {
+            return null;
+        }
+
+        $real = realpath(self::externalHostPathToRuntime($root));
+        if ($real === false || !is_dir($real)) {
+            return null;
+        }
+
+        self::$externalRealRoot = rtrim(str_replace('\\', '/', $real), '/');
+        if (self::$externalRealRoot === '') {
+            self::$externalRealRoot = '/';
+        }
+
+        return self::$externalRealRoot;
+    }
+
+    private static function readSetting(string $key): string
+    {
+        try {
+            $db = Database::getInstance();
+            $stmt = $db->prepare("SELECT `value` FROM settings WHERE `key` = :key LIMIT 1");
+            $stmt->execute([':key' => $key]);
+            $value = $stmt->fetchColumn();
+            return $value === false ? '' : trim((string)$value);
+        } catch (Throwable $e) {
+            return '';
+        }
+    }
+
+    /**
+     * Come MediaController::hostPathToRuntime(): solo MEDIA_SCAN_HOST_PREFIX.
+     */
+    private static function externalHostPathToRuntime(string $hostPath): string
+    {
+        $hostPath = str_replace('\\', '/', $hostPath);
+        $prefix   = trim((string)getenv('MEDIA_SCAN_HOST_PREFIX'));
+
+        if ($prefix === '') {
+            return $hostPath;
+        }
+
+        $prefix = rtrim(str_replace('\\', '/', $prefix), '/');
+
+        if ($hostPath === $prefix || strpos($hostPath, $prefix . '/') === 0) {
+            return $hostPath;
+        }
+
+        if ($hostPath === '/') {
+            return $prefix;
+        }
+
+        return $prefix . '/' . ltrim($hostPath, '/');
+    }
+
+    private static function externalPathIsInside(string $file, string $root): bool
+    {
+        $root = rtrim($root, '/');
+
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            $file = strtolower($file);
+            $root = strtolower($root);
+        }
+
+        // Stesso esito dello streaming: una root vuota non autorizza nulla.
+        if ($root === '') {
+            return false;
+        }
+
+        return strpos($file, $root . '/') === 0;
     }
 
     private static function isInternalAppPath(string $path): bool

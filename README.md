@@ -7,33 +7,46 @@
 ![GitHub release](https://img.shields.io/github/v/release/recycledesign9/grizzly-music-archive?display_name=tag)
 ![License](https://img.shields.io/github/license/recycledesign9/grizzly-music-archive)
 ![Docker](https://img.shields.io/badge/docker-compose-blue)
-![PHP](https://img.shields.io/badge/PHP-8.1+-777bb4)
-![MySQL](https://img.shields.io/badge/MySQL-8.0+-4479A1)
+![PHP](https://img.shields.io/badge/PHP-8.3.36-777bb4)
+![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1)
 ![Self-hosted](https://img.shields.io/badge/self--hosted-ready-success)
 
-> A self-hosted web application for cataloguing your personal vinyl, CD and cassette collection.
-> PHP 8.1 · MySQL 8 · Bootstrap 5 · Vanilla JS — no frameworks, no dependencies to install.
+> A self-hosted web application for cataloguing and listening to your personal vinyl, CD, cassette and digital collection.
+> **Default Docker stack:** PHP 8.3.36 + Apache and MySQL 8.0.46 (Debian variant). Bootstrap 5 · Vanilla JS. No separate frontend build step. Legacy PHP 7.4 deployments are not security-supported.
 
 ---
 
 ## ✨ Features
 
-- **Full CRUD** for albums, artists, genres and labels
-- **Cover art** — automatic retrieval via MusicBrainz / Last.fm / Discogs, or manual upload
-- **Tracklist** — automatic from MusicBrainz / Last.fm / Discogs or manual entry
-- **Audio player** — upload MP3/FLAC files and play them directly in the browser via an HTML5 sticky player
-- **YouTube integration** — automatically search and cache YouTube videos for tracks, with in-page preview via lightbox
-- **Playlists** — create playlists, drag-and-drop reorder (SortableJS)
-- **Advanced search** — by artist, title, format, genre, year, label
-- **Artist page** — all albums linked to a single artist
-- **Collection overview** — redesigned dashboard with recent arrivals, collection-aware suggestions, playlists, shelf picks, genre breakdown and format composition
-- **Dark mode** support
-- **Relocatable audio folder** — store audio files outside the web root via the Settings page
-- **Bulk MP3 upload** with automatic track matching (3-pass: track number + Levenshtein similarity)
-- **Automatic library scan** — watch a folder configured from Settings and import/update albums in the background
-- **Index-in-place audio** — scanned MP3/FLAC files stay in the source library instead of being copied into Grizzly
-- **Collection-aware recommendations** — suggestions distinguish albums already in your archive from external discoveries
-- **External API settings** — configure Last.fm, Discogs and YouTube credentials from Settings, with server/environment values available as fallback
+**Catalogue**
+
+- Add, edit and delete albums; artists, genres and labels are created from the album form
+- Cover art and tracklist from MusicBrainz and Cover Art Archive, with Last.fm and Discogs as optional fallbacks, or manual entry
+- Advanced search by artist, title, format, genre, year and label
+- Archive in list or grid view, with the same sorting in both
+- Artist page with biography, photo, and a single list that combines the official discography with the albums in your archive
+- Collection overview with recent arrivals, collection-aware suggestions, playlists, shelf picks, genres and format composition
+
+**Listening**
+
+- Sticky audio player for MP3 and FLAC: single-row layout, repeat (queue or track), remaining time, minute ruler and an editable play queue
+- **Instant Mix**: pick genres, a period and a number of tracks, and Grizzly builds a varied mix from the files in your archive, ready to play and optionally saved as a playlist
+- Playlists with drag-and-drop ordering
+- YouTube lookup for tracks, with in-page preview
+
+**Audio library**
+
+- Upload MP3/FLAC files, one track at a time or in bulk with automatic track matching
+- Automatic library scan: Grizzly watches a folder chosen in Settings and imports albums in the background
+- Scanned files are indexed in place and never copied, moved or deleted
+- Folders can be excluded from the scan (for example a downloads-in-progress folder)
+- The watched folder can be changed later: Grizzly verifies the indexed files in the new location and updates their paths
+
+**Other**
+
+- Dark and light mode
+- Archive export and import
+- External API credentials configurable from Settings, with environment variables as fallback
 
 ---
 
@@ -41,40 +54,31 @@
 
 ### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) installed
+- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
 - Port `8080` (or your chosen `APP_PORT`) available
+- A compatible platform for the selected database image; the `mysql:8.0.46-debian` tag was verified on `linux/amd64`. Check image availability before deploying on ARM systems such as Raspberry Pi.
 
-### 1 — Clone the repository
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/recycledesign9/grizzly-music-archive.git
 cd grizzly-music-archive
 ```
 
-### 2 — Configure environment
-
-Copy the example environment file:
+### 2. Configure the environment
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and configure the application URL and exposed port according to where you are running Grizzly Music Archive.
-
-For a standard installation, you usually only need to change:
+Configure the address and port, and **replace the example `DB_PASS` and `DB_ROOT_PASS` credentials with unique strong passwords before the first start**:
 
 ```dotenv
 BASE_URL=http://localhost:8080
 APP_PORT=8080
 ```
 
-If you access the app from multiple hostnames, through a reverse proxy, or both locally and publicly, also configure:
-
-```dotenv
-ALLOWED_HOSTS=localhost,localhost:8080,127.0.0.1,127.0.0.1:8080
-```
-
-### Basic scenarios
+If the app is reachable from more than one address (localhost, a LAN IP, a local hostname, a reverse proxy domain), list them in `ALLOWED_HOSTS`:
 
 | Scenario                              | `BASE_URL`                     | `APP_PORT` | `ALLOWED_HOSTS`                                          |
 | ------------------------------------- | ------------------------------ | ---------: | -------------------------------------------------------- |
@@ -83,194 +87,163 @@ ALLOWED_HOSTS=localhost,localhost:8080,127.0.0.1,127.0.0.1:8080
 | Server with domain name               | `https://music.yourdomain.com` |     `8080` | `music.yourdomain.com`                                   |
 | Reverse proxy + local access          | `https://music.yourdomain.com` |     `8080` | `music.yourdomain.com,192.168.1.x:8080,music.local:8080` |
 
-### Variable meaning
+- **`BASE_URL`**: canonical URL of the application, with no trailing slash. It is used when the request host is not in `ALLOWED_HOSTS`.
+- **`APP_PORT`**: port exposed on the host. Change it if `8080` is already in use.
+- **`ALLOWED_HOSTS`**: comma-separated hostnames or `host:port` pairs allowed to serve the app.
 
-> **`BASE_URL`:** canonical public URL of the application, with no trailing slash.
-> It is used as the fallback URL when the current request host is not explicitly allowed.
-
-> **`APP_PORT`:** port Docker exposes on your host machine.
-> Change it if `8080` is already in use, for example `APP_PORT=8082`.
-
-> **`ALLOWED_HOSTS`:** comma-separated list of hostnames or host:port combinations that are allowed to serve the app dynamically.
-> This is useful when the same installation is reachable from more than one address, for example localhost, a LAN IP, a local hostname, or a reverse proxy domain.
-
-> **Never edit `docker-compose.yml` for local settings.**
-> Put your installation-specific values in `.env`.
-
-### Automatic scanner and Docker
-
-The **folder to scan is configured only from Grizzly**, under **Settings → Automatic scan**. No music-library path is configured in `.env`.
-
-Enter the **real absolute path on the host**, for example:
-
-```text
-/mnt/media/music
-```
-
-Do not enter `/hostfs/...`. Docker exposes the host filesystem read-only under `/hostfs`, and Grizzly performs that internal path mapping automatically. Changing the watched folder from Settings does not require editing `.env` or restarting Docker.
-
-Example — LAN server on port `9082`:
-
-```dotenv
-BASE_URL=http://192.168.1.x:9082
-APP_PORT=9082
-ALLOWED_HOSTS=192.168.1.x:9082
-```
-
-Example — local machine, default setup:
-
-```dotenv
-BASE_URL=http://localhost:8080
-APP_PORT=8080
-ALLOWED_HOSTS=localhost,localhost:8080,127.0.0.1,127.0.0.1:8080
-```
-
-Example — reverse proxy with public domain and LAN access:
-
-```dotenv
-BASE_URL=https://music.yourdomain.com
-APP_PORT=8080
-ALLOWED_HOSTS=music.yourdomain.com,192.168.1.x:8080,grizzly.local:8080
-```
-
-When Grizzly Music Archive is behind a reverse proxy such as Nginx Proxy Manager, SSL should normally terminate at the proxy. In that case, the app container can continue to run over HTTP internally.
+Keep installation-specific environment values in `.env` rather than changing `docker-compose.yml`. Behind a reverse proxy such as Nginx Proxy Manager, SSL normally terminates at the proxy and the container keeps running over HTTP.
 
 > ⚠️ **Access control notice**
-> Grizzly Music Archive is designed as a **self-hosted application for personal use**, meant to run inside your own network or private infrastructure. The application itself has **no built-in authentication**: anyone who can reach the URL has full read/write access to the archive (adding, editing and deleting albums, uploading files, and consuming external API quota).
->
-> The reverse proxy scenarios above refer to **environment configuration and controlled remote access** (e.g. VPN, LAN hostnames, or a proxy restricted at the network level) — **not** to exposing the app as an open public service.
->
-> If your setup makes the app reachable from the internet, protect it at the proxy or network level, for example with **Basic Authentication / Access Lists in Nginx Proxy Manager**, an IP allow-list, or a VPN (WireGuard, Tailscale). Do not expose an unprotected instance on a public domain.
+> Grizzly is designed for **personal use inside your own network**. It has **no built-in authentication**: anyone who can reach the URL can add, edit and delete albums, upload files and consume your external API quota.
+> If the app is reachable from the internet, protect it at the proxy or network level, for example with **Basic Authentication / Access Lists in Nginx Proxy Manager**, an IP allow-list, or a VPN (WireGuard, Tailscale).
 
-### 3 — Start
+### 3. Start
 
 ```bash
 docker compose up -d --build
 ```
 
-Use `--build` for the first installation so the local Grizzly image is built before the worker starts. For normal restarts after the image already exists, `docker compose up -d` is enough.
+Docker builds **PHP 8.3.36 + Apache**, starts **MySQL 8.0.46 (Debian image)** and the background scan worker, imports the schema and demo data **only when the database volume is new**, and serves the app at `BASE_URL`. Both `app` and `worker` use the same PHP image. Use `--build` the first time; afterwards `docker compose up -d` is enough. For an existing installation, read the upgrade precautions below before running Compose.
 
-Docker will:
+> The **first startup** can take several minutes while images are downloaded and built. Later starts are much faster.
 
-1. Build the PHP + Apache image
-2. Start MySQL and wait until it is healthy
-3. Start the background media scanner worker
-4. Automatically import the schema (`docker/db/01_schema.sql`) and demo data (`docker/db/02_seed.sql`)
-5. Serve the app at the address configured in `BASE_URL`
+### 4. Open the app
 
-> **First startup** can take several minutes because Docker must download the base images and build the Grizzly application image. On lower-power ARM systems such as a Raspberry Pi, the first build can take around 10 minutes or more. MySQL initialisation then adds its own startup time. Subsequent starts reuse the existing image and are much faster.
+Open the `BASE_URL` you set in `.env`, for example `http://localhost:8080`. The archive starts with 12 demo albums (Beatles, Pink Floyd, Radiohead, Nirvana…).
 
-### 4 — Open the app
-
-Open your browser at the `BASE_URL` you set in `.env`, for example:
-
-```text
-http://localhost:8080
-```
-
-The archive starts pre-loaded with 12 demo albums (Beatles, Pink Floyd, Radiohead, Nirvana…).
-
-### Automatic scan
-
-Open **Settings → Automatic scan**, enter the absolute host path of your music library, then enable scanning. The worker re-reads the configuration automatically, so changing the watched folder does not require editing `.env` or restarting Docker.
-
-Scanned audio is indexed **in place**: Grizzly stores the source path and streams the file from the library without copying it into the managed uploads folder. Deleting a scanned album from Grizzly never deletes the original MP3/FLAC files.
-
-To follow scanner activity:
-
-```bash
-docker compose logs -f worker
-```
-
-To start **completely empty**, comment out the seed line in `docker-compose.yml`:
+To start **completely empty**, comment out the seed line in `docker-compose.yml` before the first start:
 
 ```yaml
 # - ./docker/db/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
 ```
 
-Then run:
-
-```bash
-docker compose down -v
-docker compose up -d --build
-```
-
-This deletes the existing database volume and rebuilds the database from scratch.
+**Never use `docker compose down -v` on an installation with real archive data.** It deletes all Compose named volumes, including the database and managed uploads. Existing installations must preserve their volumes and follow the upgrade procedure below.
 
 ### Stop / restart
 
 ```bash
 docker compose down        # stop (data is preserved in volumes)
-docker compose down -v     # stop AND delete all data (full reset)
 docker compose up -d       # start again
 ```
 
-### Upgrade from 0.4.0 to 0.5.0
+---
 
-Grizzly Music Archive 0.5.0 introduces database changes for MusicBrainz release-group identity and persistent artist image identity/cache data.
+## 📂 Automatic scan
 
-Existing **0.4.0 installations** must apply the 0.5.0 database migration after updating the application.
+The folder to scan is configured **only from Grizzly**, under **Settings → Automatic scan**. No music-library path goes in `.env`.
 
-First update the repository and rebuild the containers:
+1. Enter the **real absolute path on the host**, for example `/mnt/media/music`. Do not enter `/hostfs/...`: Grizzly maps the host path internally to `/hostfs` in Docker.
+2. Turn on **Enable automatic scan**.
+
+The worker picks up the change by itself, with no restart. Albums are imported once their folder has stopped changing, so files that are still downloading are not imported half-way.
+
+- **Index in place**: scanned MP3/FLAC files stay in your library; Grizzly stores their path and streams them. Deleting a scanned album from Grizzly never deletes the original files.
+- **Excluded folders**: subfolders listed in Settings (for example a downloader's temporary folder) are skipped together with everything inside them.
+- **Changing the watched folder**: after saving a new folder, the worker checks that the albums already in the archive are in the new location and updates their paths. Settings shows the progress; until it finishes, playback keeps using the previous folder.
+
+To follow the worker:
 
 ```bash
-git pull
-docker compose up -d --build
+docker compose logs -f worker
 ```
 
-Then apply the database migration:
+---
+
+## 🔧 Docker runtime update — PHP 8.3.36 / MySQL 8.0.46-debian
+
+The `Dockerfile` upgrades the shared app/worker runtime from PHP 8.1 to **PHP 8.3.36**, disables `session.upload_progress.enabled` at PHP configuration level, and makes application PHP/CSS/JS/font files readable by Apache. The `docker-compose.yml` updates **only the default MySQL image** from `mysql:8.0` to `mysql:8.0.46-debian`, plus comments describing the version. **No service definitions, dependencies, mounts, environment variables or named volumes were changed.**
+
+The Docker configuration uses a shared PHP image for the web application and scanner worker. After updating, verify dashboard, album operations, audio playback, and scanner functionality in your own environment.
+
+### Existing installations: preserve local configuration and data
+
+**Do not overwrite** `.env`, local Compose overrides, backups, or folders containing your music. Docker Compose merges local override files when present; confirm the **effective** database image before recreating containers. Upgrading PHP does not require a MySQL major-version change:
 
 ```bash
+docker compose config -q
+docker compose config | grep -E 'image: (mysql:|grizzly-music-archive:)'
+docker compose exec -T db sh -c 'mysql --version'
+```
+
+If an existing installation runs an older MySQL major version, **do not point the new image at that database volume as part of a PHP update**. Keep the currently deployed database image through an installation-specific override until a database upgrade has been planned, backed up and tested independently. Major-version upgrades change the data directory and are not undone simply by restoring the old container image. See the [official MySQL upgrade documentation](https://dev.mysql.com/doc/refman/8.0/en/upgrade-binary-package.html).
+
+### Back up before deploying
+
+From the **existing running installation**, save copies outside the Docker build context:
+
+```bash
+umask 077
+mkdir -p ../grizzly-backups
+chmod 700 ../grizzly-backups
+
+docker compose exec -T db sh -c \
+  'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers "$MYSQL_DATABASE"' \
+  > "../grizzly-backups/grizzly-db-$(date +%Y%m%d-%H%M%S).sql"
+
+docker compose exec -T app tar -C /var/www/html/public -cf - uploads \
+  > "../grizzly-backups/grizzly-uploads-$(date +%Y%m%d-%H%M%S).tar"
+```
+
+Verify that backups are nonempty and readable; keep an independent backup of host-stored music because external/indexed-in-place audio is not contained in `uploads_data`. Do not run `docker compose down -v`, delete Docker volumes, or alter media directories to perform this PHP update.
+
+### Build and verify
+
+For an existing installation, after confirming the **effective** database image is safe for the existing data directory and backing up the archive, rebuild PHP and recreate **only the web and worker containers**:
+
+```bash
+docker compose config -q
+docker compose build --pull app
+docker compose up -d --no-deps app worker
+docker compose ps
+docker compose exec -T app php -v
+docker compose exec -T worker php -v
+docker compose exec -T app php -i | grep session.upload_progress.enabled
+```
+
+Expected result: **PHP 8.3.36** in both `app` and `worker`, with `session.upload_progress.enabled => Off => Off`. Verify dashboard, album details, MP3/FLAC playback and scanner settings. The SQL schema upgrade to Grizzly v0.6.0 is a **separate step** described below: do not apply the upgrade migration on a newly initialized database.
+
+A pinned image tag will not automatically receive future PHP security fixes. Follow [supported PHP versions](https://www.php.net/supported-versions.php) and validate new patched images before updating the published Dockerfile.
+
+---
+
+## ⬆️ Upgrading to v0.6.0
+
+**Back up your database before upgrading.** Existing installations update to v0.6.0 with a single cumulative migration, without running earlier migration files separately. Upgrades from v0.4.0 and later are supported.
+
+```bash
+# Keep MySQL running, but stop the application and scanner during the upgrade.
+docker compose stop app worker
+git pull
+# Confirm your effective MySQL image remains compatible with the current database volume.
+docker compose config | grep -E "image: (mysql:|grizzly-music-archive:)"
+
 docker compose exec -T db sh -c \
   'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"' \
-  < docker/db/migrations/grizzly_0.5.0_migration.sql
-```
+  < docker/db/migrations/grizzly_0.6.0_migration.sql
 
-The migration upgrades an existing 0.4.0 database to the 0.5.0 schema while preserving the existing archive, artists, albums, covers and audio data.
-
-The migration is designed to be safe to run again if necessary.
-
-> **Fresh installations do not need to run migration files manually.**
-> `docker/db/01_schema.sql` already contains the current database structure and is imported automatically when the database volume is created.
-
-After the migration, verify that all containers are running:
-
-```bash
+docker compose build --pull app
+docker compose up -d --no-deps app worker
 docker compose ps
 ```
+
+The migration adds only what is missing and can be run again safely. Fresh installations already include the latest schema and do not require migrations. If the database image shown by `docker compose config` changed major version, preserve the previously deployed database image in a local override before proceeding. The commands above intentionally avoid recreating the database service.
 
 ---
 
 ## 🔑 API Keys (optional)
 
-**No API keys are required.** The app works fully out of the box thanks to **MusicBrainz**, a free and open music database that provides automatic cover art and tracklist retrieval with no registration or key needed.
-
-Simply add an album, click **Recupera automaticamente** and Grizzly will fetch cover and tracklist from MusicBrainz automatically.
-
-Last.fm and Discogs are used as **additional fallback sources** when MusicBrainz does not find a match. YouTube integration requires a key to enable track search and in-page preview.
+**No API key is required for the core metadata lookup.** MusicBrainz supplies album metadata and tracklists; Cover Art Archive supplies cover images. Add an album and press **Cerca nelle fonti** to look up the available details.
 
 | Feature               | Service             | Variable          | Notes                                                                        |
 | --------------------- | ------------------- | ----------------- | ---------------------------------------------------------------------------- |
-| Cover art + tracklist | **MusicBrainz**     | —                 | ✅ No key required — works out of the box                                     |
-| Cover art + tracklist | Last.fm             | `LASTFM_API_KEY`  | Optional fallback — [get key](https://www.last.fm/api/account/create)        |
-| Cover art             | Discogs             | `DISCOGS_TOKEN`   | Optional fallback — [get token](https://www.discogs.com/settings/developers) |
-| YouTube integration   | YouTube Data API v3 | `YOUTUBE_API_KEY` | Required for YouTube preview — [get key](https://console.cloud.google.com)   |
+| Cover art + tracklist | **MusicBrainz**     | none              | ✅ Works out of the box                                                       |
+| Cover art + tracklist | Last.fm             | `LASTFM_API_KEY`  | Optional fallback, also used for similar artists. [Get a key](https://www.last.fm/api/account/create) |
+| Cover art             | Discogs             | `DISCOGS_TOKEN`   | Optional fallback. [Get a token](https://www.discogs.com/settings/developers) |
+| YouTube integration   | YouTube Data API v3 | `YOUTUBE_API_KEY` | Required for YouTube search and preview. [Get a key](https://console.cloud.google.com) |
 
-Optional API credentials can be configured directly from **Settings → External services**.
+Keys can be saved from **Settings → External services**, with no restart. A key saved there takes precedence over the environment variable; removing it from Settings falls back to `.env`. Saved keys are never shown back in full.
 
-Credentials saved in Grizzly take precedence over server-side configuration. If no credential is stored in the application, Grizzly falls back to the corresponding environment variable when available:
-
-```dotenv
-LASTFM_API_KEY=your_key_here
-DISCOGS_TOKEN=your_token_here
-YOUTUBE_API_KEY=your_key_here
-```
-
-This makes it possible to manage credentials from the web interface while still keeping deployment-level defaults in `.env`.
-
-For security, saved credentials are never shown back in full. Settings only reports whether a service is configured and, when applicable, shows a masked suffix. Removing a credential from Grizzly removes only the application-level override; an environment fallback remains available automatically.
-
-If you change only a credential from **Settings → External services**, no container restart is required. If you edit `.env` directly, recreate or restart the application containers so the new environment values are loaded:
+If you edit `.env` directly, recreate the application containers:
 
 ```bash
 docker compose up -d --no-deps app worker
@@ -278,43 +251,13 @@ docker compose up -d --no-deps app worker
 
 ### YouTube embed on LAN servers
 
-If you run Grizzly Music Archive on a home server accessed via a raw private IP address, for example:
-
-```text
-http://192.168.1.x:8082
-```
-
-YouTube may refuse to embed certain videos and show a "Video unavailable" message. This can happen because some embeds do not behave reliably with raw private IP addresses as origins.
-
-A practical fix is to map a local hostname to your server IP on every device that will use the app.
-
-On **macOS / Linux**:
-
-```bash
-sudo nano /etc/hosts
-```
-
-Add a line like this:
+When the app is opened through a raw private IP (for example `http://192.168.1.x:8082`), YouTube may refuse some embeds with "Video unavailable". Map a local hostname to the server IP in the `hosts` file of every device that uses the app (`/etc/hosts` on macOS and Linux, `C:\Windows\System32\drivers\etc\hosts` on Windows):
 
 ```text
 192.168.1.x    grizzly.local
 ```
 
-On **Windows**:
-
-Open Notepad as Administrator, then open:
-
-```text
-C:\Windows\System32\drivers\etc\hosts
-```
-
-Add:
-
-```text
-192.168.1.x    grizzly.local
-```
-
-Then configure `.env` on the server:
+Then use that hostname in `.env` and restart the containers:
 
 ```dotenv
 BASE_URL=http://grizzly.local:8082
@@ -322,20 +265,11 @@ APP_PORT=8082
 ALLOWED_HOSTS=grizzly.local,grizzly.local:8082,192.168.1.x:8082
 ```
 
-Restart:
-
-```bash
-docker compose down
-docker compose up -d
-```
-
-You can use any local hostname you like, for example `grizzly.local`, `grizzly.archive`, or `archive.home`. The hostname must resolve to the server IP on every client that uses the app, and it should be included in `ALLOWED_HOSTS`.
-
 ---
 
 ## 🛠 Local Development (without Docker)
 
-Requirements: PHP 7.4+, MySQL 8.0 or MariaDB 10.6+, Apache with `mod_rewrite`.
+Requirements (legacy non-Docker development): PHP 7.4+ at application level, MySQL 5.7+ or MariaDB 10.6+, Apache with `mod_rewrite`. **PHP 7.4 is end-of-life and is not recommended for an exposed or production installation**; use a supported, patched PHP runtime instead. The Docker path above is verified on PHP 8.3.36.
 
 ```bash
 # 1. Import the database
@@ -343,33 +277,23 @@ mysql -u root -p -e "CREATE DATABASE grizzly_db CHARACTER SET utf8mb4 COLLATE ut
 mysql -u root -p grizzly_db < docker/db/01_schema.sql
 mysql -u root -p grizzly_db < docker/db/02_seed.sql
 
-# 2. Configure environment
+# 2. Configure the environment
 cp .env.example .env
 # Edit .env:
 #   DB_HOST=localhost
-#   DB_PORT=3306   (or 8889 for MAMP)
+#   DB_PORT=3306   (8889 for MAMP)
 #   BASE_URL=http://localhost:8888/grizzly-music-archive   (adjust to your setup)
 #   ALLOWED_HOSTS=localhost,localhost:8888
 
-# 3. Set Apache DocumentRoot to the project root directory
+# 3. Point the Apache DocumentRoot to the project folder
 # 4. Enable mod_rewrite and AllowOverride All
 ```
 
-For MAMP users: set `DB_PORT=8889` and adjust `BASE_URL` to match your MAMP virtual host.
+The **automatic scan** needs no extra setup without Docker. When scanning is enabled in Settings, Grizzly starts the background worker itself and shows its status in the **Worker** row. The worker keeps running when the browser is closed, stops when scanning is disabled or the database is unreachable, and is started again by the first page served after the server comes back. Nothing is registered in the operating system.
 
-**Automatic scan** needs no extra setup without Docker either. Open **Settings → Automatic scan**, save the folder to watch and turn on **Enable automatic scan**: Grizzly starts the background worker itself and shows its status in the **Worker** row.
+This requires macOS or Linux, a PHP 7.4+ command-line binary with `pdo_mysql` and `openssl` (MAMP and standard Linux packages include one), and a `storage/` folder writable by the web server. Logs are written to `storage/logs/media-scan-worker.log`. On Windows, Settings shows the command to start the worker manually.
 
-The worker follows the lifecycle of the Grizzly server, like the `worker` service does in Docker:
-
-- it keeps running when the browser is closed;
-- it stops when scanning is disabled, or when the database is no longer reachable (for example when MAMP is stopped);
-- the first page served by Grizzly after the server starts again restarts it;
-- after an update it stops by itself and restarts with the new code on the next request;
-- nothing is registered in the operating system: removing the Grizzly folder removes everything.
-
-Requirements: macOS or Linux, a PHP 7.4+ command-line binary with `pdo_mysql` and `openssl` (MAMP and standard Linux packages already provide one), and a `storage/` folder writable by the web server. Without `openssl` albums are still imported, but without the metadata downloaded from external services; Settings shows a warning in that case. Logs are written to `storage/logs/media-scan-worker.log`. Windows is not supported for automatic start: Settings shows the command to run the worker manually.
-
-If you prefer to manage the worker with your own service (systemd, launchd), set `GRIZZLY_WORKER_AUTOSTART=0` in `.env` and run `php media-scan-worker.php`. Only one worker per installation can run at a time, however it was started.
+To manage the worker with your own service (systemd, launchd), set `GRIZZLY_WORKER_AUTOSTART=0` in `.env` and run `php media-scan-worker.php`. Only one worker per installation runs at a time.
 
 ---
 
@@ -378,93 +302,82 @@ If you prefer to manage the worker with your own service (systemd, launchd), set
 ```text
 grizzly-music-archive/
 ├── docker/
-│   ├── apache/
-│   │   └── vhost.conf           < Apache virtual host configuration
+│   ├── apache/vhost.conf        < Apache virtual host
 │   └── db/
 │       ├── 01_schema.sql        < Current database structure for fresh installs
-│       ├── 02_seed.sql          < Demo data (safe to publish)
-│       └── migrations/
-│           ├── grizzly_0.4.0_migration.sql
-│           └── grizzly_0.5.0_migration.sql
-├── public/
-│   ├── uploads/
-│   │   ├── covers/              < Cover images (gitignored)
-│   │   └── audio/               < Audio files (gitignored)
-│   ├── css/
-│   ├── js/
-│   └── img/
-├── config/
-│   ├── config.php               < Env-driven configuration
-│   └── database.php             < PDO singleton
+│       ├── 02_seed.sql          < Demo data
+│       └── migrations/          < grizzly_0.6.0_migration.sql (cumulative upgrade)
 ├── app/
-│   ├── controllers/             < AlbumController, ArtistController, …
-│   ├── models/                  < Album, Artist, Track, …
-│   └── services/                < Metadata, recommendations, dashboard, external API config, media import, path resolution
-├── views/                       < PHP view templates
-├── api/                         < Lightweight application API endpoints
-├── docs/                        < Project images and assets
-├── media-scan-worker.php        < Background watched-folder scanner
-├── storage/                     < Runtime state: worker heartbeat, lock and logs (gitignored)
+│   ├── controllers/             < Album, Artist, Playlist, Mix, Settings, Media…
+│   ├── models/                  < Album, Artist, Track…
+│   ├── services/                < Metadata, scanner pipeline, Instant Mix, path resolution…
+│   └── lib/getid3/              < Audio tag reader
+├── config/                      < config.php (env-driven), database.php (PDO)
+├── views/                       < PHP templates
+├── public/                      < css, js, img, uploads (covers and audio, gitignored)
+├── api/                         < Lightweight endpoints (YouTube)
+├── docs/                        < Logo and project images
+├── media-scan-worker.php        < Background scanner
+├── storage/                     < Worker state and logs, created at runtime (gitignored)
 ├── Dockerfile
 ├── docker-compose.yml
-├── .env.example                 < Template — copy to .env
-├── .gitignore
-└── README.md
+└── .env.example                 < Template, copy to .env
 ```
 
 ---
 
 ## 🗄 Database Schema
 
-| Table             | Description                                           |
-| ----------------- | ----------------------------------------------------- |
-| `artists`         | Artist / band records                                 |
-| `albums`          | Album metadata (title, year, condition, cover, MBID…) |
-| `formats`         | Vinile / CD / Musicassetta / Digital                  |
-| `genres`          | Genre taxonomy                                        |
-| `labels`          | Record labels                                         |
-| `tracks`          | Tracklists with duration and cached YouTube ID        |
-| `audio_files`     | Managed uploads and external audio indexed in place    |
-| `album_formats`   | Album formats with manual/scanner provenance           |
-| `media_scan_ignored` | Source folders intentionally ignored by the scanner |
-| `playlists`       | User-created playlists                                |
-| `playlist_tracks` | Many-to-many: playlists ↔ tracks (with position)      |
-| `settings`        | Key-value app settings, including scanning and optional API credential overrides |
+| Table                 | Description                                                     |
+| --------------------- | --------------------------------------------------------------- |
+| `artists`             | Artists and bands, with MusicBrainz/Deezer identity and bio/image cache |
+| `artist_discography`  | Official discography cached from MusicBrainz                    |
+| `albums`              | Album metadata (title, year, condition, cover, release and release-group MBID) |
+| `album_formats`       | Formats owned for each album, with manual/scanner provenance    |
+| `formats`             | Vinile / CD / Musicassetta / Digital                            |
+| `genres`, `labels`    | Genres and record labels                                        |
+| `tracks`              | Tracklists with duration and cached YouTube ID                  |
+| `audio_files`         | Uploaded audio and external audio indexed in place              |
+| `playlists`, `playlist_tracks` | Playlists and their ordered tracks                     |
+| `media_scan_ignored`  | Source folders of albums deleted from Grizzly, never re-imported |
+| `media_scan_excluded` | Folders excluded from the automatic scan                        |
+| `settings`            | Application settings, scan state and optional API credentials   |
 
 ---
 
 ## ⚙️ Configuration Reference
 
-Infrastructure configuration is managed through environment variables. Application settings such as the watched media folder and optional external-service credentials can be configured from the Grizzly Settings page. Credentials saved in Settings override the corresponding environment variables. See `.env.example` for the full environment list.
+Infrastructure settings live in `.env` (see `.env.example`). The watched folder and the API credentials are managed from Settings.
 
-| Variable          | Default                                             | Description                                                         |
-| ----------------- | --------------------------------------------------- | ------------------------------------------------------------------- |
-| `BASE_URL`        | `http://localhost:8080`                             | Canonical public URL, with no trailing slash                        |
-| `APP_PORT`        | `8080`                                              | Host port for the web server                                        |
-| `ALLOWED_HOSTS`   | `localhost,localhost:8080,127.0.0.1,127.0.0.1:8080` | Comma-separated list of allowed hostnames or host:port combinations |
-| `DB_NAME`         | `grizzly_db`                                        | Database name                                                       |
-| `DB_USER`         | `grizzly`                                           | Database user                                                       |
-| `DB_PASS`         | `grizzly_secret`                                    | Database password                                                   |
-| `DB_ROOT_PASS`    | `root_secret_change_me`                             | MySQL root password                                                 |
-| `DEBUG`           | `false`                                             | Show PHP errors (`true` only for development)                       |
-| `LASTFM_API_KEY`  | *(empty)*                                           | Optional Last.fm API key fallback when no Settings override exists  |
-| `DISCOGS_TOKEN`   | *(empty)*                                           | Optional Discogs token fallback when no Settings override exists    |
-| `YOUTUBE_API_KEY` | *(empty)*                                           | Optional YouTube API key fallback when no Settings override exists  |
-| `GRIZZLY_WORKER_AUTOSTART` | `1`                                        | Without Docker only: set to `0` to stop Grizzly from starting the scan worker itself |
-| `GRIZZLY_PHP_CLI` | *(auto)*                                            | Without Docker only: path of the PHP command-line binary, if it is not found automatically |
+| Variable                   | Default                                             | Description                                                    |
+| -------------------------- | --------------------------------------------------- | -------------------------------------------------------------- |
+| `BASE_URL`                 | `http://localhost:8080`                             | Canonical URL, with no trailing slash                          |
+| `APP_PORT`                 | `8080`                                              | Host port for the web server                                   |
+| `ALLOWED_HOSTS`            | `localhost,localhost:8080,127.0.0.1,127.0.0.1:8080` | Allowed hostnames or host:port pairs                           |
+| `DB_HOST`, `DB_PORT`       | `localhost`, `3306`                                 | Database server (without Docker)                               |
+| `DB_NAME`                  | `grizzly_db`                                        | Database name                                                  |
+| `DB_USER` / `DB_PASS`      | `grizzly` / `grizzly_secret`                        | Database credentials                                           |
+| `DB_ROOT_PASS`             | `root_secret_change_me`                             | MySQL root password                                            |
+| `DEBUG`                    | `false`                                             | Show PHP errors (`true` only for development)                  |
+| `LASTFM_API_KEY`           | *(empty)*                                           | Last.fm key, used when none is saved in Settings               |
+| `DISCOGS_TOKEN`            | *(empty)*                                           | Discogs token, used when none is saved in Settings             |
+| `YOUTUBE_API_KEY`          | *(empty)*                                           | YouTube key, used when none is saved in Settings               |
+| `GRIZZLY_WORKER_AUTOSTART` | `1`                                                 | Without Docker: `0` stops Grizzly from starting the worker     |
+| `GRIZZLY_PHP_CLI`          | *(auto)*                                            | Without Docker: path of the PHP CLI, if not found automatically |
 
 ---
 
 ## 🔒 Security Notes
 
-- **No built-in authentication** — the app is intended for personal, self-hosted use inside a trusted network. If it is reachable from outside your LAN, restrict access at the reverse proxy or network level (Basic Auth / Access Lists, IP allow-list, VPN). See the *Access control notice* in the installation section.
-- Never commit `.env` to version control
-- External-service credentials saved through Settings are stored as application overrides and are not exported with archive backups
-- Set `DEBUG=false` in any non-local environment
-- The `public/uploads/` directory is served by Apache; audio files outside the web root (configurable via Settings) are streamed through PHP with strict path validation
-- Docker exposes the host filesystem to the application and scanner under `/hostfs` as a read-only view; the watched music folder is selected only from Settings
-- All database queries use PDO prepared statements
-- File uploads are validated by MIME type and extension server-side
+- **No built-in authentication**: restrict access at the proxy or network level if the app is reachable from outside your LAN (see the access control notice above).
+- **Runtime:** Docker uses PHP `8.3.36` with `session.upload_progress.enabled=0`; keep the runtime patched and rebuild both app and worker after security updates.
+- **MySQL:** the default Docker image is `mysql:8.0.46-debian`. Existing installations with an older major version must keep their current database image until a separate, tested database migration is completed.
+- **Host filesystem access:** the official `app` service mounts host `/` under `/hostfs` read-write, while `worker` mounts it read-only. This behavior remains unchanged for scanner/path compatibility but is broad access: run Grizzly only on trusted systems and restrict the web entry point.
+- **Publishing:** do not expose an unauthenticated instance directly to the Internet. Place an authenticated reverse proxy with HTTPS or a VPN in front of it.
+- Never commit `.env` to version control, and keep `DEBUG=false` outside local development.
+- Credentials saved in Settings stay in the installation and are not included in archive exports.
+- Audio outside the web root is streamed through PHP with strict path validation. Docker maps host paths under `/hostfs`; review per-service mount permissions in `docker-compose.yml`.
+- All database queries use PDO prepared statements; uploads are validated by MIME type and extension.
 
 ---
 
@@ -482,8 +395,6 @@ Pull requests are welcome. For major changes please open an issue first.
 
 ## 📸 Screenshots
 
-Grizzly Music Archive is designed to work as a clean desktop archive and as a responsive mobile catalogue. The interface includes the collection overview, album browsing, artist profiles, discography lookup, playlists, track playback and dark mode support.
-
 ### Desktop interface
 
 <p align="center">
@@ -492,7 +403,7 @@ Grizzly Music Archive is designed to work as a clean desktop archive and as a re
 
 <p align="center">
   <strong>Collection overview</strong><br>
-  Recent arrivals, collection-aware suggestions, playlists, shelf picks, genre breakdown and format composition.
+  Recent arrivals, collection-aware suggestions, playlists, shelf picks, genres and format composition.
 </p>
 
 ---
@@ -503,7 +414,7 @@ Grizzly Music Archive is designed to work as a clean desktop archive and as a re
 
 <p align="center">
   <strong>Album detail and player</strong><br>
-  Album metadata, tracklist, MP3/FLAC upload, YouTube lookup and sticky HTML5 audio player.
+  Album metadata, tracklist, MP3/FLAC upload, YouTube lookup and sticky audio player.
 </p>
 
 ---
@@ -511,28 +422,24 @@ Grizzly Music Archive is designed to work as a clean desktop archive and as a re
 | Archive view                                                                                                      | Artist profile                                                                                                                                            |
 | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | <img src=".github/assets/screenshots/03-archive-list.jpg" alt="Grizzly Music Archive archive table" width="100%"> | <img src=".github/assets/screenshots/04-artist-profile-discography.jpg" alt="Grizzly Music Archive artist profile and official discography" width="100%"> |
-| Searchable album table with cover, artist, format, year, genre and actions.                                       | Artist biography, local albums, format statistics and official discography.                                                                               |
+| Searchable album table with cover, artist, format, year, genre and actions.                                       | Artist biography, discography and the albums in your archive.                                                                                             |
 
 ### Mobile interface
 
 | Mobile dashboard                                                                                                                                   | Mobile artist page                                                                                                                         |
 | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | <img src=".github/assets/screenshots/05-mobile-dashboard-player.jpg" alt="Grizzly Music Archive mobile dashboard with sticky player" width="100%"> | <img src=".github/assets/screenshots/06-mobile-artist-discography.jpg" alt="Grizzly Music Archive mobile artist discography" width="100%"> |
-| Responsive collection overview with recent arrivals, playlists and sticky player.                                                                          | Mobile artist archive with official discography and cover thumbnails.                                                                      |
+| Collection overview with recent arrivals, playlists and sticky player.                                                                             | Artist page with discography and cover thumbnails.                                                                                         |
 
 ---
 
 ## 💬 Community & Support
 
-Report bugs, suggest features and help shape the future of Grizzly Music Archive.
-
-- 🐛 [GitHub Issues](https://github.com/recycledesign9/grizzly-music-archive/issues) — report bugs and request features
-- ☕ [Support Grizzly on Ko-fi](https://ko-fi.com/recycledesign) — help fund ongoing development
-
-Contributions go toward building new features, improving existing ones, fixing bugs and making the project better with every release.
+- 🐛 [GitHub Issues](https://github.com/recycledesign9/grizzly-music-archive/issues): report bugs and request features
+- ☕ [Support Grizzly on Ko-fi](https://ko-fi.com/recycledesign): help fund ongoing development
 
 ---
 
 ## 📜 License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT, see [LICENSE](LICENSE) for details.

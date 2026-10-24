@@ -21,7 +21,7 @@ x-app-env: &app-env
 
 services:
 
-  # ── PHP 8.1 + Apache application ──────────────────────────────────────────
+  # ── PHP 8.3.36 + Apache application ──────────────────────────────────────
   app:
     build:
       context: .
@@ -145,9 +145,9 @@ services:
     restart: unless-stopped
 
 
-  # ── MySQL 8.0 database ────────────────────────────────────────────────────
+  # ── MySQL 8.0.46 Debian database ──────────────────────────────────────────
   db:
-    image: mysql:8.0
+    image: mysql:8.0.46-debian
 
     environment:
       MYSQL_DATABASE:      ${DB_NAME:-grizzly_db}

@@ -23,7 +23,11 @@ class Track
 
     public function saveTracklist(int $albumId, array $tracks): void
     {
-        $this->db->beginTransaction();
+        $ownTransaction = !$this->db->inTransaction();
+
+        if ($ownTransaction) {
+            $this->db->beginTransaction();
+        }
 
         try {
             // Legge anche posizione e titolo: servono a preservare gli ID locali
@@ -173,9 +177,11 @@ class Track
                 $stmtDelete->execute($params);
             }
 
-            $this->db->commit();
+            if ($ownTransaction) {
+                $this->db->commit();
+            }
         } catch (Throwable $e) {
-            if ($this->db->inTransaction()) {
+            if ($ownTransaction && $this->db->inTransaction()) {
                 $this->db->rollBack();
             }
             throw $e;

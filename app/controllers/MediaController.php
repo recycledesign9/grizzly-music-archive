@@ -203,9 +203,12 @@ class MediaController
      * source_path contiene il path host assoluto. In Docker viene applicato
      * MEDIA_SCAN_HOST_PREFIX (es. /hostfs) solo a runtime.
      *
-     * Il realpath del file DEVE ricadere dentro il realpath della watched folder
-     * configurata. In questo modo anche symlink che puntano fuori dalla root
-     * vengono rifiutati.
+     * Il realpath del file DEVE ricadere dentro la root a cui i source_path
+     * del DB sono realmente legati (media_scan_bound_root). Durante una
+     * relocation media_scan_path può già puntare alla nuova root mentre i
+     * source_path sono ancora sulla vecchia: il playback deve restare operativo.
+     * In assenza della setting interna (upgrade legacy) viene usato
+     * media_scan_path come fallback.
      */
     private function resolveExternalPath(array $audioRow): ?string
     {
@@ -214,7 +217,15 @@ class MediaController
             return null;
         }
 
-        $scanRoot = $this->getSettingValue('media_scan_path');
+        // Per il playback conta la root effettivamente committata nel DB,
+        // non la watched folder appena richiesta dall'utente.
+        $scanRoot = $this->getSettingValue('media_scan_bound_root');
+
+        // Compatibilita con installazioni precedenti alla durable root binding.
+        if ($scanRoot === '') {
+            $scanRoot = $this->getSettingValue('media_scan_path');
+        }
+
         if ($scanRoot === '') {
             return null;
         }

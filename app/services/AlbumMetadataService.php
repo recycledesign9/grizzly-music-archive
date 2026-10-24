@@ -6,6 +6,13 @@ class AlbumMetadataService
 {
     private const MAX_TRACKS = 40;
 
+    // GRIZZLY_SCANNER_EVIDENCE_V1
+    // Cache scanner: la rete viene usata dal worker solo per costruire
+    // evidenza persistente. Executor/preflight possono poi lavorare offline.
+    private const SCANNER_EVIDENCE_CACHE_VERSION = 1;
+    private const SCANNER_EVIDENCE_CACHE_TTL = 2592000; // 30 giorni
+    private const SCANNER_EVIDENCE_NEGATIVE_TTL = 900;  // 15 minuti
+
     // EDIZIONI (ottobre 2026). Versione della logica che costruisce le
     // varianti di tracklist di un release-group: cambiandola, le cache
     // in cache/album-editions/ scritte con la logica precedente vengono
@@ -371,6 +378,146 @@ class AlbumMetadataService
             'release_group' => (string)($mb['release-group']['id'] ?? ''),
             'year'          => !empty($mb['date']) ? substr((string)$mb['date'], 0, 4) : '',
         ];
+    }
+
+
+    // ----------------------------------------------------------
+    // GRIZZLY_SCANNER_EVIDENCE_V1
+    //
+    // Evidenza MusicBrainz minima per il media scanner.
+    // NON usa cover, CAA, Discogs, Last.fm o browse delle edizioni.
+    //
+    // Regola:
+    // - prima prova la cache persistente;
+    // - se allowNetwork=false, cache miss => nessuna rete;
+    // - se la release MBID arriva gia' dai tag, usa direttamente quella;
+    // - altrimenti usa identifyRelease() gia' esistente;
+    // - persiste la tracklist prima di restituire status=ok.
+    //
+    // @return array<string,mixed>
+    // ----------------------------------------------------------
+    public function resolveScannerEvidence(
+        string $artist,
+        string $album,
+        int $year = 0,
+        string $releaseMbid = '',
+        bool $allowNetwork = true
+    ): array {
+        $artist = trim($artist);
+        $album = trim($album);
+        $year = max(0, $year);
+        $releaseMbid = strtolower(trim($releaseMbid));
+
+        if ($artist === '' || $album === '') {
+            return $this->emptyScannerEvidence('invalid-query');
+        }
+
+        if ($releaseMbid !== '' && !$this->isUuid($releaseMbid)) {
+            $releaseMbid = '';
+        }
+
+        $cacheKey = $this->scannerEvidenceCacheKey(
+            $artist,
+            $album,
+            $year,
+            $releaseMbid
+        );
+
+        $cached = $this->readScannerEvidenceCache($cacheKey);
+        if ($cached !== null) {
+            $cached['cache'] = 'hit';
+            return $cached;
+        }
+
+        if (!$allowNetwork) {
+            return $this->emptyScannerEvidence('cache-miss');
+        }
+
+        $identity = [
+            'mbid' => '',
+            'artist_mbid' => '',
+            'release_group' => '',
+            'year' => '',
+        ];
+
+        $mbid = $releaseMbid;
+
+        if ($mbid === '') {
+            $identity = $this->identifyRelease($artist, $album, $year);
+            $mbid = strtolower(trim((string)($identity['mbid'] ?? '')));
+        }
+
+        if (!$this->isUuid($mbid)) {
+            $negative = $this->emptyScannerEvidence('release-not-found');
+            $negative['fetched_at'] = time();
+            $this->writeScannerEvidenceCache($cacheKey, $negative);
+            return $negative;
+        }
+
+        $tracks = $this->getTracksFromMusicBrainzRelease($mbid);
+
+        if (empty($tracks)) {
+            $negative = $this->emptyScannerEvidence('tracklist-not-found');
+            $negative['release_mbid'] = $mbid;
+            $negative['fetched_at'] = time();
+            $this->writeScannerEvidenceCache($cacheKey, $negative);
+            return $negative;
+        }
+
+        $cleanTracks = [];
+        foreach ($tracks as $index => $track) {
+            if (!is_array($track)) {
+                continue;
+            }
+
+            $title = trim((string)($track['title'] ?? ''));
+            if ($title === '') {
+                continue;
+            }
+
+            $cleanTracks[] = [
+                'position' => isset($track['position'])
+                    ? max(1, (int)$track['position'])
+                    : count($cleanTracks) + 1,
+                'title' => $title,
+                'duration' => max(0, (int)($track['duration'] ?? 0)),
+            ];
+        }
+
+        if (empty($cleanTracks)) {
+            $negative = $this->emptyScannerEvidence('tracklist-empty-after-clean');
+            $negative['release_mbid'] = $mbid;
+            $negative['fetched_at'] = time();
+            $this->writeScannerEvidenceCache($cacheKey, $negative);
+            return $negative;
+        }
+
+        $resolvedYear = null;
+        $identityYear = trim((string)($identity['year'] ?? ''));
+        if ($identityYear !== '' && preg_match('/^(19|20)\d{2}$/', $identityYear)) {
+            $resolvedYear = (int)$identityYear;
+        }
+
+        $evidence = [
+            'status' => 'ok',
+            'source' => 'musicbrainz-release',
+            'release_mbid' => $mbid,
+            'artist_mbid' => strtolower(trim((string)($identity['artist_mbid'] ?? ''))),
+            'release_group' => strtolower(trim((string)($identity['release_group'] ?? ''))),
+            'year' => $resolvedYear,
+            'expected_tracks' => count($cleanTracks),
+            'tracks' => $cleanTracks,
+            'fetched_at' => time(),
+            'cache' => 'write',
+        ];
+
+        if (!$this->writeScannerEvidenceCache($cacheKey, $evidence)) {
+            // Fail closed: se non possiamo rendere l'evidenza riutilizzabile
+            // dall'Executor, il worker non deve autorizzare l'import.
+            return $this->emptyScannerEvidence('cache-write-failed');
+        }
+
+        return $evidence;
     }
 
     // ----------------------------------------------------------
@@ -2051,6 +2198,158 @@ class AlbumMetadataService
             }
         }
         return $best;
+    }
+
+
+    // ----------------------------------------------------------
+    // GRIZZLY_SCANNER_EVIDENCE_V1 - cache persistente scanner
+    // ----------------------------------------------------------
+
+    /** @return array<string,mixed> */
+    private function emptyScannerEvidence(string $status): array
+    {
+        return [
+            'status' => $status,
+            'source' => 'musicbrainz-release',
+            'release_mbid' => '',
+            'artist_mbid' => '',
+            'release_group' => '',
+            'year' => null,
+            'expected_tracks' => null,
+            'tracks' => [],
+            'fetched_at' => null,
+            'cache' => 'none',
+        ];
+    }
+
+    private function scannerEvidenceCacheKey(
+        string $artist,
+        string $album,
+        int $year,
+        string $releaseMbid
+    ): string {
+        $normalize = static function (string $value): string {
+            $value = trim($value);
+            $value = preg_replace('/\s+/u', ' ', $value);
+            if (!is_string($value)) {
+                $value = '';
+            }
+            return function_exists('mb_strtolower')
+                ? mb_strtolower($value, 'UTF-8')
+                : strtolower($value);
+        };
+
+        $payload = [
+            'v' => self::SCANNER_EVIDENCE_CACHE_VERSION,
+            'artist' => $normalize($artist),
+            'album' => $normalize($album),
+            'year' => max(0, $year),
+            'release_mbid' => strtolower(trim($releaseMbid)),
+        ];
+
+        $json = json_encode(
+            $payload,
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+        );
+
+        if ($json === false) {
+            $json = serialize($payload);
+        }
+
+        return hash('sha256', $json);
+    }
+
+    private function scannerEvidenceCacheFile(string $cacheKey): string
+    {
+        $base = defined('BASE_PATH') ? BASE_PATH : dirname(__DIR__, 2);
+        return rtrim((string)$base, '/')
+            . '/cache/scanner-evidence/'
+            . $cacheKey
+            . '.json';
+    }
+
+    /** @return array<string,mixed>|null */
+    private function readScannerEvidenceCache(string $cacheKey): ?array
+    {
+        $file = $this->scannerEvidenceCacheFile($cacheKey);
+
+        if (!is_file($file) || !is_readable($file)) {
+            return null;
+        }
+
+        $raw = @file_get_contents($file);
+        if ($raw === false || trim($raw) === '') {
+            return null;
+        }
+
+        $data = json_decode($raw, true);
+        if (
+            !is_array($data)
+            || (int)($data['version'] ?? 0) !== self::SCANNER_EVIDENCE_CACHE_VERSION
+            || !isset($data['evidence'])
+            || !is_array($data['evidence'])
+        ) {
+            return null;
+        }
+
+        $evidence = $data['evidence'];
+        $fetchedAt = max(0, (int)($evidence['fetched_at'] ?? 0));
+        if ($fetchedAt <= 0) {
+            return null;
+        }
+
+        $ttl = (($evidence['status'] ?? '') === 'ok')
+            ? self::SCANNER_EVIDENCE_CACHE_TTL
+            : self::SCANNER_EVIDENCE_NEGATIVE_TTL;
+
+        if ((time() - $fetchedAt) > $ttl) {
+            return null;
+        }
+
+        return $evidence;
+    }
+
+    private function writeScannerEvidenceCache(string $cacheKey, array $evidence): bool
+    {
+        $file = $this->scannerEvidenceCacheFile($cacheKey);
+        $dir = dirname($file);
+
+        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+            return false;
+        }
+
+        $json = json_encode([
+            'version' => self::SCANNER_EVIDENCE_CACHE_VERSION,
+            'evidence' => $evidence,
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        if ($json === false) {
+            return false;
+        }
+
+        $tmp = @tempnam($dir, '.scanner-evidence-');
+        if ($tmp === false) {
+            return false;
+        }
+
+        try {
+            if (@file_put_contents($tmp, $json . PHP_EOL, LOCK_EX) === false) {
+                return false;
+            }
+
+            @chmod($tmp, 0664);
+
+            if (!@rename($tmp, $file)) {
+                return false;
+            }
+
+            @chmod($file, 0664);
+            return true;
+        } finally {
+            if (is_file($tmp)) {
+                @unlink($tmp);
+            }
+        }
     }
 
     private function editionsCacheFile(string $rgId): string
