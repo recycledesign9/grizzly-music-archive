@@ -47,6 +47,7 @@ RUN set -eu; \
         /var/www/html/public/img \
         /var/www/html/index.php \
         /var/www/html/media-scan-worker.php \
+        /var/www/html/VERSION \
         /var/www/html/.htaccess; do \
         if [ -e "$path" ]; then chmod -R a+rX "$path"; fi; \
     done
