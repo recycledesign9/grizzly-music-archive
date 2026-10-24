@@ -42,12 +42,54 @@ const Player = (function () {
   const coverImg = document.getElementById('sp-cover-img');
   const trackEl = document.getElementById('sp-track-title');
   const artistEl = document.getElementById('sp-artist-name');
+  const btnRepeat = document.getElementById('sp-repeat');
+  const timeToggle = document.getElementById('sp-time-toggle');
+  const seekWrap = document.getElementById('sp-seek-wrap');
+  const ruler = document.getElementById('sp-ruler');
+  const hoverLine = document.getElementById('sp-hover-line');
+  const hoverTip = document.getElementById('sp-hover-tip');
 
   if (!audio || !panel) return { load: () => { }, playTrack: () => { } };
 
   let playlist = [];   // array di tracce con src
   let cursor = -1;   // indice corrente
   let albumMeta = {};   // { cover, artist }
+
+  // Barra di avanzamento: risoluzione 1/1000 (deve combaciare con max
+  // dell'input #sp-seek in footer.php). Con la barra lunga l'1% era
+  // un passo di diversi pixel e di alcuni secondi.
+  const SEEK_MAX = 1000;
+  const ACCENT = '#f5b400';
+  const ACCENT_DEEP = '#c98f00';
+
+  // "Precedente": oltre questa soglia (secondi) riavvia la traccia
+  // corrente, entro la soglia passa alla traccia prima.
+  const RESTART_THRESHOLD = 3;
+
+  // Ripeti a tre stati e formato del tempo a destra, ricordati tra le
+  // sessioni. localStorage può mancare (navigazione privata): si
+  // ripiega sui valori di default senza errori.
+  const REPEAT_KEY = 'grz.playerRepeat';
+  const REMAINING_KEY = 'grz.playerRemaining';
+  const REPEAT_MODES = ['off', 'all', 'one'];
+  const REPEAT_LABELS = {
+    off: 'Ripeti: disattivato',
+    all: 'Ripeti la coda',
+    one: 'Ripeti la traccia'
+  };
+
+  function readPref(key) {
+    try { return localStorage.getItem(key); } catch (e) { return null; }
+  }
+  function writePref(key, value) {
+    try { localStorage.setItem(key, value); } catch (e) { /* storage non disponibile */ }
+  }
+
+  const storedRepeat = readPref(REPEAT_KEY);
+  let repeatMode = REPEAT_MODES.indexOf(storedRepeat) !== -1 ? storedRepeat : 'off';
+  let showRemaining = readPref(REMAINING_KEY) === '1';
+  let rulerTicks = [];        // [{ el, at }] tacche del righello dei minuti
+  let prevRestarts = null;    // ultimo stato dell'etichetta di "precedente"
 
   function fmt(s) {
     s = Math.floor(s || 0);
@@ -92,13 +134,31 @@ const Player = (function () {
       const name = nameEl ? nameEl.textContent.trim() : '';
       return name ? 'in ascolto da ' + name : 'in ascolto da una playlist';
     }
+    // Coda caricata senza disco né playlist di partenza (Instant Mix):
+    // la provenienza è l'etichetta del player, se visibile, ridotta alla
+    // sola sorgente ("Instant Mix · Post-Rock, …" → "Instant Mix") perché
+    // l'etichetta della riga deve restare corta come "in ascolto dal disco".
+    if (!albumMeta.id) {
+      const ctxEl = document.getElementById('sp-context');
+      const ctxName = document.getElementById('sp-context-name');
+      const name = (ctxEl && ctxName && ctxEl.style.display !== 'none')
+        ? ctxName.textContent.split(' · ')[0].trim() : '';
+      if (name) return 'in ascolto da ' + name;
+    }
     return 'in ascolto dal disco';
   }
 
   function clearElsewhere(li) {
     li.classList.remove('track-elsewhere');
     const titleEl = li.querySelector('.fw-semibold');
-    if (titleEl) delete titleEl.dataset.elsewhere;
+    if (titleEl) {
+      delete titleEl.dataset.elsewhere;
+      // Ripristina il tooltip del titolo ("Riproduci …")
+      if (titleEl.dataset.origTitle !== undefined) {
+        titleEl.title = titleEl.dataset.origTitle;
+        delete titleEl.dataset.origTitle;
+      }
+    }
   }
 
   function resetPlayerState(reason) {
@@ -122,11 +182,14 @@ const Player = (function () {
 
     if (seek) {
       seek.value = 0;
-      updateFill(seek, '#ffc107');
+      seekFill();
     }
 
     if (timeCur) timeCur.textContent = '0:00';
     if (timeDur) timeDur.textContent = '0:00';
+    clearRuler();
+    hideHover();
+    updatePrevLabel();
 
     if (btnPlay) {
       btnPlay.innerHTML = '<i class="bi bi-play-fill"></i>';
@@ -248,7 +311,15 @@ const Player = (function () {
         // Il play della riga avvia questo contesto da questa traccia.
         li.classList.add('track-elsewhere');
         const titleEl = li.querySelector('.fw-semibold');
-        if (titleEl) titleEl.dataset.elsewhere = elsewhereLabel();
+        if (titleEl) {
+          titleEl.dataset.elsewhere = elsewhereLabel();
+          // Il titolo qui non avvia nulla: il tooltip lo dice e indica
+          // il pulsante che riproduce il brano dal disco.
+          if (titleEl.hasAttribute('title') && titleEl.dataset.origTitle === undefined) {
+            titleEl.dataset.origTitle = titleEl.title;
+            titleEl.title = 'Brano ' + elsewhereLabel() + '. Per ascoltarlo da qui usa il pulsante play della riga.';
+          }
+        }
         if (btn) { btn.innerHTML = '<i class="bi bi-play-fill"></i>'; btn.title = 'Riproduci da qui'; }
       } else if (tid === t.id) {
         li.classList.add('track-playing');
@@ -365,6 +436,8 @@ const Player = (function () {
 
     audio.src = t.src;
     audio.load();
+    // Il righello si ricostruisce su loadedmetadata con la nuova durata
+    clearRuler();
     safePlay();
 
     // Nota: lo stop del player YouTube non è più chiamato qui.
@@ -431,6 +504,168 @@ const Player = (function () {
       `linear-gradient(to right, ${activeColor} ${pct}%, rgba(255,255,255,0.15) ${pct}%)`;
   }
 
+  // -------------------------------------------------------
+  // Barra di avanzamento, tempi, righello, ripeti
+  // -------------------------------------------------------
+
+  // Riempimento della barra: ascoltato in ambra, porzione già caricata
+  // appena più chiara, resto della traccia sul fondo.
+  function seekFill() {
+    if (!seek) return;
+    const d = audio.duration;
+    const hasDur = !!d && isFinite(d);
+    const pct = hasDur
+      ? Math.min(100, (audio.currentTime / d) * 100)
+      : (parseFloat(seek.value) / SEEK_MAX) * 100;
+    let buf = pct;
+    if (hasDur && audio.buffered) {
+      for (let i = 0; i < audio.buffered.length; i++) {
+        if (audio.buffered.start(i) <= audio.currentTime + 0.5 &&
+          audio.buffered.end(i) >= audio.currentTime) {
+          buf = Math.max(buf, Math.min(100, (audio.buffered.end(i) / d) * 100));
+        }
+      }
+    }
+    seek.style.background =
+      'linear-gradient(to right, ' +
+      ACCENT_DEEP + ' 0%, ' + ACCENT + ' ' + pct + '%, ' +
+      'rgba(255,255,255,0.16) ' + pct + '%, rgba(255,255,255,0.16) ' + buf + '%, ' +
+      'rgba(255,255,255,0.09) ' + buf + '%)';
+  }
+
+  // Tempo corrente a sinistra; a destra durata oppure tempo residuo
+  function renderTimes() {
+    const d = audio.duration;
+    if (!d || !isFinite(d)) return;
+    const cur = Math.min(audio.currentTime, d);
+    if (timeCur) timeCur.textContent = fmt(cur);
+    if (timeDur) timeDur.textContent = showRemaining ? '−' + fmt(d - cur) : fmt(d);
+  }
+
+  function updateTimeToggleLabel() {
+    if (!timeToggle) return;
+    const label = showRemaining
+      ? 'Tempo residuo. Mostra la durata'
+      : 'Durata. Mostra il tempo residuo';
+    timeToggle.title = label;
+    timeToggle.setAttribute('aria-label', label);
+  }
+
+  // Righello: una tacca per minuto sotto la barra. Per brani lunghi
+  // il passo sale a 5 o 10 minuti, così le tacche restano leggibili.
+  function clearRuler() {
+    rulerTicks = [];
+    if (ruler) ruler.innerHTML = '';
+  }
+
+  function buildRuler() {
+    clearRuler();
+    const d = audio.duration;
+    if (!ruler || !d || !isFinite(d)) return;
+    const step = d <= 1200 ? 60 : (d <= 3600 ? 300 : 600);
+    const frag = document.createDocumentFragment();
+    for (let at = step; at < d - 1; at += step) {
+      const left = ((at / d) * 100) + '%';
+      const tick = document.createElement('span');
+      tick.className = 'sp-tick';
+      tick.style.left = left;
+      const label = document.createElement('span');
+      label.className = 'sp-tick-label';
+      label.style.left = left;
+      label.textContent = String(at / 60);
+      frag.appendChild(tick);
+      frag.appendChild(label);
+      rulerTicks.push({ el: tick, at: at });
+    }
+    ruler.appendChild(frag);
+    updateTicks();
+  }
+
+  function updateTicks() {
+    const t = audio.currentTime;
+    for (let i = 0; i < rulerTicks.length; i++) {
+      rulerTicks[i].el.classList.toggle('is-past', t >= rulerTicks[i].at);
+    }
+  }
+
+  // Etichetta di "precedente" coerente con quello che farà il clic
+  function updatePrevLabel() {
+    if (!btnPrev) return;
+    const restarts = !!audio.src && audio.currentTime > RESTART_THRESHOLD;
+    if (restarts === prevRestarts) return;
+    prevRestarts = restarts;
+    const label = restarts ? 'Ricomincia la traccia' : 'Traccia precedente';
+    btnPrev.title = label;
+    btnPrev.setAttribute('aria-label', label);
+  }
+
+  // Aggiorna barra, tempi e righello dopo uno spostamento della posizione
+  function syncPosition() {
+    if (seek && audio.duration && isFinite(audio.duration)) {
+      seek.value = Math.round((audio.currentTime / audio.duration) * SEEK_MAX);
+    }
+    seekFill();
+    renderTimes();
+    updateTicks();
+    updatePrevLabel();
+  }
+
+  // Riporta la traccia corrente a 0:00 mantenendo play o pausa
+  function restartCurrent() {
+    try { audio.currentTime = 0; } catch (e) { }
+    syncPosition();
+    if (timeCur) {
+      timeCur.classList.remove('sp-restart');
+      void timeCur.offsetWidth;
+      timeCur.classList.add('sp-restart');
+      setTimeout(function () { timeCur.classList.remove('sp-restart'); }, 650);
+    }
+  }
+
+  // Prima traccia riproducibile della coda (per "ripeti la coda")
+  function firstPlayable() {
+    for (let i = 0; i < playlist.length; i++) {
+      if (playlist[i] && playlist[i].src) return i;
+    }
+    return -1;
+  }
+
+  // Fine coda senza ripetizione: il player resta caricato sull'ultima
+  // traccia, in pausa a 0:00, così play la riascolta. Lo stop resta
+  // il modo per chiuderlo.
+  function endOfQueue() {
+    try { audio.pause(); } catch (e) { }
+    try { audio.currentTime = 0; } catch (e) { }
+    syncPosition();
+    notifyChange();
+  }
+
+  // Ripeti la traccia usa audio.loop: a fine brano il browser riparte
+  // da 0:00 senza emettere 'ended', quindi coda, liste e pannello non
+  // vedono alcun cambio di traccia. Precedente/successiva funzionano
+  // normalmente perché passano da playAt().
+  function applyRepeat() {
+    audio.loop = (repeatMode === 'one');
+    if (!btnRepeat) return;
+    const label = REPEAT_LABELS[repeatMode];
+    btnRepeat.dataset.mode = repeatMode;
+    btnRepeat.classList.toggle('is-on', repeatMode !== 'off');
+    btnRepeat.setAttribute('aria-pressed', repeatMode !== 'off' ? 'true' : 'false');
+    btnRepeat.title = label;
+    btnRepeat.setAttribute('aria-label', label);
+  }
+
+  function hideHover() {
+    if (hoverLine) hoverLine.hidden = true;
+    if (hoverTip) hoverTip.hidden = true;
+  }
+
+  function ratioAt(e) {
+    const rect = seek.getBoundingClientRect();
+    if (!rect.width) return null;
+    return Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  }
+
   // Audio events
   audio.addEventListener('play', () => {
     // Regola unica di mutua esclusione: qualsiasi avvio dell'audio nativo
@@ -457,18 +692,28 @@ const Player = (function () {
       return;
     }
 
-    resetPlayerState('completed');
+    // Ripeti la coda: riparte dalla prima traccia con file audio
+    if (repeatMode === 'all') {
+      const first = firstPlayable();
+      if (first !== -1) {
+        playAt(first);
+        return;
+      }
+    }
+
+    endOfQueue();
   });
   audio.addEventListener('timeupdate', () => {
     if (!audio.duration) return;
-    const pct = (audio.currentTime / audio.duration) * 100;
-    seek.value = Math.round(pct);
-    timeCur.textContent = fmt(audio.currentTime);
-    updateFill(seek, '#ffc107');
+    syncPosition();
   });
   audio.addEventListener('loadedmetadata', () => {
-    timeDur.textContent = fmt(audio.duration);
+    renderTimes();
+    buildRuler();
+    seekFill();
   });
+  // Avanzamento del buffer: aggiorna la porzione già caricata
+  audio.addEventListener('progress', seekFill);
 
   // Controls
   btnPlay.addEventListener('click', () => {
@@ -476,10 +721,21 @@ const Player = (function () {
     audio.paused ? safePlay() : audio.pause();
   });
   btnPrev.addEventListener('click', () => {
+    // Oltre i primi secondi "precedente" riavvia la traccia corrente:
+    // un clic la riascolta, due clic ravvicinati tornano indietro.
+    if (audio.src && audio.currentTime > RESTART_THRESHOLD) {
+      restartCurrent();
+      return;
+    }
     // Cerca indietro la precedente traccia con src valido
     let prev = cursor - 1;
     while (prev >= 0 && !(playlist[prev] && playlist[prev].src)) { prev--; }
-    if (prev >= 0) playAt(prev);
+    if (prev >= 0) {
+      playAt(prev);
+    } else if (audio.src) {
+      // Prima traccia della coda: riparte da 0:00
+      restartCurrent();
+    }
   });
   btnNext.addEventListener('click', () => {
     // Cerca avanti la prossima traccia con src valido
@@ -490,8 +746,11 @@ const Player = (function () {
   btnStop.addEventListener('click', () => resetPlayerState('stopped'));
 
   seek.addEventListener('input', () => {
-    if (audio.duration) audio.currentTime = (seek.value / 100) * audio.duration;
-    updateFill(seek, '#ffc107');
+    if (audio.duration) audio.currentTime = (seek.value / SEEK_MAX) * audio.duration;
+    seekFill();
+    renderTimes();
+    updateTicks();
+    updatePrevLabel();
   });
 
   // Tap-to-seek per touch: iOS Safari non sposta il valore di un
@@ -507,10 +766,69 @@ const Player = (function () {
     if (!rect.width) return;
     let ratio = (e.clientX - rect.left) / rect.width;
     ratio = Math.min(1, Math.max(0, ratio));
-    seek.value = Math.round(ratio * 100);
+    seek.value = Math.round(ratio * SEEK_MAX);
     audio.currentTime = ratio * audio.duration;
-    updateFill(seek, '#ffc107');
+    seekFill();
+    renderTimes();
+    updateTicks();
+    updatePrevLabel();
   });
+
+  // Area attorno alla barra (alta 44px): con il mouse il clic sposta la
+  // posizione anche fuori dai 6px della traccia, e il passaggio mostra
+  // linea guida e tempo del punto indicato. Sull'input il clic nativo
+  // funziona già e non viene toccato. Solo mouse: su touch vale il
+  // tap-to-seek qui sopra.
+  if (seekWrap) {
+    seekWrap.addEventListener('pointermove', (e) => {
+      if (e.pointerType !== 'mouse' || !hoverLine || !hoverTip) return;
+      const d = audio.duration;
+      const ratio = ratioAt(e);
+      if (!d || !isFinite(d) || ratio === null) { hideHover(); return; }
+      const left = (ratio * 100) + '%';
+      hoverLine.style.left = left;
+      hoverTip.style.left = left;
+      hoverTip.textContent = fmt(ratio * d);
+      hoverLine.hidden = false;
+      hoverTip.hidden = false;
+    });
+    seekWrap.addEventListener('pointerleave', hideHover);
+    seekWrap.addEventListener('pointerdown', (e) => {
+      if (e.pointerType !== 'mouse' || e.button !== 0) return;
+      if (e.target === seek) return;
+      const d = audio.duration;
+      if (!d || !isFinite(d)) return;
+      const ratio = ratioAt(e);
+      if (ratio === null) return;
+      audio.currentTime = ratio * d;
+      syncPosition();
+    });
+  }
+
+  // Ripeti: disattivato → coda → traccia → disattivato
+  if (btnRepeat) {
+    btnRepeat.addEventListener('click', () => {
+      const i = REPEAT_MODES.indexOf(repeatMode);
+      repeatMode = REPEAT_MODES[(i + 1) % REPEAT_MODES.length];
+      writePref(REPEAT_KEY, repeatMode);
+      applyRepeat();
+    });
+  }
+
+  // Clic sul tempo a destra: alterna durata e tempo residuo
+  if (timeToggle) {
+    timeToggle.addEventListener('click', () => {
+      showRemaining = !showRemaining;
+      writePref(REMAINING_KEY, showRemaining ? '1' : '0');
+      updateTimeToggleLabel();
+      renderTimes();
+    });
+  }
+
+  // Stato iniziale da preferenze salvate
+  applyRepeat();
+  updateTimeToggleLabel();
+  updatePrevLabel();
 
   // Volume
   const volSlider = document.getElementById('sp-volume');
@@ -623,23 +941,65 @@ const Player = (function () {
 
 // -------------------------------------------------------
 // Spacebar → toggle play/pause del player sticky
+// Lo spazio resta al campo attivo solo dove serve scrivere o
+// spuntare (campi di testo, textarea, select, checkbox, elementi
+// editabili). Su barra di avanzamento, volume, pulsanti e link fa
+// solo play/pausa:
+// - se un componente ha già gestito il tasto (es. riga della coda,
+//   che chiama preventDefault) non si interviene, evitando il doppio
+//   comando;
+// - l'elemento attivo perde il focus: Chrome attiva i pulsanti con lo
+//   spazio al rilascio del tasto (keyup), quindi senza blur il pulsante
+//   cliccato per ultimo ripremerebbe play/pausa annullando la pausa, e
+//   il contorno di focus resterebbe acceso;
+// - tenendo premuto lo spazio non si alterna play/pausa a raffica.
 // -------------------------------------------------------
 document.addEventListener('keydown', function (e) {
-  // Ignora se il focus è su un input, textarea, select o elemento editabile
-  var tag = document.activeElement ? document.activeElement.tagName : '';
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  if (document.activeElement && document.activeElement.isContentEditable) return;
+  if (!(e.code === 'Space' || e.key === ' ')) return;
+  if (e.defaultPrevented) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
 
-  if (e.code === 'Space' || e.key === ' ') {
-    var playerPanel = document.getElementById('sticky-player');
-    // Agisce solo se il player è visibile (audio caricato)
-    if (!playerPanel || playerPanel.style.display === 'none') return;
+  var el = document.activeElement;
+  if (el && el.isContentEditable) return;
+  var tag = el ? el.tagName : '';
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return;
+  // Tra gli input solo lo slider (seek, volume) passa al player
+  if (tag === 'INPUT' && String(el.type).toLowerCase() !== 'range') return;
 
-    e.preventDefault(); // evita lo scroll della pagina
-    var btnPlayPause = document.getElementById('sp-play-pause');
-    if (btnPlayPause) btnPlayPause.click();
-  }
+  var playerPanel = document.getElementById('sticky-player');
+  // Agisce solo se il player è visibile (audio caricato)
+  if (!playerPanel || playerPanel.style.display === 'none') return;
+
+  e.preventDefault(); // evita lo scroll della pagina e lo step dello slider
+  if (e.repeat) return;
+
+  if (el && el !== document.body && typeof el.blur === 'function') el.blur();
+
+  var btnPlayPause = document.getElementById('sp-play-pause');
+  if (btnPlayPause) btnPlayPause.click();
 });
+
+// -------------------------------------------------------
+// Righe "in ascolto da …" (stesso brano, altra coda in riproduzione).
+// L'etichetta è solo informativa: un clic sulla riga o sull'etichetta
+// non deve sostituire la coda in ascolto (mix o playlist) con il disco.
+// Restano attivi i pulsanti e i link della riga: il play "Riproduci da
+// qui" avvia il disco da questa traccia in modo esplicito. La regola è
+// in fase di cattura, quindi vale per qualsiasi gestore di clic sulla
+// riga, presente o futuro.
+// -------------------------------------------------------
+// Nella scheda disco il titolo è un pulsante (.track-title-play) che
+// inoltra il clic al play della riga, e l'etichetta è disegnata dentro
+// il titolo: per questo il titolo è bloccato come il resto della riga.
+// In modalità selezione il titolo spunta la casella e resta attivo.
+document.addEventListener('click', function (e) {
+  var row = e.target.closest ? e.target.closest('.track-item.track-elsewhere') : null;
+  if (!row) return;
+  if (row.closest('.selection-mode')) return;
+  if (e.target.closest('button:not(.track-title-play), a, input, select, textarea, label, .dropdown-menu')) return;
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
 
 // -------------------------------------------------------
 // Audio players sulla tracklist (mini pulsanti play)

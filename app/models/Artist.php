@@ -419,13 +419,18 @@ class Artist {
         ]);
         $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
-        // Generi distinti presenti per l'artista
+        // Generi distinti presenti per l'artista, dal più frequente:
+        // la pagina artista usa il primo come genere principale. Prima
+        // l'ordine era alfabetico e il primo poteva essere un genere
+        // presente su un solo album (es. "Alternativa e indie" invece
+        // di "Alternative Rock" su cinque). A parità, ordine alfabetico.
         $g = $this->db->prepare("
-            SELECT DISTINCT g.name
+            SELECT g.name
             FROM albums a
             JOIN genres g ON a.genre_id = g.id
             WHERE a.artist_id = :id
-            ORDER BY g.name
+            GROUP BY g.id, g.name
+            ORDER BY COUNT(*) DESC, g.name ASC
         ");
         $g->execute([':id' => $artistId]);
         $row['genres'] = $g->fetchAll(PDO::FETCH_COLUMN) ?: [];

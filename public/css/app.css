@@ -216,7 +216,12 @@ audio.track-player {
 }
 
 /* ============================================================
-   Sticky Audio Player — redesign 2.0
+   Sticky Audio Player — v3
+   Una sola riga: [disco] [trasporto] [barra + tempi] [coda, volume].
+   La barra occupa tutto lo spazio libero al centro.
+   Il contenitore resta display:flex: app.js lo mostra con
+   style.display = 'flex' e altre regole (body:has(...), spazio,
+   pannello coda) leggono quel valore. Altezza invariata a 72px.
    ============================================================ */
 .sticky-player {
   position: fixed;
@@ -225,15 +230,16 @@ audio.track-player {
   right: 0;
   z-index: 1050;
   height: 72px;
-  background: rgba(14, 14, 14, 0.92);
+  background: rgba(10, 14, 20, 0.96);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 0 18px;
-  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.45);
+  gap: 28px;
+  padding: 0 20px;
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.4);
+  color: #fff;
 }
 
 .sticky-player::before {
@@ -246,24 +252,37 @@ audio.track-player {
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 193, 7, 0.35),
+    rgba(245, 180, 0, 0.35),
     transparent
   );
   pointer-events: none;
 }
 
-.sp-cover img {
-  width: 48px;
-  height: 48px;
-  object-fit: cover;
-  border-radius: 8px;
+/* ── Zona sinistra: copertina e metadati ── */
+.sp-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 1 300px;
+  min-width: 200px;
+}
+
+.sp-cover {
   flex-shrink: 0;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.sp-cover img {
+  display: block;
+  width: 52px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 6px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 4px 12px rgba(0, 0, 0, 0.35);
 }
 .sp-cover a {
   display: block;
-  border-radius: 8px;
-  overflow: hidden;
+  border-radius: 6px;
   transition: opacity 0.15s;
 }
 .sp-cover a:hover {
@@ -274,132 +293,325 @@ audio.track-player {
   flex: 1;
   min-width: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 .sp-track {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: #fff;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.3;
+  line-height: 1.25;
 }
 .sp-artist {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.58);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 2px;
+  line-height: 1.2;
 }
 
+/* ── Trasporto ── */
 .sp-controls {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
   flex-shrink: 0;
 }
 .sp-btn {
-  width: 34px;
-  height: 34px;
+  position: relative;
+  width: 36px;
+  height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   background: none;
   border: none;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 16px;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 17px;
   cursor: pointer;
-  border-radius: 8px;
+  border-radius: 50%;
   padding: 0;
   line-height: 1;
   transition:
     color 0.15s,
-    background 0.15s;
+    background 0.15s,
+    transform 0.1s;
 }
 .sp-btn:hover {
   color: #fff;
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.08);
+}
+.sp-btn:active {
+  transform: scale(0.92);
+}
+.sp-btn svg {
+  display: block;
+}
+.sp-btn.is-on {
+  color: #f5b400;
+}
+.sp-btn.is-on:hover {
+  color: #ffc933;
 }
 
 .sp-btn-main {
-  width: 40px;
-  height: 40px;
-  background: #ffc107;
-  color: #1a1000;
-  border-radius: 50%;
-  font-size: 17px;
+  width: 46px;
+  height: 46px;
+  background: #f5b400;
+  color: #1a1300;
+  font-size: 19px;
 }
 .sp-btn-main:hover {
-  background: #ffcd39;
-  color: #1a1000;
+  background: #ffc21f;
+  color: #1a1300;
+  box-shadow: 0 0 0 6px rgba(245, 180, 0, 0.14);
+}
+.sp-btn-main:active {
+  transform: scale(0.95);
 }
 
+/* Ripeti: punto ambra = attivo, badge "1" = ripete la traccia */
+#sp-repeat[data-mode="all"]::after,
+#sp-repeat[data-mode="one"]::after {
+  content: "";
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: #f5b400;
+}
+#sp-repeat[data-mode="one"]::before {
+  content: "1";
+  position: absolute;
+  top: 4px;
+  right: 3px;
+  min-width: 12px;
+  height: 12px;
+  padding: 0 2px;
+  box-sizing: border-box;
+  border-radius: 6px;
+  background: #f5b400;
+  color: #1a1300;
+  font: 700 8.5px/12px var(--grz-font-data, ui-monospace, monospace);
+  text-align: center;
+}
+
+/* ── Barra di avanzamento ── */
 .sp-progress-wrap {
   display: flex;
   align-items: center;
-  gap: 9px;
-  flex: 1.4;
+  gap: 12px;
+  flex: 1 1 auto;
   min-width: 0;
-  max-width: 380px;
 }
 
-/* ↓ MODIFICATO: più visibile */
 .sp-time {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.6);
+  color: rgba(255, 255, 255, 0.85);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  min-width: 32px;
+  min-width: 44px;
+  text-align: right;
+  flex-shrink: 0;
+  transition: color 0.3s ease;
+}
+/* Lampeggio quando "precedente" riavvia la traccia */
+.sp-time.sp-restart {
+  color: #f5b400;
 }
 
-/* ↓ MODIFICATO: height 4px, background iniziale grigio (JS sovrascrive con gradiente) */
+/* Durata / tempo residuo: pulsante */
+.sp-time-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 72px;
+  height: 32px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+.sp-time-toggle:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.07);
+}
+.sp-time-toggle svg {
+  flex-shrink: 0;
+  opacity: 0.4;
+  transition: opacity 0.15s ease;
+}
+.sp-time-toggle:hover svg {
+  opacity: 1;
+}
+
+/* Area cliccabile alta 44px attorno alla traccia */
+.sp-seek-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+/* Il riempimento (ascoltato, caricato, resto) è un gradiente
+   inline calcolato da seekFill() in app.js. */
 .sp-seek {
-  flex: 1;
-  height: 4px;
+  width: 100%;
+  height: 6px;
+  margin: 0;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.09);
   border-radius: 999px;
   outline: none;
+  transition: height 0.15s ease;
 }
+.sp-seek-wrap:hover .sp-seek {
+  height: 8px;
+}
+.sp-seek:focus-visible {
+  outline: 2px solid #f5b400;
+  outline-offset: 6px;
+}
+
+/* Testina: barretta verticale sempre visibile */
 .sp-seek::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
+  width: 3px;
+  height: 18px;
+  border-radius: 2px;
   background: #fff;
-  box-shadow: 0 0 0 2px rgba(255, 193, 7, 0.6);
-  opacity: 0;
-  transition: opacity 0.15s;
+  border: 0;
+  box-shadow:
+    0 0 0 3px rgba(245, 180, 0, 0.26),
+    0 0 14px rgba(245, 180, 0, 0.35);
   cursor: pointer;
+  transition: height 0.15s ease;
 }
-.sp-seek:hover::-webkit-slider-thumb,
-.sp-seek:active::-webkit-slider-thumb {
-  opacity: 1;
+.sp-seek-wrap:hover .sp-seek::-webkit-slider-thumb {
+  height: 24px;
 }
 .sp-seek::-moz-range-thumb {
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  border: none;
+  width: 3px;
+  height: 18px;
+  border-radius: 2px;
   background: #fff;
-  box-shadow: 0 0 0 2px rgba(255, 193, 7, 0.6);
+  border: 0;
+  box-shadow:
+    0 0 0 3px rgba(245, 180, 0, 0.26),
+    0 0 14px rgba(245, 180, 0, 0.35);
+  cursor: pointer;
+}
+.sp-seek-wrap:hover .sp-seek::-moz-range-thumb {
+  height: 24px;
+}
+
+/* Righello dei minuti sotto la traccia (costruito da buildRuler) */
+.sp-ruler {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 0;
+  pointer-events: none;
+}
+.sp-tick {
+  position: absolute;
+  top: 9px;
+  width: 1px;
+  height: 5px;
+  margin-left: -0.5px;
+  background: rgba(255, 255, 255, 0.22);
+  transition: background 0.3s ease;
+}
+.sp-tick.is-past {
+  background: rgba(245, 180, 0, 0.7);
+}
+.sp-tick-label {
+  position: absolute;
+  top: 15px;
+  transform: translateX(-50%);
+  font: 500 9px/1 var(--grz-font-data, ui-monospace, monospace);
+  color: rgba(255, 255, 255, 0.42);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.sp-seek-wrap:hover .sp-tick-label {
+  opacity: 1;
+}
+
+/* Anteprima al passaggio del mouse */
+.sp-hover-line {
+  position: absolute;
+  top: 50%;
+  width: 1px;
+  height: 24px;
+  margin: -12px 0 0 -0.5px;
+  background: rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+}
+.sp-hover-tip {
+  position: absolute;
+  bottom: calc(50% + 18px);
+  transform: translateX(-50%);
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: #1e2938;
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+  font: 500 11px/1 var(--grz-font-data, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ── Zona destra: coda e volume ── */
+.sp-extra {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.sp-sep {
+  width: 1px;
+  height: 22px;
+  margin: 0 8px;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .sp-volume-wrap {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   flex-shrink: 0;
-  min-width: 110px;
 }
 
-/* ↓ MODIFICATO: height 4px, background iniziale grigio (JS sovrascrive con gradiente) */
+/* background iniziale grigio (JS sovrascrive con gradiente) */
 .sp-volume {
-  width: 72px;
+  width: 96px;
   height: 4px;
   cursor: pointer;
   -webkit-appearance: none;
@@ -410,37 +622,66 @@ audio.track-player {
 }
 .sp-volume::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.85);
+  background: #fff;
   cursor: pointer;
 }
 .sp-volume::-moz-range-thumb {
-  width: 11px;
-  height: 11px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   border: none;
-  background: rgba(255, 255, 255, 0.85);
+  background: #fff;
+}
+.sp-volume:focus-visible {
+  outline: 2px solid #f5b400;
+  outline-offset: 4px;
 }
 
 body:has(#sticky-player[style*="flex"]) {
   padding-bottom: 72px;
 }
 
+/* ── Larghezze intermedie: la barra conserva lo spazio ── */
+@media (max-width: 1199.98px) {
+  .sticky-player {
+    gap: 20px;
+  }
+  .sp-left {
+    flex-basis: 240px;
+  }
+  .sp-volume {
+    width: 72px;
+  }
+}
+@media (max-width: 991.98px) {
+  .sp-left {
+    flex-basis: 200px;
+    min-width: 160px;
+  }
+  .sp-volume-wrap,
+  .sp-sep {
+    display: none !important;
+  }
+  .sp-tick-label {
+    display: none;
+  }
+}
+
 /* ── Player sticky: dispositivi touch ──
    Criterio di capacità, non di larghezza: vale anche per tablet
    e telefoni in landscape (>576px). Volume e stop spariscono
-   perché il volume si regola dal dispositivo; il thumb della
-   seek resta sempre visibile perché su touch l'hover non esiste. */
+   perché il volume si regola dal dispositivo; l'anteprima al
+   passaggio non esiste senza mouse. */
 @media (pointer: coarse) {
   #sp-stop,
-  .sp-volume-wrap {
+  .sp-volume-wrap,
+  .sp-sep,
+  .sp-hover-line,
+  .sp-hover-tip {
     display: none !important;
-  }
-
-  .sp-seek::-webkit-slider-thumb {
-    opacity: 1;
   }
 }
 
@@ -449,8 +690,9 @@ body:has(#sticky-player[style*="flex"]) {
    superiore del player, a tutta larghezza. L'input range resta
    alto 20px (area di tocco), ma dipinge solo il content-box di
    3px: background-clip con !important perché il gradiente di
-   riempimento è inline (updateFill in app.js) e il suo shorthand
-   resetterebbe il clip a border-box. Tap-to-seek in app.js. */
+   riempimento è inline (seekFill in app.js) e il suo shorthand
+   resetterebbe il clip a border-box. Tap-to-seek in app.js.
+   Ripeti resta raggiungibile con "precedente" (riavvia la traccia). */
 @media (max-width: 575.98px) {
   body:has(#sticky-player[style*="flex"]) {
     padding-bottom: calc(72px + env(safe-area-inset-bottom));
@@ -467,22 +709,35 @@ body:has(#sticky-player[style*="flex"]) {
     display: none;
   }
 
+  .sp-left {
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 10px;
+  }
+
   .sp-progress-wrap {
     position: absolute;
     top: 0;
     left: 0;
     right: 0;
-    max-width: none;
     margin: 0;
     gap: 0;
     z-index: 1;
   }
 
-  .sp-time {
-    display: none;
+  .sp-time,
+  .sp-ruler,
+  .sp-hover-line,
+  .sp-hover-tip {
+    display: none !important;
   }
 
-  .sp-seek {
+  .sp-seek-wrap {
+    height: auto;
+  }
+
+  .sp-seek,
+  .sp-seek-wrap:hover .sp-seek {
     height: 20px;
     padding: 0 0 17px;
     background-clip: content-box !important;
@@ -503,7 +758,9 @@ body:has(#sticky-player[style*="flex"]) {
   }
 
   #sp-stop,
-  .sp-volume-wrap {
+  #sp-repeat,
+  .sp-volume-wrap,
+  .sp-sep {
     display: none !important;
   }
 
@@ -521,12 +778,6 @@ body:has(#sticky-player[style*="flex"]) {
     width: 46px;
     height: 46px;
     font-size: 19px;
-  }
-
-  .sp-meta {
-    max-width: none;
-    flex: 1;
-    min-width: 0;
   }
 
   .sp-cover img {
@@ -555,6 +806,16 @@ body:has(#sticky-player[style*="flex"]) {
   .sp-cover img {
     width: 40px;
     height: 40px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sp-seek,
+  .sp-seek::-webkit-slider-thumb,
+  .sp-tick,
+  .sp-tick-label,
+  .sp-time {
+    transition: none;
   }
 }
 
@@ -2396,14 +2657,28 @@ body:has(#sticky-player[style*="flex"]) {
   }
 }
 
-/* ---- HERO ---- */
+/* ---- HERO ----
+   Due colonne: testo a sinistra, foto a destra. La hero resta scura
+   in entrambi i temi (vedi "ACCENTI IN LIGHT MODE"). */
 .artist-hero {
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 42%);
   border-radius: 20px;
   overflow: hidden;
   background: #15161a;
   border: 1px solid var(--bs-border-color);
   min-height: 300px;
+}
+.artist-hero:not(:has(.artist-hero__bg[style])) {
+  background: linear-gradient(135deg, #26282e 0%, #131419 100%);
+}
+/* Senza foto il testo occupa tutta la larghezza */
+.artist-hero:not(:has(.artist-hero__photo[style])) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.artist-hero__photo-cell:not(:has(.artist-hero__photo[style])) {
+  display: none;
 }
 
 /* Sfondo sfocato a piena copertura (atmosfera) */
@@ -2430,20 +2705,36 @@ body:has(#sticky-player[style*="flex"]) {
     ),
     linear-gradient(180deg, rgba(12, 13, 16, 0.15), rgba(12, 13, 16, 0.45));
 }
-.artist-hero:not(:has(.artist-hero__bg[style])) {
-  background: linear-gradient(135deg, #26282e 0%, #131419 100%);
+
+.artist-hero__content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 38px 20px 34px 40px;
+}
+.artist-hero:not(:has(.artist-hero__photo[style])) .artist-hero__content {
+  padding-right: 40px;
 }
 
-/* Foto "copertina" grande a destra, sfumata verso il testo */
+/* Colonna della foto: alta quanto la hero, che cresce con la bio.
+   La foto è uno sfondo in cover ancorato alla colonna: riempie
+   sempre l'intera colonna e scorre insieme alla card. Con una bio
+   lunga la colonna si allunga e il cover ritaglia i lati; il punto
+   di ancoraggio in alto (center 20%) tiene i volti nell'inquadratura. */
+.artist-hero__photo-cell {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
 .artist-hero__photo {
   position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 46%;
-  max-width: 620px;
+  inset: 0;
   background-size: cover;
   background-position: center 20%;
+  background-repeat: no-repeat;
+  /* Sfumature: a sinistra verso il testo e in basso */
   -webkit-mask-image:
     linear-gradient(90deg, transparent 0%, #000 38%),
     linear-gradient(0deg, transparent 0%, #000 22%);
@@ -2457,71 +2748,42 @@ body:has(#sticky-player[style*="flex"]) {
   display: none;
 }
 
-.artist-hero__content {
-  position: relative;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  padding: 34px 38px;
-  max-width: 62%;
-}
-
-/* Avatar non usato nel nuovo layout */
-.artist-hero__avatar {
-  display: none;
-}
-
-.artist-hero__topbar {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
 .artist-hero__name {
-  font-size: 2.6rem;
+  font-size: clamp(2.4rem, 1.6rem + 2.4vw, 4.1rem);
   font-weight: 800;
-  letter-spacing: -0.025em;
-  line-height: 1.05;
+  letter-spacing: -0.03em;
+  line-height: 0.98;
   color: #fff;
-  text-shadow: 0 2px 20px rgba(0, 0, 0, 0.7);
+  text-shadow: 0 2px 20px rgba(0, 0, 0, 0.6);
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
-.artist-hero__back {
-  --bs-btn-border-color: rgba(255, 255, 255, 0.4);
-  --bs-btn-color: #fff;
-  --bs-btn-hover-bg: rgba(255, 255, 255, 0.18);
-  --bs-btn-hover-border-color: #fff;
-  --bs-btn-hover-color: #fff;
-  flex-shrink: 0;
-  margin-left: auto;
-}
-
-/* Chips meta */
-.artist-hero__meta {
+/* Fatti: icona ambra + testo, come nella scheda disco */
+.artist-hero__facts {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
+  gap: 8px 22px;
+  margin: 16px 0 18px;
+  font-size: 0.95rem;
+  color: rgba(255, 255, 255, 0.92);
 }
-.artist-hero__chip {
+.artist-hero__facts:empty {
+  display: none;
+}
+.artist-hero__fact {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 5px 13px;
-  border-radius: 20px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: #fff;
-  background: rgba(255, 255, 255, 0.14);
-  backdrop-filter: blur(10px);
-  border: 0.5px solid rgba(255, 255, 255, 0.25);
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  gap: 7px;
 }
-.artist-hero__chip i {
-  font-size: 0.82rem;
-  opacity: 0.9;
+.artist-hero__fact i {
+  font-size: 0.95rem;
+  color: #ffc107;
+}
+.artist-hero__fact-data {
+  font-family: var(--grz-font-data);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9rem;
 }
 
 /* Bio */
@@ -2592,261 +2854,428 @@ body:has(#sticky-player[style*="flex"]) {
   gap: 8px;
 }
 
-/* ---- STATISTICHE ---- */
-.artist-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-.artist-stat {
-  flex: 1 1 0;
-  min-width: 88px;
-  text-align: center;
-  padding: 14px 10px;
-  border-radius: 14px;
-  background: var(--bs-tertiary-bg);
-  border: 1px solid var(--bs-border-color);
-}
-.artist-stat__val {
-  font-size: 1.5rem;
-  font-weight: 800;
-  line-height: 1.1;
-}
-.artist-stat__lbl {
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--bs-secondary-color);
-  margin-top: 2px;
-}
-
-/* ---- SEZIONE / DISCOGRAFIA ---- */
-.artist-section-title {
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-}
-
-.artist-discography {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 16px;
-}
-
-.disco-card {
-  display: block;
-  text-decoration: none;
-  color: inherit;
-  border-radius: 14px;
-  overflow: hidden;
-  background: var(--bs-body-bg);
-  border: 1px solid var(--bs-border-color);
-}
-.disco-card__cover {
-  position: relative;
-  aspect-ratio: 1 / 1;
-  overflow: hidden;
-  background: var(--bs-secondary-bg);
-}
-.disco-card__cover img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  transition: transform 0.25s ease;
-}
-.disco-card:hover .disco-card__cover img {
-  transform: scale(1.05);
-}
-
-.disco-card__fmt {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-}
-
-.disco-card__body {
-  padding: 10px 12px 12px;
-}
-.disco-card__title {
-  font-weight: 600;
-  font-size: 0.92rem;
-  line-height: 1.25;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.disco-card__meta {
-  font-size: 0.78rem;
-  color: var(--bs-secondary-color);
-  margin-top: 3px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-}
-.disco-card__dot {
-  opacity: 0.5;
+/* ---- FORMATI: la barra è la .grz-formatbar della Panoramica ---- */
+.artist-formats {
+  margin-bottom: 2.25rem;
 }
 
 /* ---- RESPONSIVE (tablet) ---- */
 @media (max-width: 991.98px) {
+  .artist-hero {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 46%);
+  }
   .artist-hero__content {
-    max-width: 70%;
-  }
-  .artist-hero__photo {
-    width: 52%;
-  }
-  .artist-hero__name {
-    font-size: 2.1rem;
+    padding: 30px 16px 28px 30px;
   }
 }
 
 /* ---- MOBILE: foto sopra, testo sotto ---- */
 @media (max-width: 767.98px) {
-  .artist-hero {
+  .artist-hero,
+  .artist-hero:not(:has(.artist-hero__photo[style])) {
+    grid-template-columns: minmax(0, 1fr);
     min-height: 0;
+  }
+  .artist-hero__photo-cell {
+    order: -1;
   }
   .artist-hero__photo {
     position: relative;
-    width: 100%;
-    max-width: none;
+    inset: auto;
     height: 200px;
     -webkit-mask-image: linear-gradient(0deg, transparent 0%, #000 45%);
+    -webkit-mask-composite: source-over;
     mask-image: linear-gradient(0deg, transparent 0%, #000 45%);
+    mask-composite: add;
   }
-  .artist-hero__content {
-    max-width: 100%;
+  .artist-hero__content,
+  .artist-hero:not(:has(.artist-hero__photo[style])) .artist-hero__content {
     padding: 18px 20px 24px;
+  }
+  .artist-hero:has(.artist-hero__photo[style]) .artist-hero__content {
     margin-top: -40px;
   }
   .artist-hero__name {
-    font-size: 1.7rem;
-  }
-  .artist-discography {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-  }
-  .artist-stat {
-    min-width: 72px;
-    padding: 10px 6px;
-  }
-  .artist-stat__val {
-    font-size: 1.2rem;
+    font-size: 2rem;
   }
 }
 
-.official-disco__hint {
-  font-size: 0.62rem;
+/* ============================================================
+   PAGINA ARTISTA — Discografia e archivio (registro)
+   Righe dell'archivio da PHP, riordinate sulla discografia
+   ufficiale dallo script della pagina. Colori dai token del
+   tema: funziona in chiaro e in scuro.
+   ============================================================ */
+.grz-ledger-section {
+  margin-top: 0.5rem;
+}
+
+.grz-ledger-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+/* Con la discografia caricata l'intestazione (titolo + filtri) resta
+   ferma sotto la navbar mentre si scorre l'elenco. --grz-ledger-top
+   è l'altezza reale della navbar, impostata dallo script della pagina.
+   Su telefono resta nel flusso: occuperebbe troppo schermo. */
+@media (min-width: 768px) {
+  .grz-ledger-section.has-disco .grz-ledger-head {
+    position: sticky;
+    top: var(--grz-ledger-top, 64px);
+    z-index: 5;
+    margin-bottom: 4px;
+    padding: 10px 0;
+    background: var(--grz-canvas, var(--bs-body-bg));
+  }
+}
+/* Con un filtro attivo la sezione è alta almeno quanto lo schermo:
+   l'elenco filtrato può essere corto, e senza questa altezza la
+   pagina si accorcerebbe sotto la posizione di scroll corrente,
+   facendo saltare la vista verso l'alto. */
+.grz-ledger-section.has-disco:not([data-filter="all"]) {
+  min-height: calc(100vh - var(--grz-ledger-top, 64px));
+}
+.grz-ledger-title {
+  margin: 0;
+  font-weight: 700;
+  font-size: 1.75rem;
+  line-height: 1.1;
+}
+.grz-ledger-title span {
+  color: var(--bs-tertiary-color);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--bs-secondary-color);
-  margin-left: 1.8rem;
 }
 
-.official-disco__table-wrap {
+/* Filtri: controllo segmentato */
+.grz-ledger-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+}
+.grz-ledger-tabs[hidden] {
+  display: none;
+}
+.grz-ledger-tab {
+  border: 0;
+  border-radius: 9px;
+  padding: 8px 14px;
+  min-height: 40px;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  background: transparent;
+  color: var(--bs-secondary-color);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.grz-ledger-tab:hover {
+  color: var(--bs-body-color);
+}
+.grz-ledger-tab[aria-pressed="true"] {
+  background: var(--grz-accent);
+  color: var(--grz-on-accent);
+}
+.grz-ledger-tab:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.grz-ledger-tab__count {
+  margin-left: 4px;
+  font-family: var(--grz-font-data);
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+/* Tabella */
+.grz-ledger-wrap {
   border: 1px solid var(--bs-border-color);
   border-radius: 14px;
   overflow: hidden;
+  background: var(--bs-body-bg);
 }
-
-.official-disco__table {
+.grz-ledger {
   width: 100%;
   border-collapse: collapse;
   margin: 0;
 }
-.official-disco__table td {
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--bs-border-color);
-  font-size: 0.92rem;
+.grz-ledger th,
+.grz-ledger td {
+  padding: 9px 12px;
   vertical-align: middle;
+  border-bottom: 1px solid var(--bs-border-color);
 }
-.official-disco__table tr:last-child td {
-  border-bottom: none;
-}
-.official-disco__table tr:hover td {
+.grz-ledger thead th {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--bs-tertiary-color);
   background: var(--bs-tertiary-bg);
+  text-align: left;
+  white-space: nowrap;
+}
+.grz-ledger tbody tr:last-child > * {
+  border-bottom: 0;
+}
+.grz-ledger__row:hover > td {
+  background: var(--bs-secondary-bg);
+}
+.grz-ledger__row.is-playing > td {
+  background: var(--grz-accent-soft);
 }
 
-/* Numerazione progressiva */
-.official-disco__num {
-  width: 44px;
-  text-align: center;
+.grz-ledger__num {
+  width: 48px;
+  text-align: center !important;
+  font-family: var(--grz-font-data);
   font-variant-numeric: tabular-nums;
-  font-weight: 700;
-  font-size: 0.85rem;
-  color: var(--bs-secondary-color);
+  font-size: 0.82rem;
+  color: var(--bs-tertiary-color);
+}
+/* Senza discografia la numerazione non ha senso */
+.grz-ledger-section:not(.has-disco) .grz-ledger__num {
+  display: none;
 }
 
-/* Cover miniatura */
-.official-disco__cover {
-  width: 56px;
+.grz-ledger__cover {
+  width: 64px;
+  padding-right: 4px !important;
 }
-.off-thumb {
-  position: relative;
+.grz-ledger__cover a {
+  display: block;
+  width: 44px;
+}
+.grz-ledger__thumb {
   display: block;
   width: 44px;
   height: 44px;
-  border-radius: 7px;
-  overflow: hidden;
-  background: var(--bs-secondary-bg);
-  border: 1px solid var(--bs-border-color);
-}
-.off-thumb img {
-  width: 100%;
-  height: 100%;
+  border-radius: 6px;
   object-fit: cover;
-  display: block;
+  background: var(--bs-secondary-bg);
 }
-/* placeholder quando manca la cover */
-.off-thumb__ph {
-  display: none;
-}
-.off-thumb.is-empty {
+.grz-ledger__thumb--empty {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #2a2c33 0%, #16171c 100%);
-}
-.off-thumb.is-empty .off-thumb__ph {
-  display: block;
   font-size: 1.1rem;
-  color: rgba(255, 255, 255, 0.45);
+  color: var(--bs-tertiary-color);
 }
 
-.official-disco__title {
+.grz-ledger__title {
+  font-size: 0.95rem;
+}
+.grz-ledger__link {
+  color: var(--bs-emphasis-color);
   font-weight: 600;
+  text-decoration: none;
+}
+.grz-ledger__link:hover,
+.grz-ledger__link:focus-visible {
+  color: var(--bs-link-color);
+}
+.grz-ledger__name {
+  font-weight: 500;
+}
+.grz-ledger__sub {
+  display: none;
 }
 
-.official-disco__year {
-  width: 80px;
-  text-align: right;
+.grz-ledger__year {
+  width: 76px;
+  font-family: var(--grz-font-data);
   font-variant-numeric: tabular-nums;
-  font-weight: 700;
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+.grz-ledger__formats {
+  width: 200px;
+  font-size: 0.84rem;
+}
+.grz-ledger__fmt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 12px;
+  white-space: nowrap;
+}
+.grz-ledger__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--grz-fmt-digital);
+}
+.grz-ledger__dot--vinile {
+  background: var(--grz-fmt-vinile);
+}
+.grz-ledger__dot--cd {
+  background: var(--grz-fmt-cd);
+}
+.grz-ledger__dot--cassetta {
+  background: var(--grz-fmt-cassetta);
+}
+.grz-ledger__tracks {
+  width: 90px;
+  font-size: 0.84rem;
+  color: var(--bs-secondary-color);
+  white-space: nowrap;
+}
+.grz-ledger__action {
+  width: 116px;
+  text-align: right !important;
+}
+
+/* Album in studio non presenti in archivio: copertina piena,
+   testo attenuato, nessun play */
+.grz-ledger__row.is-missing > td {
+  color: var(--bs-tertiary-color);
+}
+
+.grz-ledger__play {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--grz-field-border, var(--bs-border-color));
+  background: transparent;
+  color: var(--bs-body-color);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 1rem;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+.grz-ledger__play:hover,
+.grz-ledger__play.is-active {
+  background: var(--grz-accent);
+  border-color: var(--grz-accent);
+  color: var(--grz-on-accent);
+}
+.grz-ledger__play:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.grz-ledger__add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 4px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--bs-link-color);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.grz-ledger__add:hover,
+.grz-ledger__add:focus-visible {
+  color: var(--bs-link-hover-color);
+}
+
+.grz-ledger__group th {
+  padding: 14px 12px 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--bs-secondary-color);
+  background: var(--bs-tertiary-bg);
+  text-align: left;
+}
+.grz-ledger__empty td {
+  color: var(--bs-secondary-color);
+  font-style: italic;
+}
+
+/* Filtri */
+.grz-ledger-section[data-filter="own"] .is-missing,
+.grz-ledger-section[data-filter="miss"] .is-owned,
+.grz-ledger-section[data-filter="miss"] .grz-ledger__group {
+  display: none;
+}
+
+.grz-ledger-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0;
+  font-size: 0.85rem;
+  font-style: italic;
   color: var(--bs-secondary-color);
 }
-
-.official-disco__source {
-  margin-top: 10px;
+.grz-ledger-status[hidden] {
+  display: none;
+}
+.grz-ledger-source {
+  margin: 10px 0 0;
   font-size: 0.72rem;
   color: var(--bs-secondary-color);
 }
-.official-disco__source a {
+.grz-ledger-source a {
   color: inherit;
   text-decoration: underline;
 }
 
-/* Mobile: niente numerazione, cover un filo più piccola */
-@media (max-width: 575.98px) {
-  .official-disco__num {
+/* Mobile: anno e formati sotto il titolo, colonne secondarie nascoste */
+@media (max-width: 767.98px) {
+  .grz-ledger-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .grz-ledger-title {
+    font-size: 1.5rem;
+  }
+  .grz-ledger-tab {
+    flex: 1 1 0;
+    padding: 8px 6px;
+  }
+  .grz-ledger thead {
     display: none;
   }
-  .official-disco__table td {
-    padding: 7px 12px;
+  .grz-ledger__num,
+  .grz-ledger__year,
+  .grz-ledger__formats,
+  .grz-ledger__tracks {
+    display: none;
   }
-  .off-thumb {
-    width: 40px;
-    height: 40px;
+  .grz-ledger th,
+  .grz-ledger td {
+    padding: 10px 10px;
+  }
+  .grz-ledger__cover {
+    width: 58px;
+  }
+  .grz-ledger__sub {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 10px;
+    margin-top: 3px;
+    font-size: 0.78rem;
+    color: var(--bs-secondary-color);
+  }
+  .grz-ledger__sub-year {
+    font-family: var(--grz-font-data);
+    font-variant-numeric: tabular-nums;
+  }
+  .grz-ledger__sub .grz-ledger__fmt {
+    margin-right: 0;
+  }
+  .grz-ledger__action {
+    width: auto;
+  }
+  .grz-ledger__play {
+    width: 44px;
+    height: 44px;
   }
 }
 
@@ -8121,6 +8550,15 @@ html[data-bs-theme="light"] .grz-pltracks {
 .track-item.track-playing .track-title-play {
   color: var(--grz-accent-ink, #855800);
 }
+/* Brano in ascolto da un'altra coda: il titolo è solo informativo (il
+   clic è bloccato in app.js), quindi niente manina. In modalità
+   selezione il titolo spunta la casella e torna cliccabile. */
+.track-item.track-elsewhere .track-title-play {
+  cursor: default;
+}
+.selection-mode .track-item.track-elsewhere .track-title-play {
+  cursor: pointer;
+}
 
 /* ============================================================
    HOME (dashboard) — layout basato sullo spazio reale
@@ -8540,7 +8978,11 @@ html[data-bs-theme] #addToPlaylistModal .modal-footer .btn-secondary {
 body.grz-dashboard-page .sticky-player {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  background: rgba(14, 14, 14, 0.985);
+  background: rgba(10, 14, 20, 0.985);
+}
+/* Stesso fondo quasi opaco, ma con il telaio del tema chiaro */
+html[data-bs-theme="light"] body.grz-dashboard-page .sticky-player {
+  background: rgba(28, 27, 25, 0.985);
 }
 
 /* Archivio griglia — ottimizzazione scroll */

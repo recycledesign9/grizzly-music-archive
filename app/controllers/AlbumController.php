@@ -89,6 +89,10 @@ class AlbumController
         $this->confirmStudio();
         break;
 
+      case 'player-data':
+        $this->playerData($id);
+        break;
+
       default:
         $this->list();
         break;
@@ -290,11 +294,100 @@ class AlbumController
 
     if (empty($errors)) {
       $old = [];
+
+      // Precompilazione dal link "Aggiungi" della pagina artista
+      // (?artist_id=…&title=…): solo un artista esistente e il titolo.
+      // Vale solo senza errori di validazione, quindi non scavalca mai
+      // i valori reinviati dal form. Un artist_id che non corrisponde
+      // a nessun artista viene ignorato. Il controllo duplicati resta
+      // quello di save().
+      $prefillArtistId = filter_var($_GET['artist_id'] ?? null, FILTER_VALIDATE_INT);
+      if ($prefillArtistId) {
+        foreach ($artists as $ar) {
+          if ((int)$ar['id'] === $prefillArtistId) {
+            $old['artist_id']   = $prefillArtistId;
+            $old['artist_name'] = (string)$ar['name'];
+            break;
+          }
+        }
+      }
+
+      $prefillTitle = trim((string)($_GET['title'] ?? ''));
+      if ($prefillTitle !== '') {
+        $old['title'] = function_exists('mb_substr')
+          ? mb_substr($prefillTitle, 0, 250, 'UTF-8')
+          : substr($prefillTitle, 0, 250);
+      }
     }
 
     unset($_SESSION['form_errors'], $_SESSION['form_old']);
 
     require BASE_PATH . '/views/albums/form.php';
+  }
+
+  // ----------------------------------------------------------
+  // GET /albums/player-data/{id}
+  // Dati di riproduzione di un album per il player sticky, con lo
+  // stesso formato di window.__album nella scheda disco (id, title,
+  // artist, cover, tracks con src). Usato dal pulsante play delle
+  // righe nella pagina artista, che carica l'album solo al clic.
+  // ----------------------------------------------------------
+  private function playerData(?int $id): void
+  {
+    if (session_status() === PHP_SESSION_ACTIVE) {
+      session_write_close();
+    }
+
+    while (ob_get_level()) {
+      ob_end_clean();
+    }
+    ini_set('display_errors', '0');
+    header('Content-Type: application/json; charset=utf-8');
+
+    try {
+      if (!$id) {
+        echo json_encode(['ok' => false, 'error' => 'ID album mancante']);
+        exit;
+      }
+
+      $album = $this->albumModel->getById($id);
+      if (!$album) {
+        echo json_encode(['ok' => false, 'error' => 'Album non trovato']);
+        exit;
+      }
+
+      // Stessa costruzione del payload di views/albums/detail.php
+      $playerTracks = [];
+      foreach ($this->trackModel->getByAlbum($id) as $t) {
+        if (!empty($t['audio_filename'])) {
+          $playerTracks[] = [
+            'id'       => (int)$t['id'],
+            'position' => (int)$t['position'],
+            'title'    => $t['title'],
+            'duration' => (int)($t['duration_sec'] ?? 0),
+            'src'      => MediaPathResolver::getStreamUrl($t['audio_filename']),
+          ];
+        }
+      }
+
+      $coverUrl = !empty($album['cover_local'])
+        ? BASE_URL . '/public/uploads/' . $album['cover_local']
+        : (!empty($album['cover_url']) ? $album['cover_url'] : BASE_URL . '/public/img/placeholder.png');
+
+      echo json_encode([
+        'ok'    => true,
+        'album' => [
+          'id'     => (int)$album['id'],
+          'title'  => $album['title'],
+          'artist' => $album['artist_name'] ?? '',
+          'cover'  => $coverUrl,
+          'tracks' => $playerTracks,
+        ],
+      ]);
+    } catch (Throwable $e) {
+      echo json_encode(['ok' => false, 'error' => DEBUG ? $e->getMessage() : 'Errore nel recupero delle tracce']);
+    }
+    exit;
   }
 
   // ----------------------------------------------------------
