@@ -170,6 +170,23 @@ class AlbumIdentityResolver
                     }
                 ));
 
+                if ($hardVetoes === ['title-mismatch']
+                    && count($candidateTracks) >= 2
+                    && $this->tracklistsStrictlyEqual($candidateTracks, (int)$album['id'])) {
+                    // Exact MBID + an independent FULL exact tracklist overrides
+                    // a locally curated display title; retain the discrepancy.
+                    return $base + [
+                        'decision' => self::EXACT_EXISTING,
+                        'confidence' => 'strong',
+                        'album_id' => (int)$album['id'],
+                        'match_source' => 'release-mbid',
+                        'candidate_album_ids' => [(int)$album['id']],
+                        'reasons' => ['exact-release-mbid', 'full-tracklist-confirmed'],
+                        'metadata_warnings' => $metadataWarnings,
+                        'matched_album' => $this->publicAlbum($album),
+                    ];
+                }
+
                 if (!empty($hardVetoes)) {
                     return $base + [
                         'decision' => self::CONFLICT,
@@ -308,7 +325,30 @@ class AlbumIdentityResolver
          * different logical albums.
          */
         if ($artist !== '' && $title !== '') {
-            $fallbackAlbums = $this->albumsByArtistAndTitle($artist, $title);
+            // Discover by artist FIRST. A manually curated title can differ from
+            // the file tags; do not let title equivalence hide an exact tracklist.
+            // This is only candidate discovery, never an identity verdict.
+            $artistAlbums = $this->albumsByArtistAndTitle($artist, $title, false);
+            $fallbackAlbums = [];
+            foreach ($artistAlbums as $album) {
+                if ($this->titleMatcher->equivalent($title, (string)$album['title'])) {
+                    $fallbackAlbums[] = $album;
+                }
+            }
+
+            $crossTitleDecision = $this->resolveCrossTitleTracklistMatches(
+                $artistAlbums,
+                $title,
+                $year,
+                $releaseGroup,
+                $candidateTracks,
+                $evidenceStatus,
+                $base
+            );
+            if ($crossTitleDecision !== null) {
+                return $crossTitleDecision;
+            }
+
             $fallbackMetadataMatches = [];
             $fallbackTracklistMatches = [];
 
@@ -709,7 +749,7 @@ class AlbumIdentityResolver
     /**
      * @return array<int,array<string,mixed>>
      */
-    private function albumsByArtistAndTitle(string $artist, string $title): array
+    private function albumsByArtistAndTitle(string $artist, string $title, bool $requireTitle = true): array
     {
         $wantedArtist = $this->normalizeIdentity($artist);
 
@@ -736,7 +776,7 @@ class AlbumIdentityResolver
                 continue;
             }
 
-            if (!$this->titleMatcher->equivalent(
+            if ($requireTitle && !$this->titleMatcher->equivalent(
                 $title,
                 (string)$row['title']
             )) {
@@ -747,6 +787,219 @@ class AlbumIdentityResolver
         }
 
         return $matches;
+    }
+
+    /**
+     * Cross-title safeguard. Compare complete tracklists for EVERY same-artist
+     * local album before returning NEW_RELEASE or allowing a misleading exact-
+     * title candidate to hide an existing curated album.
+     *
+     * No artist/title substring match is ever sufficient for reconciliation.
+     * Same-year, exact whole-tracklist and a cataloguing-only title difference
+     * may auto-reconcile; any other plausible collision must go to REVIEW.
+     * Explicit edition names are kept distinct unless the existing stronger
+     * MBID/release-group stages have already independently proven identity.
+     *
+     * @param array<int,array<string,mixed>> $artistAlbums
+     * @param array<int,string> $candidateTracks
+     * @param array<string,mixed> $base
+     * @return array<string,mixed>|null
+     */
+    private function resolveCrossTitleTracklistMatches(
+        array $artistAlbums,
+        string $title,
+        ?int $year,
+        string $releaseGroup,
+        array $candidateTracks,
+        string $evidenceStatus,
+        array $base
+    ): ?array {
+        $matches = [];
+        $sameTitleTrackMatches = [];
+        $catalogAliasCandidates = [];
+        foreach ($artistAlbums as $album) {
+            $localTitle = (string)$album['title'];
+            $sameTitle = $this->titleMatcher->equivalent($title, $localTitle);
+            $relationship = $sameTitle ? 'same-title'
+                : $this->crossTitleRelationship($title, $localTitle, $year);
+            if ($relationship === 'distinct-edition') {
+                continue; // Preserve explicit edition boundaries.
+            }
+
+            $dbYear = !empty($album['year']) ? (int)$album['year'] : null;
+            if ($relationship === 'catalog-alias'
+                && ($year === null || $dbYear === null || $year === $dbYear)) {
+                $catalogAliasCandidates[] = $album;
+            }
+            // A short/unknown list can never prove equality; still preserve
+            // catalogue-title collisions as REVIEW instead of unsafe CREATE.
+            if (count($candidateTracks) < 2) {
+                continue;
+            }
+            if ($relationship === 'unrelated'
+                && $year !== null && $dbYear !== null && $year !== $dbYear) {
+                continue;
+            }
+
+            $albumId = (int)$album['id'];
+            $localTracks = $this->localTrackTitles($albumId);
+            $comparison = $this->trackMatcher->compare($candidateTracks, $localTracks);
+            if (empty($comparison['equivalent'])) {
+                continue;
+            }
+
+            if ($sameTitle) {
+                if ($this->weakAlbumMetadataCompatible(
+                    (string)$base['artist'], $title, $year, '', $releaseGroup, $album, true
+                )) {
+                    $sameTitleTrackMatches[] = $album;
+                }
+                continue; // The original fallback owns this candidate.
+            }
+
+            $dbGroup = strtolower(trim((string)($album['mb_release_group'] ?? '')));
+            $groupConflict = $this->isUuid($releaseGroup)
+                && $this->isUuid($dbGroup)
+                && $releaseGroup !== $dbGroup;
+            $exactTracklist = (int)($comparison['exact_count'] ?? -1)
+                === count($candidateTracks)
+                && (int)($comparison['total'] ?? -1) === count($candidateTracks);
+
+            $matches[] = [
+                'album' => $album,
+                'relationship' => $relationship,
+                'exact_tracks' => $exactTracklist,
+                'group_conflict' => $groupConflict,
+                'year_match' => $year !== null && $dbYear !== null && $year === $dbYear,
+            ];
+        }
+
+        if (empty($matches)) {
+            if (!empty($catalogAliasCandidates)) {
+                return $base + [
+                    'decision' => self::AMBIGUOUS,
+                    'confidence' => 'candidate',
+                    'album_id' => null,
+                    'match_source' => 'artist+catalog-title-collision',
+                    'candidate_album_ids' => $this->albumIds($catalogAliasCandidates),
+                    'reasons' => ['catalog-title-alias-tracklist-not-proven'],
+                ];
+            }
+            return null;
+        }
+
+        $matchedAlbums = array_merge(array_column($matches, 'album'), $sameTitleTrackMatches);
+        // If a title-exact album ALSO matches the full tracklist, no cross-
+        // title match is safe to choose automatically.
+        if (count($matches) === 1 && empty($sameTitleTrackMatches)) {
+            $match = $matches[0];
+            $album = $match['album'];
+            if ($match['relationship'] === 'catalog-alias'
+                && $match['year_match']
+                && $match['exact_tracks']
+                && !$match['group_conflict']
+                && $this->tracklistEvidenceAllowed($evidenceStatus, $album)) {
+                return $base + [
+                    'decision' => self::EXACT_EXISTING,
+                    'confidence' => 'candidate',
+                    'album_id' => (int)$album['id'],
+                    'match_source' => 'artist+year+full-tracklist',
+                    'candidate_album_ids' => [(int)$album['id']],
+                    'reasons' => ['catalog-title-alias-full-tracklist-match'],
+                    'matched_album' => $this->publicAlbum($album),
+                ];
+            }
+        }
+
+        return $base + [
+            'decision' => self::AMBIGUOUS,
+            'confidence' => 'candidate',
+            'album_id' => null,
+            'match_source' => 'artist+full-tracklist-review',
+            'candidate_album_ids' => $this->albumIds($matchedAlbums),
+            'reasons' => ['cross-title-complete-tracklist-collision-needs-review'],
+        ];
+    }
+
+    /**
+     * Distinguish local catalogue disambiguators (LP numbers and exact year)
+     * from editorial/edition qualifiers. Neither kind is silently stripped by
+     * AlbumTitleMatcher::equivalent(), whose historical meaning is preserved.
+     */
+    private function crossTitleRelationship(string $candidate, string $local, ?int $year): string
+    {
+        $candidateInfo = $this->catalogTitleInfo($candidate, $year);
+        $localInfo = $this->catalogTitleInfo($local, $year);
+
+        $candidateBase = $this->normalizeIdentity($candidateInfo['base']);
+        $localBase = $this->normalizeIdentity($localInfo['base']);
+
+        if ($candidateBase !== '' && $candidateBase === $localBase) {
+            if ($candidateInfo['kind'] === 'catalog'
+                || $localInfo['kind'] === 'catalog') {
+                if ($candidateInfo['kind'] !== 'edition'
+                    && $localInfo['kind'] !== 'edition') {
+                    return 'catalog-alias';
+                }
+            }
+            if ($candidateInfo['kind'] === 'edition'
+                || $localInfo['kind'] === 'edition') {
+                return 'distinct-edition';
+            }
+        }
+
+        // A display title with an explicit edition qualifier does not become
+        // equivalent to a different release solely on matching song names.
+        if ($candidateInfo['kind'] === 'edition' || $localInfo['kind'] === 'edition') {
+            return 'distinct-edition';
+        }
+
+        // Longer branded titles with a base-title prefix (e.g. OKNOTOK) are
+        // not interchangeable aliases without MusicBrainz proof.
+        $a = $this->normalizeIdentity($candidate);
+        $b = $this->normalizeIdentity($local);
+        if ($a !== '' && $b !== '' && $a !== $b
+            && (strpos($a, $b) === 0 || strpos($b, $a) === 0)) {
+            return 'distinct-edition';
+        }
+
+        return 'unrelated';
+    }
+
+    /**
+     * @return array{base:string,kind:string}
+     */
+    private function catalogTitleInfo(string $title, ?int $knownYear): array
+    {
+        $title = trim($title);
+        if (preg_match('/^(.*?)\s+LP\s*([2-9]|[1-9][0-9]+)\s*$/iu', $title, $m) === 1
+            && trim($m[1]) !== '') {
+            return ['base' => trim($m[1]), 'kind' => 'catalog'];
+        }
+
+        if (preg_match('/^(.*?)\s*[\(\[\{]([^()\[\]{}]+)[\)\]\}]\s*$/u', $title, $m) === 1
+            && trim($m[1]) !== '') {
+            $qualifier = trim($m[2]);
+            if (preg_match('/^LP\s*([2-9]|[1-9][0-9]+)$/iu', $qualifier) === 1) {
+                return ['base' => trim($m[1]), 'kind' => 'catalog'];
+            }
+            if ($knownYear !== null && preg_match('/^(19|20)[0-9]{2}$/', $qualifier) === 1
+                && (int)$qualifier === $knownYear) {
+                return ['base' => trim($m[1]), 'kind' => 'catalog'];
+            }
+            return ['base' => trim($m[1]), 'kind' => 'edition'];
+        }
+
+        return ['base' => $title, 'kind' => 'bare'];
+    }
+
+    /** @param array<int,string> $candidateTracks */
+    private function tracklistsStrictlyEqual(array $candidateTracks, int $albumId): bool
+    {
+        $comparison = $this->trackMatcher->compare($candidateTracks, $this->localTrackTitles($albumId));
+        return !empty($comparison['equivalent'])
+            && (int)($comparison['exact_count'] ?? -1) === count($candidateTracks)
+            && (int)($comparison['total'] ?? -1) === count($candidateTracks);
     }
 
     /**
