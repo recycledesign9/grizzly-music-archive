@@ -129,8 +129,10 @@ final class AlbumImportExecutor
      *
      * @return array<string,mixed>
      */
-    public function revalidateCandidate(AlbumImportPlan $plan): array
-    {
+    public function revalidateCandidate(
+        AlbumImportPlan $plan,
+        bool $verifyEffectiveIdentity = true
+    ): array {
         $planData = $plan->toArray();
 
         $action = strtoupper(trim((string)($planData['action'] ?? '')));
@@ -219,10 +221,26 @@ final class AlbumImportExecutor
             );
         }
 
-        $this->assertCandidateIdentitySnapshot(
-            $plan->candidateSnapshot(),
-            $current
-        );
+        if ($verifyEffectiveIdentity) {
+            $this->assertCandidateIdentitySnapshot(
+                $plan->candidateSnapshot(),
+                $current
+            );
+        } else {
+            /*
+             * before-commit runs after the importer has already written the
+             * bound audio/source_path rows inside the current transaction.
+             * Those writes can legitimately change Readiness' DB-derived
+             * effective identity (for example making source_path the strongest
+             * local evidence) even though the media files themselves did not
+             * change. Compare the immutable observed media identity here,
+             * never the DB-derived effective identity.
+             */
+            $this->assertCandidateObservedSnapshot(
+                $plan->candidateSnapshot(),
+                $current
+            );
+        }
 
         return [
             'ok' => true,
@@ -300,7 +318,12 @@ final class AlbumImportExecutor
                         // Media-only check: catches files that changed while
                         // the transaction was being applied. DB locks acquired
                         // at before-write are still held here.
-                        return $this->revalidateCandidate($plan);
+                        //
+                        // Do not compare DB-derived effective identity here:
+                        // this transaction may already have inserted source_path
+                        // associations, legitimately changing Readiness'
+                        // strongest local evidence before COMMIT.
+                        return $this->revalidateCandidate($plan, false);
                     }
 
                     throw new RuntimeException(
@@ -737,7 +760,8 @@ final class AlbumImportExecutor
                 $root,
                 $candidatePath,
                 $parts,
-                0
+                0,
+                true
             );
         } finally {
             @unlink($statePath);
@@ -797,6 +821,96 @@ final class AlbumImportExecutor
         });
 
         return $validated;
+    }
+
+    /**
+     * Compare only identity observed from the candidate media itself.
+     *
+     * Used immediately before COMMIT, after the bound import may already have
+     * changed DB-side evidence inside the same transaction. Effective identity
+     * is intentionally NOT compared here because it can legitimately change
+     * as a consequence of our own uncommitted source_path/audio associations.
+     *
+     * @param array<string,mixed> $planned
+     * @param array<string,mixed> $current
+     */
+    private function assertCandidateObservedSnapshot(
+        array $planned,
+        array $current
+    ): void {
+        foreach (['artist', 'title'] as $field) {
+            $a = trim((string)($planned[$field] ?? ''));
+            $b = trim((string)($current[$field] ?? ''));
+
+            if ($a !== $b) {
+                throw new RuntimeException(
+                    'Candidate observed ' . $field . ' changed after decision.'
+                );
+            }
+        }
+
+        $plannedYear = array_key_exists('observed_year', $planned)
+            && $planned['observed_year'] !== null
+                ? (int)$planned['observed_year']
+                : (
+                    isset($planned['year']) && $planned['year'] !== null
+                        ? (int)$planned['year']
+                        : null
+                );
+
+        $currentYear = array_key_exists('observed_year', $current)
+            && $current['observed_year'] !== null
+                ? (int)$current['observed_year']
+                : (
+                    isset($current['year']) && $current['year'] !== null
+                        ? (int)$current['year']
+                        : null
+                );
+
+        if ($plannedYear !== $currentYear) {
+            throw new RuntimeException(
+                'Candidate observed year changed after decision.'
+            );
+        }
+
+        $identityFields = [
+            ['observed_release_mbid', 'release_mbid'],
+            ['observed_release_group', 'release_group'],
+        ];
+
+        foreach ($identityFields as $fields) {
+            [$observedField, $fallbackField] = $fields;
+
+            $a = array_key_exists($observedField, $planned)
+                ? strtolower(trim((string)($planned[$observedField] ?? '')))
+                : strtolower(trim((string)($planned[$fallbackField] ?? '')));
+
+            $b = array_key_exists($observedField, $current)
+                ? strtolower(trim((string)($current[$observedField] ?? '')))
+                : strtolower(trim((string)($current[$fallbackField] ?? '')));
+
+            if ($a !== $b) {
+                throw new RuntimeException(
+                    'Candidate observed ' . $fallbackField
+                    . ' changed after decision.'
+                );
+            }
+        }
+
+        $plannedObserved = max(
+            0,
+            (int)($planned['observed_tracks'] ?? 0)
+        );
+        $currentObserved = max(
+            0,
+            (int)($current['observed_tracks'] ?? 0)
+        );
+
+        if ($plannedObserved !== $currentObserved) {
+            throw new RuntimeException(
+                'Candidate observed track count changed after decision.'
+            );
+        }
     }
 
     private function assertCandidateIdentitySnapshot(

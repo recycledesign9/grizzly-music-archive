@@ -128,18 +128,26 @@ class AlbumReadinessService
     /**
      * @return array<string,array<int,array{dir:string,disc:int}>>
      */
-    public function discoverCandidates(string $importDir): array
+    public function discoverCandidates(
+        string $importDir,
+        bool $strictFilesystem = false
+    ): array
     {
         $real = realpath($importDir);
         if ($real === false || !is_dir($real) || !is_readable($real)) {
+            if ($strictFilesystem) {
+                throw new RuntimeException(
+                    'Readiness discovery root missing or unreadable: ' . $importDir
+                );
+            }
             return [];
         }
 
         $root = rtrim(str_replace('\\', '/', $real), '/');
         $candidates = [];
 
-        foreach ($this->allDirectories($root) as $dir) {
-            if (!empty($this->listAudioFiles($dir))) {
+        foreach ($this->allDirectories($root, $strictFilesystem) as $dir) {
+            if (!empty($this->listAudioFiles($dir, $strictFilesystem))) {
                 $candidates[] = $dir;
             }
         }
@@ -194,7 +202,8 @@ class AlbumReadinessService
         string $importRoot,
         string $albumKey,
         array $parts,
-        int $stableSeconds = 30
+        int $stableSeconds = 30,
+        bool $strictFilesystem = false
     ): array {
         $stableSeconds = max(0, $stableSeconds);
         $audio = [];
@@ -204,7 +213,7 @@ class AlbumReadinessService
             $dir = isset($part['dir']) ? (string)$part['dir'] : '';
             $disc = isset($part['disc']) ? max(1, (int)$part['disc']) : 1;
 
-            foreach ($this->listAudioFiles($dir) as $path) {
+            foreach ($this->listAudioFiles($dir, $strictFilesystem) as $path) {
                 $key = realpath($path);
                 $key = $key !== false ? $key : $path;
                 $audio[$key] = [
@@ -227,7 +236,7 @@ class AlbumReadinessService
             return strcmp((string)$a['path'], (string)$b['path']);
         });
 
-        $tempFiles = $this->findInProgressFiles($albumKey);
+        $tempFiles = $this->findInProgressFiles($albumKey, $strictFilesystem);
         $latestMtime = $this->latestRelevantMtime($audio, $tempFiles);
 
         $stableFor = 0;
@@ -310,10 +319,13 @@ class AlbumReadinessService
         $expectedTracks = null;
         $expectedSource = null;
 
-        // Candidate identity returned downstream. Strong external evidence may
-        // fill missing MusicBrainz IDs, but never overwrites IDs read from tags.
-        $effectiveReleaseMbid = strtolower(trim((string)($identity['release_mbid'] ?? '')));
-        $effectiveReleaseGroup = strtolower(trim((string)($identity['release_group'] ?? '')));
+        // Keep observed identity separate from canonical/effective identity.
+        // A verified MusicBrainz release lookup may canonicalize stale/redirected
+        // IDs and year metadata, but the raw tag values remain observable.
+        $observedReleaseMbid = strtolower(trim((string)($identity['release_mbid'] ?? '')));
+        $observedReleaseGroup = strtolower(trim((string)($identity['release_group'] ?? '')));
+        $effectiveReleaseMbid = $observedReleaseMbid;
+        $effectiveReleaseGroup = $observedReleaseGroup;
 
         $externalEvidence = [
             'status' => 'not-needed',
@@ -378,18 +390,29 @@ class AlbumReadinessService
         }
 
 
-        // GRIZZLY_SCANNER_EVIDENCE_V1
+        // GRIZZLY_SCANNER_EVIDENCE_V2
         //
-        // Internal evidence always wins. MusicBrainz is consulted only when
-        // neither tags nor trusted local evidence can prove completeness.
+        // Completeness and identity canonicalization are independent concerns:
         //
-        // A cache read is allowed on every pass. Network is allowed only when
-        // the persistent candidate is already stable. This means:
-        // - active downloads never trigger external traffic;
-        // - the worker resolves an unknown complete album once;
-        // - Executor/preflight can revalidate from cache without network.
+        // - completeness may already be proven by TRACKTOTAL or trusted local
+        //   evidence and therefore does not require MusicBrainz;
+        // - identity may still require a targeted canonical lookup when a valid
+        //   tagged release MBID collides with a plausible local album but the
+        //   raw year/release-group metadata disagrees.
+        //
+        // A cache read is allowed on every pass. Network remains restricted to
+        // stable candidates. This avoids turning a full scan into a MusicBrainz
+        // crawl while still resolving redirected/stale external identities.
+        $needsExternalCompleteness = $expectedTracks === null;
+        $needsExternalIdentity = $this->needsExternalIdentityCanonicalization(
+            $identity,
+            $audio,
+            $metadataRows,
+            $localEvidence
+        );
+
         if (
-            $expectedTracks === null
+            ($needsExternalCompleteness || $needsExternalIdentity)
             && empty($conflicts)
             && empty($tempFiles)
             && empty($unreadable)
@@ -400,67 +423,109 @@ class AlbumReadinessService
                 $metadataRows,
                 $stable
             );
+            $externalEvidence['identity_requested'] = $needsExternalIdentity;
 
             if (!empty($externalEvidence['matched'])) {
                 $externalExpected = (int)($externalEvidence['expected_tracks'] ?? 0);
 
-                if ($externalExpected > 0) {
+                if ($needsExternalCompleteness && $externalExpected > 0) {
                     $expectedTracks = $externalExpected;
                     $expectedSource = 'musicbrainz-release+tracklist';
+                }
 
-                    if ($effectiveReleaseMbid === '') {
-                        $effectiveReleaseMbid = strtolower(trim((string)(
-                            $externalEvidence['release_mbid'] ?? ''
-                        )));
+                $externalReleaseMbid = strtolower(trim((string)(
+                    $externalEvidence['release_mbid'] ?? ''
+                )));
+                $externalReleaseGroup = strtolower(trim((string)(
+                    $externalEvidence['release_group'] ?? ''
+                )));
+
+                // A candidate carrying a valid release MBID gives MusicBrainz a
+                // precise lookup key. The canonical release response is therefore
+                // stronger than stale embedded release-group/year tags and may
+                // replace them after the full tracklist has independently matched.
+                $tagReleaseLookupAuthoritative = $this->isUuid($observedReleaseMbid)
+                    && $this->isUuid($externalReleaseMbid);
+
+                if ($tagReleaseLookupAuthoritative) {
+                    $effectiveReleaseMbid = $externalReleaseMbid;
+                    if ($this->isUuid($externalReleaseGroup)) {
+                        $effectiveReleaseGroup = $externalReleaseGroup;
                     }
-
-                    if ($effectiveReleaseGroup === '') {
-                        $effectiveReleaseGroup = strtolower(trim((string)(
-                            $externalEvidence['release_group'] ?? ''
-                        )));
+                } else {
+                    if ($effectiveReleaseMbid === '' && $this->isUuid($externalReleaseMbid)) {
+                        $effectiveReleaseMbid = $externalReleaseMbid;
                     }
+                    if ($effectiveReleaseGroup === '' && $this->isUuid($externalReleaseGroup)) {
+                        $effectiveReleaseGroup = $externalReleaseGroup;
+                    }
+                }
 
-                    $externalYear = isset($externalEvidence['year'])
-                        && $externalEvidence['year'] !== null
-                        ? (int)$externalEvidence['year']
+                $externalYear = isset($externalEvidence['year'])
+                    && $externalEvidence['year'] !== null
+                    ? (int)$externalEvidence['year']
+                    : null;
+
+                if (
+                    $externalYear !== null
+                    && $externalYear > 0
+                    && $externalYear !== (int)$effectiveYear
+                    && (
+                        $tagReleaseLookupAuthoritative
+                        || (
+                            $effectiveYearSource !== 'original-tag'
+                            && $this->isUuid($effectiveReleaseMbid)
+                        )
+                    )
+                ) {
+                    // Exact release-MBID + full tracklist is stronger than any
+                    // stale YEAR/ORIGINALYEAR tag. Search-derived external
+                    // evidence keeps the historical original-tag veto.
+                    $effectiveYear = $externalYear;
+                    $effectiveYearSource = $tagReleaseLookupAuthoritative
+                        ? 'musicbrainz-release-id+tracklist'
+                        : 'musicbrainz-release+tracklist';
+                }
+
+                $externalEvidence['identity_canonicalized'] =
+                    $effectiveReleaseMbid !== $observedReleaseMbid
+                    || $effectiveReleaseGroup !== $observedReleaseGroup
+                    || $effectiveYear !== $observedYear;
+
+                // Re-run local evidence with the canonical identity. This is
+                // intentionally DB-only; the external service has already done
+                // its work and no later identity stage performs network I/O.
+                $effectiveIdentity = $identity;
+                $effectiveIdentity['year'] = $effectiveYear;
+                $effectiveIdentity['year_source'] = $effectiveYearSource;
+                $effectiveIdentity['release_mbid'] = $effectiveReleaseMbid;
+                $effectiveIdentity['release_group'] = $effectiveReleaseGroup;
+
+                $refreshedLocalEvidence = $this->localCompletenessEvidence(
+                    $importRoot,
+                    $albumKey,
+                    $parts,
+                    $audio,
+                    $effectiveIdentity,
+                    $metadataRows
+                );
+
+                if (!empty($refreshedLocalEvidence['album_id'])) {
+                    $localEvidence = $refreshedLocalEvidence;
+
+                    // Canonical identity may reveal trusted local completeness
+                    // that the raw metadata could not see.
+                    $refreshedExpected = !empty($localEvidence['expected_tracks'])
+                        ? (int)$localEvidence['expected_tracks']
                         : null;
-
-                    if (
-                        $externalYear !== null
-                        && $externalYear > 0
-                        && $externalYear !== (int)$effectiveYear
-                        && $effectiveYearSource !== 'original-tag'
-                        && $this->isUuid($effectiveReleaseMbid)
-                    ) {
-                        // Full one-to-one MusicBrainz tracklist evidence is
-                        // stronger than a generic YEAR/DATE tag (or folder year).
-                        // Canonicalize the album year, but preserve the observed
-                        // source year separately in the returned candidate.
-                        $effectiveYear = $externalYear;
-                        $effectiveYearSource = 'musicbrainz-release+tracklist';
-                    }
-
-                    // Re-run local evidence with the enriched/canonical identity.
-                    // This lets an existing album be reconciled by exact release
-                    // MBID or canonical year even when the source files carried a
-                    // reissue/generic YEAR value.
-                    $effectiveIdentity = $identity;
-                    $effectiveIdentity['year'] = $effectiveYear;
-                    $effectiveIdentity['year_source'] = $effectiveYearSource;
-                    $effectiveIdentity['release_mbid'] = $effectiveReleaseMbid;
-                    $effectiveIdentity['release_group'] = $effectiveReleaseGroup;
-
-                    $refreshedLocalEvidence = $this->localCompletenessEvidence(
-                        $importRoot,
-                        $albumKey,
-                        $parts,
-                        $audio,
-                        $effectiveIdentity,
-                        $metadataRows
-                    );
-
-                    if (!empty($refreshedLocalEvidence['album_id'])) {
-                        $localEvidence = $refreshedLocalEvidence;
+                    if ($expectedTracks === null && $refreshedExpected !== null) {
+                        $expectedTracks = $refreshedExpected;
+                        if (!empty($localEvidence['tracklist_exact'])
+                            && $refreshedExpected === $observedTracks) {
+                            $expectedSource = (string)$localEvidence['source'] . '+tracklist';
+                        } elseif ($refreshedExpected > $observedTracks) {
+                            $expectedSource = (string)$localEvidence['source'];
+                        }
                     }
                 }
             }
@@ -585,6 +650,8 @@ class AlbumReadinessService
             'observed_year_source' => $observedYearSource,
             'release_mbid'       => $effectiveReleaseMbid,
             'release_group'      => $effectiveReleaseGroup,
+            'observed_release_mbid' => $observedReleaseMbid,
+            'observed_release_group' => $observedReleaseGroup,
             'observed_tracks'    => $observedTracks,
             'expected_tracks'    => $expectedTracks,
             'expected_source'    => $expectedSource,
@@ -617,7 +684,10 @@ class AlbumReadinessService
     }
 
     /** @return array<int,string> */
-    private function allDirectories(string $root): array
+    private function allDirectories(
+        string $root,
+        bool $strictFilesystem = false
+    ): array
     {
         $root = rtrim(str_replace('\\', '/', $root), '/');
         $out = [$root];
@@ -627,6 +697,11 @@ class AlbumReadinessService
             $dir = array_pop($stack);
             $entries = @scandir($dir);
             if ($entries === false) {
+                if ($strictFilesystem) {
+                    throw new RuntimeException(
+                        'Readiness discovery cannot read directory: ' . $dir
+                    );
+                }
                 continue;
             }
 
@@ -652,11 +727,19 @@ class AlbumReadinessService
     }
 
     /** @return array<int,string> */
-    private function listAudioFiles(string $dir): array
+    private function listAudioFiles(
+        string $dir,
+        bool $strictFilesystem = false
+    ): array
     {
         $out = [];
         $entries = @scandir($dir);
         if ($entries === false) {
+            if ($strictFilesystem) {
+                throw new RuntimeException(
+                    'Readiness cannot list candidate directory: ' . $dir
+                );
+            }
             return $out;
         }
 
@@ -689,10 +772,18 @@ class AlbumReadinessService
     }
 
     /** @return array<int,string> */
-    private function findInProgressFiles(string $albumKey): array
+    private function findInProgressFiles(
+        string $albumKey,
+        bool $strictFilesystem = false
+    ): array
     {
         $hits = [];
         if (!is_dir($albumKey) || !is_readable($albumKey)) {
+            if ($strictFilesystem) {
+                throw new RuntimeException(
+                    'Readiness candidate missing or unreadable: ' . $albumKey
+                );
+            }
             return $hits;
         }
 
@@ -713,6 +804,14 @@ class AlbumReadinessService
                 }
             }
         } catch (Throwable $e) {
+            if ($strictFilesystem) {
+                throw new RuntimeException(
+                    'Readiness recursive scan failed for: ' . $albumKey,
+                    0,
+                    $e
+                );
+            }
+
             // A transient filesystem problem must never turn into READY.
             $hits[] = $albumKey . '/[filesystem-scan-error]';
         }
@@ -1497,28 +1596,60 @@ class AlbumReadinessService
 
             $matches = [];
             foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-                if (!$this->titleMatcher()->equivalent(
+                $dbYear = !empty($row['year']) ? (int)$row['year'] : null;
+                $relationship = $this->titleMatcher()->relationship(
                     $title,
-                    (string)$row['title']
-                )) {
+                    (string)$row['title'],
+                    $artist,
+                    $year
+                );
+
+                if ($relationship === 'same-title') {
+                    if ($year !== null && $dbYear !== null && $year !== $dbYear) {
+                        continue;
+                    }
+
+                    $matches[] = [
+                        'album_id' => (int)$row['id'],
+                        'source' => 'local-artist-title-year',
+                        'requires_exact_tracklist' => false,
+                    ];
                     continue;
                 }
 
-                $dbYear = !empty($row['year']) ? (int)$row['year'] : null;
-                if ($year !== null && $dbYear !== null && $year !== $dbYear) {
-                    continue;
+                if (
+                    $relationship === 'catalog-alias'
+                    && $year !== null
+                    && $dbYear !== null
+                    && $year === $dbYear
+                ) {
+                    $matches[] = [
+                        'album_id' => (int)$row['id'],
+                        'source' => 'local-artist-catalog-year',
+                        'requires_exact_tracklist' => true,
+                    ];
                 }
-                $matches[] = (int)$row['id'];
             }
 
             if (count($matches) === 1) {
+                $match = $matches[0];
                 $evidence = $this->localAlbumEvidence(
-                    $matches[0],
-                    'local-artist-title-year',
+                    (int)$match['album_id'],
+                    (string)$match['source'],
                     $audio,
                     $metadataRows
                 );
-                if ($evidence !== null) {
+
+                // Catalogue aliases are intentionally weaker than ordinary
+                // title equivalence. They may certify local identity only when
+                // a curated album's complete tracklist independently agrees.
+                if (
+                    $evidence !== null
+                    && (
+                        empty($match['requires_exact_tracklist'])
+                        || !empty($evidence['tracklist_exact'])
+                    )
+                ) {
                     return $evidence;
                 }
             }
@@ -1529,6 +1660,125 @@ class AlbumReadinessService
             'expected_tracks' => null,
             'source'          => null,
         ];
+    }
+
+    /**
+     * Decide whether a precise tagged release MBID deserves a targeted
+     * MusicBrainz canonical lookup even though completeness is already known.
+     *
+     * This is deliberately NOT "lookup every MBID". We first require a
+     * plausible same-artist local collision with a complete equivalent
+     * tracklist and either a catalogue-title/year disagreement or a valid
+     * release-group disagreement. The provider lookup then decides whether the
+     * disagreement is a redirect/stale tag or a genuinely different album.
+     *
+     * @param array<string,mixed> $identity
+     * @param array<int,array{path:string,disc:int}> $audio
+     * @param array<int,array<string,mixed>> $metadataRows
+     * @param array<string,mixed> $localEvidence
+     */
+    private function needsExternalIdentityCanonicalization(
+        array $identity,
+        array $audio,
+        array $metadataRows,
+        array $localEvidence
+    ): bool {
+        if (!empty($localEvidence['album_id'])) {
+            return false;
+        }
+
+        $releaseMbid = strtolower(trim((string)($identity['release_mbid'] ?? '')));
+        if (!$this->isUuid($releaseMbid)) {
+            return false;
+        }
+
+        $artist = trim((string)($identity['artist'] ?? ''));
+        $title = trim((string)($identity['title'] ?? ''));
+        if ($artist === '' || $title === '') {
+            return false;
+        }
+
+        $candidateTracks = $this->candidateTrackTitles($audio, $metadataRows);
+        if (count($candidateTracks) < 2) {
+            return false;
+        }
+
+        $year = isset($identity['year']) && $identity['year'] !== null
+            ? (int)$identity['year']
+            : null;
+        $releaseGroup = strtolower(trim((string)($identity['release_group'] ?? '')));
+
+        $stmt = $this->db->prepare(
+            "SELECT a.id, a.title, a.year, a.mb_release_group, ar.name AS artist_name\n"
+            . "FROM albums a\n"
+            . "JOIN artists ar ON ar.id = a.artist_id\n"
+            . "WHERE ar.name = :artist\n"
+            . "ORDER BY a.id ASC"
+        );
+        $stmt->execute([':artist' => $artist]);
+
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $dbYear = !empty($row['year']) ? (int)$row['year'] : null;
+            $relationship = $this->titleMatcher()->relationship(
+                $title,
+                (string)$row['title'],
+                $artist,
+                $year
+            );
+
+            if (!in_array($relationship, ['same-title', 'catalog-alias'], true)) {
+                continue;
+            }
+
+            $albumId = (int)$row['id'];
+            if ($albumId <= 0) {
+                continue;
+            }
+
+            $localTracks = $this->localTrackTitles($albumId);
+            $comparison = $this->trackMatcher()->compare(
+                $candidateTracks,
+                $localTracks
+            );
+            if (empty($comparison['equivalent'])) {
+                continue;
+            }
+
+            $dbGroup = strtolower(trim((string)($row['mb_release_group'] ?? '')));
+            $groupMismatch = $this->isUuid($releaseGroup)
+                && $this->isUuid($dbGroup)
+                && $releaseGroup !== $dbGroup;
+            $yearMismatch = $relationship === 'catalog-alias'
+                && $year !== null
+                && $dbYear !== null
+                && $year !== $dbYear;
+
+            if ($groupMismatch || $yearMismatch) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @return array<int,string> */
+    private function localTrackTitles(int $albumId): array
+    {
+        if ($albumId <= 0) {
+            return [];
+        }
+
+        $stmt = $this->db->prepare(
+            "SELECT title FROM tracks "
+            . "WHERE album_id = :album_id "
+            . "ORDER BY position ASC, id ASC"
+        );
+        $stmt->execute([':album_id' => $albumId]);
+
+        return array_values(array_map(
+            'strval',
+            $stmt->fetchAll(PDO::FETCH_COLUMN)
+        ));
     }
 
     /**

@@ -67,6 +67,15 @@ class MediaImportService
     /** @var AlbumImportFilesystemJournal|null journal attivo solo per import bound. */
     private $filesystemJournal = null;
 
+    /**
+     * Root host a cui gli external sono logicamente vincolati.
+     * Cache per istanza: AlbumImportExecutor crea una nuova istanza per ogni
+     * esecuzione; il worker ricrea il servizio dopo un cambio root.
+     *
+     * @var string|null null = non ancora letta
+     */
+    private $scannerBoundRoot = null;
+
     public function __construct()
     {
         $this->db  = Database::getInstance();
@@ -198,15 +207,22 @@ class MediaImportService
      *
      * @return array<int,string>
      */
-    public function discoverAlbumKeys(string $importDir): array
-    {
+    public function discoverAlbumKeys(
+        string $importDir,
+        bool $strictFilesystem = false
+    ): array {
         $real = realpath($importDir);
         if ($real === false || !is_dir($real) || !is_readable($real)) {
+            if ($strictFilesystem) {
+                throw new RuntimeException(
+                    'Discovery root missing or unreadable: ' . $importDir
+                );
+            }
             return [];
         }
 
         $root = rtrim(str_replace('\\', '/', $real), '/');
-        return array_keys($this->discoverAlbums($root));
+        return array_keys($this->discoverAlbums($root, $strictFilesystem));
     }
 
     /**
@@ -446,7 +462,10 @@ class MediaImportService
      * Individua gli album come mappa: albumKey => lista di [dir, disc].
      * albumKey e' la cartella dell'album (per i multi-disco, il genitore).
      */
-    private function discoverAlbums(string $importDir): array
+    private function discoverAlbums(
+        string $importDir,
+        bool $strictFilesystem = false
+    ): array
     {
         // Le directory escluse vengono applicate DURANTE la discovery: il
         // walker non entra nel sottoalbero, quindi file parziali/non definitivi
@@ -459,8 +478,14 @@ class MediaImportService
         $excludedRuntimeRoots = $exclusionService->runtimeExcludedRoots($importDir);
 
         $candidates = [];
-        foreach ($this->allDirectories($importDir, $excludedRuntimeRoots) as $dir) {
-            if (count($this->listByExt($dir, self::AUDIO_EXT)) > 0) {
+        foreach (
+            $this->allDirectories(
+                $importDir,
+                $excludedRuntimeRoots,
+                $strictFilesystem
+            ) as $dir
+        ) {
+            if (count($this->listByExt($dir, self::AUDIO_EXT, $strictFilesystem)) > 0) {
                 $candidates[] = $dir;
             }
         }
@@ -495,7 +520,11 @@ class MediaImportService
     /**
      * Tutte le directory sotto $root (inclusa $root), senza symlink/nascoste.
      */
-    private function allDirectories(string $root, array $excludedRuntimeRoots = []): array
+    private function allDirectories(
+        string $root,
+        array $excludedRuntimeRoots = [],
+        bool $strictFilesystem = false
+    ): array
     {
         $root = rtrim(str_replace('\\', '/', $root), '/');
 
@@ -512,6 +541,11 @@ class MediaImportService
             $dir     = array_pop($stack);
             $entries = @scandir($dir);
             if ($entries === false) {
+                if ($strictFilesystem) {
+                    throw new RuntimeException(
+                        'Discovery cannot read directory: ' . $dir
+                    );
+                }
                 continue;
             }
             foreach ($entries as $e) {
@@ -545,11 +579,20 @@ class MediaImportService
     /**
      * File in $dir con una delle estensioni date (case-insensitive), ordinati.
      */
-    private function listByExt(string $dir, array $exts): array
+    private function listByExt(
+        string $dir,
+        array $exts,
+        bool $strictFilesystem = false
+    ): array
     {
         $out     = [];
         $entries = @scandir($dir);
         if ($entries === false) {
+            if ($strictFilesystem) {
+                throw new RuntimeException(
+                    'Discovery cannot list candidate directory: ' . $dir
+                );
+            }
             return $out;
         }
         foreach ($entries as $e) {
@@ -3422,14 +3465,34 @@ class MediaImportService
 
     /**
      * Converte un source_path persistito (path host) nel path visibile al
-     * processo corrente. In MAMP resta invariato; in Docker viene prefissato
-     * con MEDIA_SCAN_HOST_PREFIX (es. /hostfs).
+     * processo corrente.
+     *
+     * Un external assoluto che non appartiene piu' alla media_scan_bound_root
+     * corrente viene trattato come sorgente LOGICAMENTE non attiva anche quando
+     * il vecchio disco e' ancora fisicamente montato. Questo permette al normale
+     * reconcile di riallineare lo stesso record audio dopo un cambio watched
+     * folder senza confondere la vecchia copia con una seconda sorgente valida.
+     *
+     * I vecchi source_path non vengono cancellati: restano nel DB finche' un
+     * reconcile certo non aggiorna il record alla nuova posizione.
      */
     private function sourcePathForRuntime(string $dbPath): string
     {
         $dbPath = str_replace('\\', '/', trim($dbPath));
         if ($dbPath === '') {
             return '';
+        }
+
+        // Solo i path assoluti host sono soggetti al bound-root guard.
+        // I legacy relativi continuano a seguire il comportamento storico.
+        if (isset($dbPath[0]) && $dbPath[0] === '/') {
+            $boundRoot = $this->scannerBoundRoot();
+            if (
+                $boundRoot !== ''
+                && !$this->hostPathWithinRoot($dbPath, $boundRoot)
+            ) {
+                return '';
+            }
         }
 
         $prefix = trim((string)getenv('MEDIA_SCAN_HOST_PREFIX'));
@@ -3448,6 +3511,82 @@ class MediaImportService
         }
 
         return $prefix . '/' . $dbPath;
+    }
+
+    /**
+     * Root durevole degli external. Fallback su media_scan_path per database
+     * legacy non ancora migrati.
+     */
+    private function scannerBoundRoot(): string
+    {
+        if ($this->scannerBoundRoot !== null) {
+            return $this->scannerBoundRoot;
+        }
+
+        $this->scannerBoundRoot = '';
+
+        try {
+            $stmt = $this->db->prepare("
+                SELECT `value`
+                FROM settings
+                WHERE `key` = :key
+                LIMIT 1
+            ");
+
+            foreach (['media_scan_bound_root', 'media_scan_path'] as $key) {
+                $stmt->execute([':key' => $key]);
+                $value = $stmt->fetchColumn();
+                if ($value === false) {
+                    continue;
+                }
+
+                $value = str_replace('\\', '/', (string)$value);
+                if ($value === '' || !isset($value[0]) || $value[0] !== '/') {
+                    continue;
+                }
+
+                $this->scannerBoundRoot = $value === '/'
+                    ? '/'
+                    : rtrim($value, '/');
+                break;
+            }
+        } catch (Throwable $e) {
+            // Compatibilita' upgrade: se la setting non e' leggibile non
+            // cambiamo il comportamento storico.
+            $this->scannerBoundRoot = '';
+        }
+
+        return $this->scannerBoundRoot;
+    }
+
+    /**
+     * Confronto lessicale host-path/root con boundary di directory.
+     * Non usa realpath(): un riferimento storico puo' legittimamente puntare
+     * a un mount non piu' disponibile.
+     */
+    private function hostPathWithinRoot(string $path, string $root): bool
+    {
+        $path = str_replace('\\', '/', $path);
+        $root = str_replace('\\', '/', $root);
+
+        if ($path === '' || $root === '') {
+            return false;
+        }
+
+        if ($root !== '/') {
+            $root = rtrim($root, '/');
+        }
+
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            $path = strtolower($path);
+            $root = strtolower($root);
+        }
+
+        if ($root === '/') {
+            return isset($path[0]) && $path[0] === '/';
+        }
+
+        return $path === $root || strpos($path, $root . '/') === 0;
     }
 
     /**
