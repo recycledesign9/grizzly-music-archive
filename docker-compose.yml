@@ -46,6 +46,7 @@ services:
       #
       # The app container is also the single initializer of this volume.
       - runtime_data:/var/www/html/storage
+      - cache_data:/var/www/html/cache
 
       # Host filesystem used by the Settings folder picker and by relocatable
       # managed audio. Users always choose normal host paths in the UI;
@@ -127,6 +128,12 @@ services:
         source: worker_state
         target: /var/lib/grizzly-worker
 
+      - type: volume
+        source: cache_data
+        target: /var/www/html/cache
+        volume:
+          nocopy: true
+
       # Same read-only host view used by the web application
       # for external audio files.
       - type: bind
@@ -184,4 +191,5 @@ volumes:
   mysql_data:
   uploads_data:
   runtime_data:
+  cache_data:
   worker_state:
