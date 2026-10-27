@@ -272,8 +272,16 @@ class ArtistController
         return;
       }
 
+      // MBID release-group delle schede dell'artista: a parità di album
+      // (release-group duplicati su MusicBrainz) la discografia sceglie
+      // quello già collegato alla scheda, così l'aggancio non fallisce.
+      $localRgIds = array_values(array_filter(array_map(
+        'strval',
+        array_column($this->artistModel->getAlbums($id), 'mb_release_group')
+      )));
+
       $service = new ArtistMetadataService();
-      $result  = $service->fetchDiscography($mbid);
+      $result  = $service->fetchDiscography($mbid, $localRgIds);
 
       // Tre stati possibili (vedi fetchDiscography + Artist::saveDiscography):
       //  - ok=false            → 'error': fetch fallito senza risultati,

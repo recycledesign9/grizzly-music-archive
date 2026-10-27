@@ -136,8 +136,21 @@ class ArtistMetadataService
      * con stesso titolo e stessa disambiguation (o entrambi senza) restano
      * trattati come riedizione dello stesso album, e si tiene il più
      * vecchio come prima.
+     *
+     * v17: fix del 2026-10 — release-group DUPLICATI su MusicBrainz per
+     * lo stesso album (due gruppi Album ufficiali con stesso titolo e
+     * stessa data, non ancora uniti dai curatori: frequente per le uscite
+     * recenti). La deduplica titolo+anno teneva il primo incontrato
+     * nell'ordine della ricerca, a caso rispetto alla scheda in archivio:
+     * caso confermato Quicksand "Bring on the Psychics" (2026), scheda su
+     * de928b96…, discografia su afe02725…, quindi l'album compariva due
+     * volte nella pagina artista ("Non in archivio" + "Fuori dagli album
+     * in studio"). Ora il controller passa gli MBID release-group delle
+     * schede dell'artista e, a parità di chiave titolo+anno, vince il
+     * release-group presente in archivio. Gli album con anni diversi
+     * restano regolati come prima (si tiene il più vecchio).
      */
-    public const DISCOGRAPHY_LOGIC_VERSION = 16;
+    public const DISCOGRAPHY_LOGIC_VERSION = 17;
 
     /** Lunghezza massima bio salvata (caratteri) per non esagerare */
     private const BIO_MAX_CHARS = 2200;
@@ -1481,11 +1494,25 @@ class ArtistMetadataService
         return false;
     }
 
-    public function fetchDiscography(string $mbArtistId): array
+    /**
+     * @param string[] $preferredRgIds MBID release-group delle schede
+     *        dell'artista in archivio. Usati SOLO per scegliere tra
+     *        release-group equivalenti (stessa chiave titolo+anno): non
+     *        aggiungono né tolgono album dalla discografia.
+     */
+    public function fetchDiscography(string $mbArtistId, array $preferredRgIds = []): array
     {
         $mbArtistId = trim($mbArtistId);
         if ($mbArtistId === '') {
             return ['ok' => true, 'items' => []];
+        }
+
+        $preferred = [];
+        foreach ($preferredRgIds as $prg) {
+            $prg = $this->normalizeMusicBrainzId((string) $prg);
+            if ($prg !== '') {
+                $preferred[$prg] = true;
+            }
         }
 
         // Alcuni artisti sono splittati su MusicBrainz tra il solista e la
@@ -1636,7 +1663,18 @@ class ArtistMetadataService
                     // release-group omonimi di anni diversi sono album
                     // distinti, non duplicati.
                     $key = $this->discographyTitleKey($title, $disamb) . '|' . $year;
-                    if (!isset($candidates[$key])) {
+
+                    // A parità di chiave (release-group duplicati dello
+                    // stesso album su MusicBrainz) vince quello collegato a
+                    // una scheda in archivio, così l'aggancio per
+                    // release-group nella pagina artista funziona. Senza
+                    // preferenza resta il primo incontrato, come prima.
+                    $isPreferred = isset($preferred[strtolower($rgId)]);
+                    $replace     = isset($candidates[$key])
+                        && $isPreferred
+                        && !isset($preferred[strtolower($candidates[$key]['rgId'])]);
+
+                    if (!isset($candidates[$key]) || $replace) {
                         $candidates[$key] = [
                             'rgId'   => $rgId,
                             'title'  => $title,
