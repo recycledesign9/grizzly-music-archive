@@ -56,14 +56,17 @@ RUN mkdir -p \
         /var/www/html/public/uploads/covers \
         /var/www/html/public/uploads/audio \
         /var/www/html/storage/logs \
+        /var/www/html/cache \
         /var/lib/grizzly-worker \
     && chown -R www-data:www-data \
         /var/www/html/public/uploads \
         /var/www/html/storage \
+        /var/www/html/cache \
         /var/lib/grizzly-worker \
     && chmod -R 775 \
         /var/www/html/public/uploads \
         /var/www/html/storage \
+        /var/www/html/cache \
         /var/lib/grizzly-worker
 
 EXPOSE 80
