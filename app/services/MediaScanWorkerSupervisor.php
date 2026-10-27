@@ -815,11 +815,22 @@ class MediaScanWorkerSupervisor
      * chiuso in modo ordinato: prova che l'avvio era riuscito, ma il processo
      * non è più attivo.
      *
-     * @return array{timestamp:?int,age:?int,pid:?int,mode:?string,stopped:bool}
+     * rescan_path/rescan_from: riscansione in corso dopo un cambio della
+     * cartella da scansionare (stringhe vuote se non ce n'è una).
+     *
+     * @return array{timestamp:?int,age:?int,pid:?int,mode:?string,stopped:bool,rescan_path:string,rescan_from:string}
      */
     public static function readHeartbeat(): array
     {
-        $empty = ['timestamp' => null, 'age' => null, 'pid' => null, 'mode' => null, 'stopped' => false];
+        $empty = [
+            'timestamp'   => null,
+            'age'         => null,
+            'pid'         => null,
+            'mode'        => null,
+            'stopped'     => false,
+            'rescan_path' => '',
+            'rescan_from' => '',
+        ];
         $file = self::heartbeatFile();
 
         clearstatcache(true, $file);
@@ -848,6 +859,8 @@ class MediaScanWorkerSupervisor
             'pid'       => isset($data['pid']) ? (int)$data['pid'] : null,
             'mode'      => isset($data['mode']) ? (string)$data['mode'] : null,
             'stopped'   => !empty($data['stopped']),
+            'rescan_path' => isset($data['rescan_path']) ? (string)$data['rescan_path'] : '',
+            'rescan_from' => isset($data['rescan_from']) ? (string)$data['rescan_from'] : '',
         ];
     }
 

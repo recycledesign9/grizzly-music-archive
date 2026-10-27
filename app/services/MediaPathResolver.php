@@ -18,6 +18,15 @@
  */
 class MediaPathResolver
 {
+    /**
+     * Validità massima della cache delle statistiche della cartella audio,
+     * in secondi. La cache si rinnova comunque appena cambia la data di
+     * modifica della cartella (file aggiunti, eliminati o rinominati). Una
+     * modifica in-place dello stesso filename può restare visibile solo alla
+     * scadenza del TTL; Grizzly normalmente crea file managed con nomi unici.
+     */
+    private const AUDIO_STATS_TTL = 86400;
+
     /** @var string|null Cache del valore DB per la request corrente. */
     private static $configuredDbPath = null;
 
@@ -264,6 +273,16 @@ class MediaPathResolver
      */
     public static function testPath(string $path): array
     {
+        return self::testPathWithCount($path, null);
+    }
+
+    /**
+     * Come testPath(). Con $knownCount il numero di file audio non viene
+     * ricontato: lo usa testAudioPath(), che ha già il conteggio dalle
+     * statistiche della stessa cartella.
+     */
+    private static function testPathWithCount(string $path, ?int $knownCount): array
+    {
         $display = self::normalizePath($path);
 
         if ($display === '') {
@@ -301,8 +320,9 @@ class MediaPathResolver
             ];
         }
 
-        $files = self::getAudioFiles($runtime);
-        $count = count($files);
+        $count = $knownCount !== null
+            ? $knownCount
+            : count(self::getAudioFiles($runtime));
 
         return [
             'ok' => true,
@@ -320,7 +340,11 @@ class MediaPathResolver
      */
     public static function testAudioPath(): array
     {
-        return self::testPath(self::getConfiguredPath());
+        // La cartella attiva è la stessa di getAudioStats(): il conteggio
+        // arriva dalla cache delle statistiche invece di rileggere la cartella.
+        $stats = self::getAudioStats();
+
+        return self::testPathWithCount(self::getConfiguredPath(), (int)$stats['count']);
     }
 
     /**
@@ -331,7 +355,27 @@ class MediaPathResolver
     public static function getAudioStats(): array
     {
         $dir = self::getAudioDir();
-        $files = is_dir($dir) ? self::getAudioFiles($dir) : [];
+
+        if (!is_dir($dir)) {
+            return [
+                'count' => 0,
+                'size_bytes' => 0,
+                'size_human' => self::humanBytes(0),
+            ];
+        }
+
+        // Il calcolo legge la dimensione di ogni file della cartella: con
+        // centinaia di file su un disco esterno richiede secondi e veniva
+        // ripetuto a ogni apertura delle Impostazioni. Il risultato resta
+        // valido finché la data di modifica della cartella non cambia, cioè
+        // finché nessun file viene aggiunto, eliminato o rinominato.
+        $dirMtime = @filemtime($dir);
+        $cached = $dirMtime !== false ? self::readAudioStatsCache($dir, (int)$dirMtime) : null;
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        $files = self::getAudioFiles($dir);
         $total = 0;
 
         foreach ($files as $file) {
@@ -341,11 +385,20 @@ class MediaPathResolver
             }
         }
 
-        return [
+        $stats = [
             'count' => count($files),
             'size_bytes' => $total,
             'size_human' => self::humanBytes($total),
         ];
+
+        // Una cartella modificata nell'ultimo secondo non viene messa in
+        // cache: un file aggiunto nello stesso secondo del calcolo non
+        // cambierebbe la data di modifica e resterebbe escluso dal conteggio.
+        if ($dirMtime !== false && (int)$dirMtime < time() - 1) {
+            self::writeAudioStatsCache($dir, (int)$dirMtime, $stats);
+        }
+
+        return $stats;
     }
 
     // ----------------------------------------------------------
@@ -408,6 +461,77 @@ class MediaPathResolver
     // ----------------------------------------------------------
     // Internals
     // ----------------------------------------------------------
+
+    private static function audioStatsCacheFile(): string
+    {
+        return defined('BASE_PATH')
+            ? rtrim((string)BASE_PATH, '/') . '/cache/audio-stats.json'
+            : '';
+    }
+
+    /**
+     * @return array{count: int, size_bytes: int, size_human: string}|null
+     */
+    private static function readAudioStatsCache(string $dir, int $dirMtime): ?array
+    {
+        $file = self::audioStatsCacheFile();
+        if ($file === '' || !is_file($file)) {
+            return null;
+        }
+
+        $data = json_decode((string)@file_get_contents($file), true);
+        if (!is_array($data)
+            || (string)($data['dir'] ?? '') !== $dir
+            || (int)($data['dir_mtime'] ?? -1) !== $dirMtime
+            || (time() - (int)($data['computed_at'] ?? 0)) >= self::AUDIO_STATS_TTL) {
+            return null;
+        }
+
+        $bytes = (int)($data['size_bytes'] ?? 0);
+
+        return [
+            'count' => (int)($data['count'] ?? 0),
+            'size_bytes' => $bytes,
+            'size_human' => self::humanBytes($bytes),
+        ];
+    }
+
+    /**
+     * Scrittura atomica (file temporaneo + rename). Un errore di scrittura
+     * non è bloccante: alla richiesta successiva le statistiche vengono
+     * ricalcolate.
+     */
+    private static function writeAudioStatsCache(string $dir, int $dirMtime, array $stats): void
+    {
+        $file = self::audioStatsCacheFile();
+        if ($file === '') {
+            return;
+        }
+
+        $cacheDir = dirname($file);
+        if (!is_dir($cacheDir) && !@mkdir($cacheDir, 0775, true) && !is_dir($cacheDir)) {
+            return;
+        }
+
+        $json = json_encode([
+            'dir' => $dir,
+            'dir_mtime' => $dirMtime,
+            'computed_at' => time(),
+            'count' => (int)$stats['count'],
+            'size_bytes' => (int)$stats['size_bytes'],
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        if ($json === false) {
+            return;
+        }
+
+        $tmp = $file . '.tmp.' . getmypid();
+        if (@file_put_contents($tmp, $json, LOCK_EX) !== false) {
+            @rename($tmp, $file);
+        } else {
+            @unlink($tmp);
+        }
+    }
 
     private static function defaultAudioPath(): string
     {

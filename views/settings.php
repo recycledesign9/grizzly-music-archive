@@ -3,8 +3,6 @@ $pageTitle = 'Impostazioni';
 require BASE_PATH . '/views/layout/header.php';
 /** @var string $audioPathActive */
 /** @var string $audioPathDb */
-/** @var array  $audioStats */
-/** @var array  $audioTest */
 /** @var bool   $mediaScanEnabled */
 /** @var string $mediaScanPath */
 /** @var int    $mediaScanInterval */
@@ -110,9 +108,10 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
           <div class="grz-set__label">
             <h3>Cartella attuale</h3>
           </div>
-          <!-- Blocco generato dal server. Dopo "Salva percorso" e "Ripristina
-               predefinito" lo script lo sostituisce con la versione appena
-               calcolata (vedi refreshAudioLibraryView). -->
+          <!-- Percorso generato dal server; stato, numero di file e dimensione
+               arrivano da settings/audio-stats (loadAudioLibraryStats) e
+               vengono ricaricati dopo "Salva percorso" e "Ripristina
+               predefinito" (refreshAudioLibraryView). -->
           <div class="grz-set__control" id="audioCurrentControl" aria-live="polite">
             <?php if (trim((string)$audioPathDb) === ''): ?>
               <div class="grz-set__path">Archivio interno Grizzly</div>
@@ -121,13 +120,8 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
               <div class="grz-set__path"><?= htmlspecialchars($audioPathDb) ?></div>
             <?php endif; ?>
             <div class="grz-set__status" id="pathStatusBadge">
-              <?php if ($audioTest['ok']): ?>
-                <span class="grz-set__dot grz-set__dot--ok" aria-hidden="true"></span>
-                <span>Raggiungibile · <strong><?= (int)$audioStats['count'] ?></strong> file · <?= htmlspecialchars($audioStats['size_human']) ?></span>
-              <?php else: ?>
-                <span class="grz-set__dot grz-set__dot--err" aria-hidden="true"></span>
-                <span class="text-danger-emphasis"><?= htmlspecialchars($audioTest['message']) ?></span>
-              <?php endif; ?>
+              <span class="grz-set__dot bg-secondary" aria-hidden="true"></span>
+              <span>Rilevamento stato e statistiche…</span>
             </div>
           </div>
         </div>
@@ -195,7 +189,7 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
         <div class="grz-set__row">
           <div class="grz-set__label">
             <h3>Migra file audio</h3>
-            <p id="migrateSummary">Copia i <?= (int)$audioStats['count'] ?> file (<?= htmlspecialchars($audioStats['size_human']) ?>) in una nuova cartella. Gli originali non vengono cancellati.</p>
+            <p id="migrateSummary">Rilevamento dei file audio in corso…</p>
           </div>
           <div class="grz-set__control">
             <label class="form-label" for="migrateTargetInput">Cartella di destinazione</label>
@@ -1743,6 +1737,10 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
     //   in attesa   pending, ma scansione disattivata o worker fermo
     //   completato  il cambio che questo browser aveva visto è concluso
     //
+    // "In corso" comprende due fasi (relocationState.phase): relink, cioè
+    // l'aggiornamento dei percorsi nel database, e rescan, cioè il primo
+    // ciclo completo del worker sulla nuova cartella.
+    //
     // Il database non tiene traccia di un cambio già concluso: per mostrare
     // l'esito anche a chi rientra nella pagina dopo la fine, il browser
     // ricorda la cartella di destinazione finché l'utente non chiude il
@@ -1804,8 +1802,11 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       var note = '';
       if (mode === 'running') {
         title = 'Cambio cartella in corso';
-        note = 'Grizzly verifica che i file già in archivio si trovino nella nuova cartella e poi aggiorna i percorsi. ' +
-          'Con molti file servono alcuni minuti. Puoi lasciare questa pagina: tornando qui trovi lo stato aggiornato.';
+        note = relocationState.phase === 'rescan'
+          ? 'I percorsi dei file già in archivio sono aggiornati. Grizzly sta esaminando gli album della nuova cartella ' +
+            'per collegare quelli già in archivio e importare quelli nuovi. '
+          : 'Grizzly cerca nella nuova cartella i file già in archivio e ne aggiorna i percorsi. ';
+        note += 'Con molti file servono alcuni minuti. Puoi lasciare questa pagina: tornando qui trovi lo stato aggiornato.';
       } else if (mode === 'waiting') {
         title = 'Cambio cartella in attesa';
         note = committedMediaScanEnabled
@@ -2386,79 +2387,106 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
 
     // ── Percorso audio: salvataggio e aggiornamento della vista ──
     //
-    // "Cartella attuale" e il riepilogo di "Migra file audio" sono generati
-    // in PHP: percorso salvato, test di raggiungibilità, numero di file e
-    // dimensione. Prima di questa correzione il salvataggio mostrava solo
-    // un toast e quei blocchi restavano fermi ai valori letti all'apertura
-    // della pagina, fino al ricaricamento.
-    //
-    // Dopo un salvataggio riuscito la pagina Impostazioni viene richiesta di
-    // nuovo in background e si sostituiscono soltanto questi due blocchi.
-    // I valori mostrati restano quelli calcolati dal server (stessa logica
-    // di SettingsController::index), la pagina non si ricarica e il player
-    // non si interrompe. Gli altri campi della pagina non vengono toccati,
-    // quindi eventuali modifiche non salvate nelle altre sezioni restano.
-    function refreshAudioLibraryView(savedPath) {
-      var current = document.getElementById('audioCurrentControl');
+    // Stato, numero di file e dimensione della cartella audio arrivano da
+    // settings/audio-stats dopo il rendering della pagina, così la lettura
+    // della cartella non ritarda l'apertura delle Impostazioni. Dopo
+    // "Salva percorso" e "Ripristina predefinito" il percorso mostrato viene
+    // aggiornato subito e le statistiche vengono richieste di nuovo, senza
+    // ricaricare la pagina e senza interrompere il player.
+    function loadAudioLibraryStats() {
+      var status = document.getElementById('pathStatusBadge');
       var summary = document.getElementById('migrateSummary');
-      if (!current) return Promise.resolve(false);
 
-      current.classList.remove('is-updated');
-      current.classList.add('is-refreshing');
+      if (status) {
+        status.innerHTML = '<span class="grz-set__dot bg-secondary" aria-hidden="true"></span>' +
+          '<span>Rilevamento stato e statistiche…</span>';
+      }
+      if (summary) summary.textContent = 'Rilevamento dei file audio in corso…';
 
-      return fetch(BASE_URL + '/index.php?route=settings', {
+      return fetch(BASE_URL + '/index.php?route=settings/audio-stats', {
           cache: 'no-store',
-          credentials: 'same-origin'
+          credentials: 'same-origin',
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+          }
         })
         .then(function(r) {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          return r.text();
+          return r.json().then(function(data) {
+            if (!r.ok) throw new Error(data.message || ('HTTP ' + r.status));
+            return data;
+          });
         })
-        .then(function(html) {
-          var doc = new DOMParser().parseFromString(html, 'text/html');
-          var freshCurrent = doc.getElementById('audioCurrentControl');
-          var freshSummary = doc.getElementById('migrateSummary');
-          if (!freshCurrent) throw new Error('Blocco "Cartella attuale" assente nella risposta.');
+        .then(function(data) {
+          if (!data.ok) throw new Error(data.message || 'Statistiche non disponibili.');
 
-          current.innerHTML = freshCurrent.innerHTML;
-          if (summary && freshSummary) summary.innerHTML = freshSummary.innerHTML;
-
-          // Il campo riprende il valore come salvato nel database, che il
-          // server può aver normalizzato (per esempio la barra finale).
-          var freshInput = doc.getElementById('audioPathInput');
-          var input = document.getElementById('audioPathInput');
-          if (freshInput && input) input.value = freshInput.value;
-          return true;
-        })
-        .catch(function() {
-          // Il salvataggio è già avvenuto: se il ricalcolo fallisce si
-          // aggiorna almeno il percorso e si segnala che i conteggi vanno
-          // riletti, invece di lasciare in vista il valore precedente.
-          var pathEl = current.querySelector('.grz-set__path');
-          if (pathEl) pathEl.textContent = savedPath !== '' ? savedPath : 'Archivio interno Grizzly';
-          var hint = current.querySelector('.small.text-muted');
-          if (hint) hint.remove();
-          var status = document.getElementById('pathStatusBadge');
           if (status) {
-            status.innerHTML = '<span class="grz-set__dot bg-secondary" aria-hidden="true"></span>' +
-              '<span>Stato e numero di file non aggiornati: ricarica la pagina per rileggerli.</span>';
+            if (data.reachable) {
+              status.innerHTML = '<span class="grz-set__dot grz-set__dot--ok" aria-hidden="true"></span>' +
+                '<span>Raggiungibile · <strong>' + Number(data.count || 0) + '</strong> file · ' +
+                escHtml(data.size_human || '0 B') + '</span>';
+            } else {
+              status.innerHTML = '<span class="grz-set__dot grz-set__dot--err" aria-hidden="true"></span>' +
+                '<span class="text-danger-emphasis">' + escHtml(data.message || 'Cartella non raggiungibile.') + '</span>';
+            }
           }
-          return false;
+
+          if (summary) {
+            if (data.reachable) {
+              summary.textContent = 'Copia i ' + Number(data.count || 0) + ' file (' +
+                (data.size_human || '0 B') + ') in una nuova cartella. Gli originali non vengono cancellati.';
+            } else {
+              summary.textContent = 'Statistiche non disponibili finché la cartella audio non è raggiungibile.';
+            }
+          }
+
+          return data;
         })
-        .then(function(result) {
-          current.classList.remove('is-refreshing');
-          // Riavvio dell'evidenziazione: il reflow forzato fa ripartire la
-          // transizione anche con due salvataggi consecutivi.
-          void current.offsetWidth;
-          current.classList.add('is-updated');
-          setTimeout(function() { current.classList.remove('is-updated'); }, 60);
-          return result;
+        .catch(function(e) {
+          if (status) {
+            status.innerHTML = '<span class="grz-set__dot grz-set__dot--err" aria-hidden="true"></span>' +
+              '<span class="text-danger-emphasis">' + escHtml(e.message || 'Statistiche non disponibili.') + '</span>';
+          }
+          if (summary) summary.textContent = 'Statistiche audio non disponibili.';
+          return null;
         });
     }
 
+    function refreshAudioLibraryView(savedPath) {
+      var current = document.getElementById('audioCurrentControl');
+      if (!current) return Promise.resolve(false);
+
+      var pathEl = current.querySelector('.grz-set__path');
+      if (pathEl) {
+        pathEl.textContent = savedPath !== '' ? savedPath : 'Archivio interno Grizzly';
+      }
+
+      var hint = current.querySelector('.small.text-muted');
+      if (savedPath === '') {
+        if (!hint) {
+          hint = document.createElement('div');
+          hint.className = 'small text-muted mt-1';
+          hint.textContent = 'Gestito automaticamente da Grizzly.';
+          if (pathEl && pathEl.parentNode) pathEl.parentNode.insertBefore(hint, pathEl.nextSibling);
+        }
+      } else if (hint) {
+        hint.remove();
+      }
+
+      current.classList.remove('is-updated');
+      void current.offsetWidth;
+      current.classList.add('is-updated');
+      setTimeout(function() { current.classList.remove('is-updated'); }, 60);
+
+      return loadAudioLibraryStats().then(function() { return true; });
+    }
+
+    // Settings deve essere interattiva subito: le statistiche filesystem
+    // vengono richieste solo dopo che la pagina è stata renderizzata.
+    loadAudioLibraryStats();
+
     // Salvataggio comune a "Salva percorso" e "Ripristina predefinito".
-    // I due pulsanti restano disabilitati fino alla fine del ricalcolo,
-    // per evitare invii doppi e risposte che arrivano fuori ordine.
+    // Dopo il salvataggio il percorso viene aggiornato subito; conteggio e
+    // dimensione vengono ricalcolati in background senza bloccare i pulsanti.
     function saveAudioPath(value, sourceBtn, busyLabel, successMessage) {
       var btnSave = document.getElementById('btnSavePath');
       var btnReset = document.getElementById('btnResetPath');
@@ -2490,13 +2518,20 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
           var panel = document.getElementById('audioPathPanel');
           if (panel) panel.open = false;
           document.getElementById('testResult').innerHTML = '';
-          document.getElementById('audioPathInput').value = value;
+          // set-path restituisce in data.test.path il percorso effettivamente
+          // normalizzato dal resolver (es. senza slash finale). Per il default
+          // manteniamo invece stringa vuota, così la UI mostra "Archivio interno".
+          var savedPath = value;
+          if (value !== '' && data.test && typeof data.test.path === 'string' && data.test.path !== '') {
+            savedPath = data.test.path;
+          }
+
+          document.getElementById('audioPathInput').value = savedPath;
           closeBrowser('audio');
 
-          refreshAudioLibraryView(value).then(function() {
-            restoreButtons();
-            showToast('success', successMessage);
-          });
+          refreshAudioLibraryView(savedPath);
+          restoreButtons();
+          showToast('success', successMessage);
         }
       );
     }

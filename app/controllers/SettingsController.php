@@ -44,6 +44,9 @@ class SettingsController
             case 'worker-start':
                 $this->startWorker();
                 break;
+            case 'audio-stats':
+                $this->audioStats();
+                break;
             case 'add-scan-exclusion':
                 $this->addScanExclusion();
                 break;
@@ -77,11 +80,10 @@ class SettingsController
         $row         = $stmt->fetch(PDO::FETCH_ASSOC);
         $audioPathDb = ($row && trim($row['value']) !== '') ? trim($row['value']) : '';
 
-        // Statistiche cartella audio attuale
-        $audioStats  = MediaPathResolver::getAudioStats();
-        $audioTest   = MediaPathResolver::testAudioPath();
-
-        // Path effettivo usato dall'app (DB o default config.php)
+        // Path effettivo usato dall'app (DB o default config.php).
+        // Le statistiche filesystem NON vengono calcolate qui: su storage
+        // remoto/NAS possono richiedere secondi e bloccherebbero il rendering
+        // dell'intera pagina Settings. La view le carica via AJAX dopo il paint.
         $audioPathActive = MediaPathResolver::getAudioDir();
 
         // Impostazioni scanner automatico. Le leggiamo dal DB perché il worker
@@ -152,14 +154,20 @@ class SettingsController
     /**
      * Cambio della cartella da scansionare non ancora concluso.
      *
-     * Il worker esegue MediaRootRelocationService::rebind() quando
-     * media_scan_path è diverso da media_scan_bound_root; rebind() aggiorna
-     * media_scan_bound_root nella stessa transazione dei source_path. Il
-     * confronto dei due valori dice quindi se il cambio è ancora da fare,
-     * senza stato aggiuntivo. Con media_scan_bound_root assente il worker
-     * adotta la cartella al primo avvio senza spostare nulla: nessun cambio.
+     * Il cambio ha due fasi, entrambe eseguite dal worker:
      *
-     * @return array{pending: bool, from: string, to: string}
+     *   relink  media_scan_path è diverso da media_scan_bound_root: il worker
+     *           deve ancora eseguire MediaRootRelocationService::rebind(),
+     *           che aggiorna media_scan_bound_root nella stessa transazione
+     *           dei source_path.
+     *   rescan  rebind() è concluso, ma il worker sta ancora esaminando gli
+     *           album della nuova cartella. Lo segnala nell'heartbeat
+     *           (rescan_path) fino al primo ciclo completo.
+     *
+     * Con media_scan_bound_root assente il worker adotta la cartella al primo
+     * avvio senza spostare nulla: nessun cambio.
+     *
+     * @return array{pending: bool, phase: string, from: string, to: string}
      */
     private function relocationState(PDO $db): array
     {
@@ -185,11 +193,110 @@ class SettingsController
         $to = $normalize($values['media_scan_path']);
         $from = $normalize($values['media_scan_bound_root']);
 
-        return [
-            'pending' => $to !== '' && $from !== '' && $to !== $from,
-            'from'    => $from,
-            'to'      => $to,
-        ];
+        if ($to !== '' && $from !== '' && $to !== $from) {
+            return ['pending' => true, 'phase' => 'relink', 'from' => $from, 'to' => $to];
+        }
+
+        $heartbeat = MediaScanWorkerSupervisor::readHeartbeat();
+        $rescanPath = $normalize((string)($heartbeat['rescan_path'] ?? ''));
+
+        if ($to !== '' && $rescanPath === $to) {
+            $rescanFrom = $normalize((string)($heartbeat['rescan_from'] ?? ''));
+            return [
+                'pending' => true,
+                'phase'   => 'rescan',
+                'from'    => $rescanFrom !== '' ? $rescanFrom : $from,
+                'to'      => $to,
+            ];
+        }
+
+        return ['pending' => false, 'phase' => '', 'from' => $from, 'to' => $to];
+    }
+
+    /**
+     * GET /index.php?route=settings/audio-stats
+     *
+     * Calcola in modo asincrono stato e statistiche della libreria managed.
+     * Questa operazione può essere costosa su NAS/SMB, quindi non deve stare
+     * nel critical path di SettingsController::index().
+     */
+    private function audioStats(): void
+    {
+        header('Content-Type: application/json; charset=utf-8');
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+            http_response_code(405);
+            echo json_encode(['ok' => false, 'message' => 'Metodo non consentito.']);
+            exit;
+        }
+
+        // La lettura della cartella può durare secondi: senza rilasciare la
+        // sessione, per tutto quel tempo le altre richieste della stessa
+        // sessione (cambio pagina, stato del worker) resterebbero in coda.
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+
+        try {
+            $displayPath = MediaPathResolver::getConfiguredPath();
+            $runtimePath = MediaPathResolver::getAudioDir();
+
+            if (!is_dir($runtimePath)) {
+                echo json_encode([
+                    'ok' => true,
+                    'reachable' => false,
+                    'writable' => false,
+                    'path' => $displayPath,
+                    'message' => 'Cartella non trovata: ' . $displayPath,
+                    'count' => 0,
+                    'size_bytes' => 0,
+                    'size_human' => '0 B',
+                ]);
+                exit;
+            }
+
+            if (!is_readable($runtimePath)) {
+                echo json_encode([
+                    'ok' => true,
+                    'reachable' => false,
+                    'writable' => false,
+                    'path' => $displayPath,
+                    'message' => 'Cartella non leggibile: ' . $displayPath,
+                    'count' => 0,
+                    'size_bytes' => 0,
+                    'size_human' => '0 B',
+                ]);
+                exit;
+            }
+
+            // Una sola enumerazione: getAudioStats() conta i file e ne somma
+            // le dimensioni. Evitiamo testAudioPath(), che enumererebbe di
+            // nuovo la stessa directory.
+            $stats = MediaPathResolver::getAudioStats();
+            $writable = is_writable($runtimePath);
+
+            echo json_encode([
+                'ok' => true,
+                'reachable' => true,
+                'writable' => $writable,
+                'path' => $displayPath,
+                'message' => $writable
+                    ? 'Cartella raggiungibile e scrivibile.'
+                    : 'Cartella raggiungibile ma non scrivibile da Grizzly: ' . $displayPath,
+                'count' => (int)($stats['count'] ?? 0),
+                'size_bytes' => (int)($stats['size_bytes'] ?? 0),
+                'size_human' => (string)($stats['size_human'] ?? '0 B'),
+            ]);
+            exit;
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode([
+                'ok' => false,
+                'message' => 'Impossibile leggere le statistiche della libreria audio.'
+                    . (defined('DEBUG') && DEBUG ? ' ' . $e->getMessage() : '')
+            ]);
+            exit;
+        }
     }
 
     /**

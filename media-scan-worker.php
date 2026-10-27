@@ -104,6 +104,42 @@ function workerLog(string $message): void
 
 
 /**
+ * Dati aggiuntivi riportati in ogni heartbeat. Oggi contiene solo la
+ * riscansione in corso dopo un cambio della watched folder (rescan_path,
+ * rescan_from), che la pagina Settings usa per il box "Cambio cartella".
+ * Con $set sostituisce i dati correnti; senza argomenti li restituisce.
+ */
+function workerHeartbeatExtra(?array $set = null): array
+{
+    static $extra = [];
+    if ($set !== null) {
+        $extra = $set;
+    }
+    return $extra;
+}
+
+/**
+ * Dati heartbeat della riscansione registrata nello state del worker.
+ * Vuoto se non c'è una riscansione in corso.
+ */
+function relocationRescanHeartbeat(array $state): array
+{
+    $rescan = isset($state['relocation_rescan']) && is_array($state['relocation_rescan'])
+        ? $state['relocation_rescan']
+        : [];
+    $path = (string)($rescan['path'] ?? '');
+
+    if ($path === '') {
+        return [];
+    }
+
+    return [
+        'rescan_path' => $path,
+        'rescan_from' => (string)($rescan['from'] ?? ''),
+    ];
+}
+
+/**
  * Stato runtime del worker per la pagina Settings.
  *
  * Non viene salvato nel DB e non entra nei backup: è un heartbeat locale
@@ -123,13 +159,13 @@ function writeWorkerHeartbeat(
     $file = $storageDir . '/media-scan-worker-heartbeat.json';
     $tmp  = $file . '.tmp.' . getmypid();
 
-    $payload = [
+    $payload = array_merge(workerHeartbeatExtra(), [
         'timestamp'       => time(),
         'pid'             => getmypid(),
         'mode'            => defined('GRIZZLY_WORKER_MODE') ? GRIZZLY_WORKER_MODE : 'manual',
         'enabled'         => $enabled,
         'configured_path' => $configuredPath,
-    ];
+    ]);
 
     $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     if ($json === false) {
@@ -785,6 +821,9 @@ $scanGate = new AlbumScanGate($db, $root);
 $importExecutor = new AlbumImportExecutor($db, $root);
 
 $state   = loadWorkerState($stateFile);
+// Una riscansione dopo cambio cartella interrotta da un riavvio resta
+// segnalata a Settings finché non viene completata.
+workerHeartbeatExtra(relocationRescanHeartbeat($state));
 $lastNotice = null;
 $lastActiveConfiguredPath = null;
 
@@ -932,38 +971,33 @@ while (true) {
             }
 
             if ($boundConfiguredPath !== $configuredPath) {
-                $oldRuntimeRoot = runtimeScanPath($boundConfiguredPath);
-                $oldRuntimeReal = realpath($oldRuntimeRoot);
-                if ($oldRuntimeReal !== false && is_dir($oldRuntimeReal)) {
-                    $oldRuntimeRoot = rtrim(str_replace('\\', '/', $oldRuntimeReal), '/');
-                }
-
                 workerLog(
-                    '[CONFIG] Watched folder cambiata: root relocation '
+                    '[CONFIG] Watched folder cambiata: rescan/relink '
                     . $boundConfiguredPath . ' -> ' . $configuredPath
                 );
 
+                // Riscansione della nuova cartella da segnalare a Settings
+                // fino al primo ciclo completo. Il marcatore viene salvato
+                // prima del rebind: se il processo cade dopo il COMMIT, il
+                // ramo di recovery qui sotto lo ritrova nello state.
+                $state['relocation_rescan'] = [
+                    'path'  => $configuredPath,
+                    'from'  => $boundConfiguredPath,
+                    'since' => time(),
+                ];
+                saveWorkerState($stateFile, $state);
+                workerHeartbeatExtra(relocationRescanHeartbeat($state));
+                if ($heartbeatEnabled) {
+                    writeWorkerHeartbeat($root, $enabled, $configuredPath);
+                }
+
+                // Il rebind adotta la nuova root e riallinea soltanto i path
+                // dimostrati con evidenza conservativa. I riferimenti non
+                // risolti restano storici e non bloccano la nuova scansione.
                 try {
                     $relocation = $rootRelocationService->rebind(
                         $boundConfiguredPath,
                         $configuredPath
-                    );
-
-                    // /tmp state is only cache: migrate it when available. If it
-                    // is absent/stale, DB-backed [STATE] recovery below rebuilds it.
-                    $state = migrateWorkerStateRoot(
-                        $state,
-                        $oldRuntimeRoot,
-                        $realImport,
-                        $configuredPath
-                    );
-                    saveWorkerState($stateFile, $state);
-
-                    workerLog(
-                        '[CONFIG] Root relocation completata'
-                        . ' | audio_paths=' . (int)($relocation['audio_paths_rebound'] ?? 0)
-                        . ' | ignored_paths=' . (int)($relocation['ignored_paths_rebound'] ?? 0)
-                        . ' | verified_files=' . (int)($relocation['verified_files'] ?? 0)
                     );
                 } catch (Throwable $e) {
                     workerLog(
@@ -974,36 +1008,96 @@ while (true) {
                     $exitCode = 1;
                     break;
                 }
-            } elseif ($stateConfiguredPath !== $configuredPath) {
-                // DB e' gia' legato alla root corrente ma il cache state e'
-                // assente/stale (es. /tmp pulito o crash dopo COMMIT). Non c'e'
-                // nessuna operazione sull'archivio: riallinea solo il cache.
-                if ($stateConfiguredPath !== '') {
-                    $oldRuntimeRoot = runtimeScanPath($stateConfiguredPath);
-                    $oldRuntimeReal = realpath($oldRuntimeRoot);
-                    if ($oldRuntimeReal !== false && is_dir($oldRuntimeReal)) {
-                        $oldRuntimeRoot = rtrim(str_replace('\\', '/', $oldRuntimeReal), '/');
-                    }
 
-                    $state = migrateWorkerStateRoot(
-                        $state,
-                        $oldRuntimeRoot,
-                        $realImport,
-                        $configuredPath
+                // Una nuova root puo' avere una struttura completamente diversa.
+                // Non migrare imported_signature per path relativo: potrebbe
+                // marcare come gia' importato contenuto differente. Ripartiamo
+                // dalla discovery completa; il DB e l'identity resolver
+                // ricostruiscono l'idempotenza in modo autorevole.
+                $state = [
+                    'configured_path' => $configuredPath,
+                    'albums' => [],
+                    'relocation_rescan' => $state['relocation_rescan'],
+                ];
+                saveWorkerState($stateFile, $state);
+
+                // Anche la stability/readiness window deve ripartire sulla nuova
+                // root. Un errore di salvataggio qui non annulla il rebind DB
+                // gia' committato: il run successivo riprovera' il reset.
+                try {
+                    $readinessStateRepository->reset();
+                    $readinessStateRepository->save();
+                } catch (Throwable $e) {
+                    workerLog(
+                        '[WARN] Readiness state non azzerato dopo cambio root: '
+                        . $e->getMessage()
                     );
-                } else {
-                    $state = [
-                        'configured_path' => $configuredPath,
-                        'albums' => [],
-                    ];
                 }
 
+                // MediaImportService mantiene una cache per istanza della bound
+                // root. Ricrearlo evita che il ciclo corrente continui a vedere
+                // come vive le sorgenti della vecchia root.
+                $service = new MediaImportService();
+
+                workerLog(
+                    '[CONFIG] Nuova watched folder adottata; rescan completo'
+                    . ' | relink=' . (int)($relocation['audio_paths_rebound'] ?? 0)
+                    . ' | relative=' . (int)($relocation['audio_paths_relative'] ?? 0)
+                    . ' | hash=' . (int)($relocation['audio_paths_hash'] ?? 0)
+                    . ' | unresolved=' . (int)($relocation['audio_paths_unresolved'] ?? 0)
+                    . ' | outside_old_root=' . (int)($relocation['audio_paths_outside_old_root'] ?? 0)
+                    . ' | hash_ambiguous=' . (int)($relocation['audio_hash_ambiguous'] ?? 0)
+                    . ' | ignored=' . (int)($relocation['ignored_paths_rebound'] ?? 0)
+                );
+            } elseif ($stateConfiguredPath !== $configuredPath) {
+                // Il DB e' gia' sulla root corrente (es. crash subito dopo il
+                // COMMIT del rebind) ma il cache state e' vecchio. Non tentare
+                // una migrazione per path relativo: ricostruisci da discovery.
+                // Il marcatore di riscansione resta solo se riguarda questa
+                // stessa cartella.
+                $pendingRescan = isset($state['relocation_rescan'])
+                    && is_array($state['relocation_rescan'])
+                    && (string)($state['relocation_rescan']['path'] ?? '') === $configuredPath
+                        ? $state['relocation_rescan']
+                        : null;
+
+                $state = [
+                    'configured_path' => $configuredPath,
+                    'albums' => [],
+                ];
+                if ($pendingRescan !== null) {
+                    $state['relocation_rescan'] = $pendingRescan;
+                }
                 saveWorkerState($stateFile, $state);
-                workerLog('[CONFIG] Worker state riallineato alla watched folder corrente.');
+                workerHeartbeatExtra(relocationRescanHeartbeat($state));
+
+                try {
+                    $readinessStateRepository->reset();
+                    $readinessStateRepository->save();
+                } catch (Throwable $e) {
+                    workerLog(
+                        '[WARN] Readiness state non azzerato durante recovery root: '
+                        . $e->getMessage()
+                    );
+                }
+
+                $service = new MediaImportService();
+                workerLog(
+                    '[CONFIG] Worker state azzerato sulla watched folder corrente; '
+                    . 'rescan completo richiesto.'
+                );
             } else {
                 $state['configured_path'] = $configuredPath;
                 if (!isset($state['albums']) || !is_array($state['albums'])) {
                     $state['albums'] = [];
+                }
+
+                // Cambio annullato prima del rebind (tornati alla cartella
+                // vincolata): il marcatore riguarda un'altra cartella.
+                if (isset($state['relocation_rescan'])
+                    && (string)($state['relocation_rescan']['path'] ?? '') !== $configuredPath) {
+                    unset($state['relocation_rescan']);
+                    workerHeartbeatExtra([]);
                 }
             }
         } else {
@@ -1049,17 +1143,63 @@ while (true) {
         foreach (array_keys($state['albums']) as $knownAlbumKey) {
             if (MediaScanExclusionService::pathInAnySubtree((string)$knownAlbumKey, $excludedRuntimeRoots)) {
                 unset($state['albums'][$knownAlbumKey]);
-                workerLog('[EXCLUDED] Stato scanner rimosso: ' . $knownAlbumKey);
+                workerLog(
+                    '[EXCLUDED] Stato scanner rimosso: '
+                    . MediaScanWorkerStatePolicy::label((string)$knownAlbumKey, $realImport)
+                );
             }
         }
     }
 
-    $now        = time();
-    $albumKeys  = $service->discoverAlbumKeys($realImport);
+    $now = time();
+
+    // Discovery must be fail-closed. A removable/network filesystem can remain
+    // mounted while one or more subdirectories temporarily stop responding.
+    // A partial list must never be interpreted as authoritative absence.
+    try {
+        $albumKeys = $service->discoverAlbumKeys($realImport, true);
+    } catch (Throwable $e) {
+        workerLog(
+            '[WAIT] Discovery filesystem non affidabile: ' . $e->getMessage()
+        );
+
+        if ($heartbeatEnabled) {
+            writeWorkerHeartbeat($root, $enabled, $configuredPath);
+        }
+
+        if ($options['once']) {
+            break;
+        }
+
+        $stopReason = workerSleepWithHeartbeat(
+            $root,
+            $interval,
+            $enabled,
+            $configuredPath,
+            $heartbeatEnabled,
+            $managedStopReason
+        );
+        if ($stopReason !== '') {
+            break;
+        }
+        continue;
+    }
+
     $stillAlive = [];
+    $cycleFilesystemHealthy = true;
+
+    // Candidati ancora nella finestra di stabilità del worker (nuovi,
+    // modificati o non ancora stabili). Un ciclo completo senza candidati
+    // in questa condizione chiude la riscansione dopo un cambio cartella.
+    $cycleWaitingCandidates = 0;
+    // Un errore applicativo (gate/executor) significa che il ciclo ha visto
+    // tutta la root ma non l'ha elaborata completamente: il box relocation
+    // deve restare in corso e il ciclo successivo deve poter riprovare.
+    $cycleRescanHadError = false;
 
     foreach ($albumKeys as $albumKey) {
         $albumKey = rtrim(str_replace('\\', '/', $albumKey), '/');
+        $albumLabel = MediaScanWorkerStatePolicy::label($albumKey, $realImport);
 
         // Una directory ignorata NON deve conservare imported_signature nel
         // worker state. Così, quando l'utente preme "Ripristina", la cartella
@@ -1074,17 +1214,27 @@ while (true) {
         if ($configuredAlbumKey !== '' && isIgnoredAlbumPath($db, $configuredAlbumKey)) {
             if (isset($state['albums'][$albumKey])) {
                 unset($state['albums'][$albumKey]);
-                workerLog('[IGNORED] Stato scanner azzerato: ' . basename($albumKey));
+                workerLog('[IGNORED] Stato scanner azzerato: ' . $albumLabel);
             }
             continue;
         }
 
         $stillAlive[$albumKey] = true;
 
+        if (isset($state['albums'][$albumKey]) && is_array($state['albums'][$albumKey])) {
+            $state['albums'][$albumKey] = MediaScanWorkerStatePolicy::markSeen(
+                $state['albums'][$albumKey]
+            );
+        }
+
         $signature = albumSnapshot($albumKey);
         if ($signature === '') {
-            workerLog('[SKIP] Impossibile calcolare snapshot: ' . $albumKey);
-            continue;
+            $cycleFilesystemHealthy = false;
+            workerLog(
+                '[WAIT] ' . $albumLabel
+                . ' | snapshot non leggibile; ciclo state non potabile'
+            );
+            break;
         }
 
         $previous = isset($state['albums'][$albumKey]) && is_array($state['albums'][$albumKey])
@@ -1137,7 +1287,7 @@ while (true) {
                 if (($previous['last_result'] ?? '') !== 'ok'
                     || (($previous['imported_signature'] ?? '') !== $signature)) {
                     workerLog(
-                        '[STATE] ' . basename($albumKey)
+                        '[STATE] ' . $albumLabel
                         . ' | gia indicizzato album_id='
                         . (int)($indexedCandidate['album_id'] ?? 0)
                         . ' | audio='
@@ -1203,7 +1353,7 @@ while (true) {
 
                 workerLog(
                     "[RECONCILE] Sorgente precedente non piu' raggiungibile: "
-                    . basename($albumKey)
+                    . $albumLabel
                 );
             }
         }
@@ -1213,7 +1363,10 @@ while (true) {
         // lista albumKeys, quindi le esclusioni configurate restano applicate
         // esattamente come prima.
         try {
-            $candidateGroups = $readinessService->discoverCandidates($albumKey);
+            $candidateGroups = $readinessService->discoverCandidates(
+                $albumKey,
+                true
+            );
             $readinessParts = null;
 
             foreach ($candidateGroups as $candidateKey => $candidateParts) {
@@ -1243,17 +1396,20 @@ while (true) {
                 $realImport,
                 $albumKey,
                 $readinessParts,
-                $stable
+                $stable,
+                true
             );
         } catch (Throwable $e) {
             $state['albums'][$albumKey]['last_result'] = 'error';
             $state['albums'][$albumKey]['last_scan'] = $now;
+            $cycleFilesystemHealthy = false;
 
             workerLog(
-                '[ERROR] ' . basename($albumKey)
+                '[ERROR] ' . $albumLabel
                 . ' | readiness: ' . $e->getMessage()
+                . ' | cleanup-state=deferred'
             );
-            continue;
+            break;
         }
 
         $readinessStatus = strtoupper(
@@ -1290,7 +1446,7 @@ while (true) {
 
             if ($firstBootstrapObservation) {
                 workerLog(
-                    '[READINESS] ' . basename($albumKey)
+                    '[READINESS] ' . $albumLabel
                     . ' | bootstrap=observing'
                     . ' | status='
                     . ($readinessStatus !== '' ? $readinessStatus : 'UNKNOWN')
@@ -1300,7 +1456,7 @@ while (true) {
                 && !$readinessBootstrapDone
             ) {
                 workerLog(
-                    '[READINESS] ' . basename($albumKey)
+                    '[READINESS] ' . $albumLabel
                     . ' | bootstrap=complete'
                     . ' | status='
                     . ($readinessStatus !== '' ? $readinessStatus : 'UNKNOWN')
@@ -1329,15 +1485,17 @@ while (true) {
                 'candidate_signature' => $candidateSignature,
             ];
 
-            workerLog('[PENDING] Modifiche rilevate: ' . $albumKey);
+            $cycleWaitingCandidates++;
+            workerLog('[PENDING] Modifiche rilevate: ' . $albumLabel);
             continue;
         }
 
         // Manteniamo anche la stability window storica come guardrail locale.
         // Non può rendere READY un candidato: può soltanto ritardarlo.
         if ($stableFor < $stable) {
+            $cycleWaitingCandidates++;
             workerLog(
-                '[WAIT] ' . basename($albumKey)
+                '[WAIT] ' . $albumLabel
                 . ' stabile da ' . $stableFor . 's'
             );
             continue;
@@ -1355,9 +1513,10 @@ while (true) {
         } catch (Throwable $e) {
             $state['albums'][$albumKey]['last_result'] = 'error';
             $state['albums'][$albumKey]['last_scan'] = $now;
+            $cycleRescanHadError = true;
 
             workerLog(
-                '[ERROR] ' . basename($albumKey)
+                '[ERROR] ' . $albumLabel
                 . ' | gate: ' . $e->getMessage()
             );
             continue;
@@ -1391,7 +1550,7 @@ while (true) {
             if ($previousGateKey !== $gateKey) {
                 workerLog(
                     '[' . ($readinessStatus !== '' ? $readinessStatus : 'PENDING')
-                    . '] ' . basename($albumKey)
+                    . '] ' . $albumLabel
                     . ($gateReason !== '' ? ' | ' . $gateReason : '')
                 );
             }
@@ -1413,7 +1572,7 @@ while (true) {
                 );
 
                 workerLog(
-                    '[REVIEW] ' . basename($albumKey)
+                    '[REVIEW] ' . $albumLabel
                     . ' | reason=' . $gateReason
                     . ' | identity=' . $identityDecision
                 );
@@ -1424,9 +1583,10 @@ while (true) {
         if (!in_array($gateAction, ['CREATE', 'RECONCILE'], true)) {
             $state['albums'][$albumKey]['last_result'] = 'error';
             $state['albums'][$albumKey]['last_scan'] = $now;
+            $cycleRescanHadError = true;
 
             workerLog(
-                '[ERROR] ' . basename($albumKey)
+                '[ERROR] ' . $albumLabel
                 . ' | azione gate sconosciuta=' . $gateAction
             );
             continue;
@@ -1436,16 +1596,17 @@ while (true) {
         if (!$plan instanceof AlbumImportPlan) {
             $state['albums'][$albumKey]['last_result'] = 'error';
             $state['albums'][$albumKey]['last_scan'] = $now;
+            $cycleRescanHadError = true;
 
             workerLog(
-                '[ERROR] ' . basename($albumKey)
+                '[ERROR] ' . $albumLabel
                 . ' | piano import assente per ' . $gateAction
             );
             continue;
         }
 
         workerLog(
-            '[IMPORT] ' . $albumKey
+            '[IMPORT] ' . $albumLabel
             . ' | action=' . $gateAction
             . (
                 $plan->targetAlbumId() !== null
@@ -1463,9 +1624,10 @@ while (true) {
         } catch (Throwable $e) {
             $state['albums'][$albumKey]['last_result'] = 'error';
             $state['albums'][$albumKey]['last_scan'] = $now;
+            $cycleRescanHadError = true;
 
             workerLog(
-                '[ERROR] ' . basename($albumKey)
+                '[ERROR] ' . $albumLabel
                 . ' | executor: ' . $e->getMessage()
             );
 
@@ -1505,7 +1667,7 @@ while (true) {
             $state['albums'][$albumKey]['deferred_sources'] = [];
 
             workerLog(
-                '[OK] ' . basename($albumKey)
+                '[OK] ' . $albumLabel
                 . ' | action=' . $gateAction
                 . ' audio+=' . (int)($entry['audio_imported'] ?? 0)
                 . ' skip=' . (int)($entry['audio_skipped'] ?? 0)
@@ -1525,7 +1687,7 @@ while (true) {
                 array_keys($waitSources);
 
             workerLog(
-                '[DEFER] ' . basename($albumKey)
+                '[DEFER] ' . $albumLabel
                 . ' | external in attesa='
                 . (int)($entry['audio_deferred'] ?? 0)
                 . ' | sorgenti monitorate=' . count($waitSources)
@@ -1535,15 +1697,16 @@ while (true) {
             $state['albums'][$albumKey]['deferred_sources'] = [];
 
             workerLog(
-                '[REVIEW] ' . basename($albumKey)
+                '[REVIEW] ' . $albumLabel
                 . ' | executor='
                 . (string)($entry['execution_reason'] ?? 'review')
             );
         } else {
             $state['albums'][$albumKey]['last_result'] = 'error';
+            $cycleRescanHadError = true;
 
             workerLog(
-                '[ERROR] ' . basename($albumKey)
+                '[ERROR] ' . $albumLabel
                 . ' | risultato executor non valido: '
                 . ($executionStatus !== '' ? $executionStatus : '<empty>')
             );
@@ -1559,17 +1722,60 @@ while (true) {
         }
     }
 
-    // Se il ciclo è stato interrotto non tutte le directory sono state
-    // visitate: la pulizia delle voci scomparse vale solo per cicli completi.
-    if ($stopReason === '') {
+    // Worker state is a cache. Absence from one discovery pass is not proof of
+    // deletion: removable/network roots can become partially visible while the
+    // mount point itself still exists. Only a healthy cycle may advance the
+    // delayed cleanup policy, and even then deletion requires repeated explicit
+    // absence from a readable parent directory plus a grace period.
+    if ($stopReason === '' && $cycleFilesystemHealthy) {
         foreach (array_keys($state['albums']) as $known) {
-            if (!isset($stillAlive[$known])) {
-                unset($state['albums'][$known]);
+            if (isset($stillAlive[$known])) {
+                continue;
             }
+
+            $entry = isset($state['albums'][$known])
+                && is_array($state['albums'][$known])
+                    ? $state['albums'][$known]
+                    : [];
+
+            $missingDecision = MediaScanWorkerStatePolicy::evaluateMissing(
+                $entry,
+                (string)$known,
+                $realImport,
+                $now
+            );
+
+            if (!empty($missingDecision['remove'])) {
+                unset($state['albums'][$known]);
+                workerLog(
+                    '[STATE] ' . MediaScanWorkerStatePolicy::label(
+                        (string)$known,
+                        $realImport
+                    )
+                    . ' | state obsoleto rimosso dopo assenza confermata'
+                );
+                continue;
+            }
+
+            $state['albums'][$known] = $missingDecision['entry'];
         }
+    } elseif (!$cycleFilesystemHealthy) {
+        workerLog(
+            '[STATE] Cleanup state differito: ciclo filesystem non affidabile.'
+        );
     }
 
     $state['configured_path'] = $configuredPath;
+
+    // La riscansione può chiudersi soltanto dopo un ciclo completo e sano.
+    // La rimozione effettiva del marcatore avviene DOPO il salvataggio del
+    // readiness state: un errore di persistenza non deve far diventare verde
+    // il box mentre il worker sta per fermarsi.
+    $rescanCanComplete = isset($state['relocation_rescan'])
+        && $stopReason === ''
+        && $cycleFilesystemHealthy
+        && !$cycleRescanHadError
+        && $cycleWaitingCandidates === 0;
 
     $readinessSaveError = '';
     try {
@@ -1577,6 +1783,12 @@ while (true) {
     } catch (Throwable $e) {
         $readinessSaveError = $e->getMessage();
         workerLog('[ERROR] Readiness state non salvato: ' . $readinessSaveError);
+    }
+
+    if ($rescanCanComplete && $readinessSaveError === '') {
+        unset($state['relocation_rescan']);
+        workerHeartbeatExtra([]);
+        workerLog('[CONFIG] Riscansione della nuova watched folder completata.');
     }
 
     // Il worker state viene comunque salvato anche se il readiness state fallisce:
