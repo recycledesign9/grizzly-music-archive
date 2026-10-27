@@ -24,6 +24,13 @@ class AlbumController
   // risposta torna subito al client. Evita attese infinite lato UI.
   private float $wikiDeadline = 0.0;
 
+  // Esito della catena MBID → Wikidata → sitelink nella richiesta corrente.
+  // Resolved: i titoli it/en sono noti (da cache sitelink o catena completata).
+  // Transient: la catena o l'estratto sono falliti per rete/rate limit, quindi
+  // l'assenza della pagina nella lingua richiesta NON è un esito definitivo.
+  private bool $wikiMbidResolved  = false;
+  private bool $wikiMbidTransient = false;
+
   private function wikiTimeLeft(): float
   {
     if ($this->wikiDeadline <= 0.0) return 999.0; // budget non attivo
@@ -1232,6 +1239,8 @@ class AlbumController
       $result = null;
       $this->wikiHttpFailures  = 0;
       $this->wikiHttpSuccesses = 0;
+      $this->wikiMbidResolved  = false;
+      $this->wikiMbidTransient = false;
 
       // BUDGET TOTALE: 6 secondi per l'intero recupero, qualunque cosa
       // accada. Superato il budget, nessuna nuova richiesta parte e la
@@ -1299,17 +1308,43 @@ class AlbumController
       }
 
       if (!$debug) {
-        if (!empty($result['description'])) {
-          // Esito positivo: cache lunga
+        // RICERCA INCOMPLETA: la lingua richiesta non è stata verificata
+        // fino in fondo. Succede quando la catena MBID non si è completata
+        // (MusicBrainz/Wikidata in errore o rate limit, oppure livello 2
+        // saltato per budget), quando una qualunque richiesta è fallita
+        // per rete/429/5xx, o quando il budget è quasi esaurito e qualche
+        // livello può essere stato saltato. In questi casi l'esito NON è
+        // definitivo e non va congelato in cache: senza questa distinzione
+        // un ripiego inglese restava 30 giorni sotto la chiave italiana e
+        // un "non trovato" 3 giorni, anche se la pagina italiana esisteva.
+        $mbidIncomplete = ($mbid !== '')
+          && (!$this->wikiMbidResolved || $this->wikiMbidTransient);
+        $incomplete = $mbidIncomplete
+          || $this->wikiHttpFailures > 0
+          || $this->wikiTimeLeft() < 1.0;
+
+        $hasDesc = !empty($result['description']);
+        $effLang = (string)($result['lang'] ?? $lang);
+
+        if ($hasDesc && ($effLang === $lang || !$incomplete)) {
+          // Descrizione nella lingua richiesta, oppure ripiego sull'altra
+          // lingua dopo una ricerca completa (la pagina nella lingua
+          // richiesta non esiste): cache lunga.
           $this->setWikiCache($cacheKey, $result, 60 * 60 * 24 * 30);
-        } elseif ($this->wikiHttpSuccesses > 0) {
-          // "Non trovato" credibile: almeno una richiesta HTTP è riuscita,
-          // quindi la rete funzionava. Cache breve: se la pagina viene
-          // creata in seguito, la ricerca riparte dopo pochi giorni.
+        } elseif ($hasDesc) {
+          // Ripiego sull'altra lingua con ricerca incompleta: la descrizione
+          // viene mostrata subito, ma la cache dura poche ore, così la
+          // lingua richiesta viene ritentata appena il servizio risponde.
+          $this->setWikiCache($cacheKey, $result, 60 * 60 * 6);
+        } elseif (!$incomplete && $this->wikiHttpSuccesses > 0) {
+          // "Non trovato" credibile: ricerca completa e rete funzionante.
+          // Cache breve: se la pagina viene creata in seguito, la ricerca
+          // riparte dopo pochi giorni.
           $this->setWikiCache($cacheKey, $result, 60 * 60 * 24 * 3);
         } else {
-          // BLACKOUT TOTALE (nessuna richiesta riuscita): non cachare,
-          // era un problema di rete, non un "non trovato".
+          // Esito vuoto con ricerca incompleta o blackout di rete: non
+          // cachare. Il client mostra il messaggio di problema di rete
+          // con il pulsante di aggiornamento.
           $result['transient'] = true;
           $result['http_failures'] = $this->wikiHttpFailures;
         }
@@ -1921,13 +1956,20 @@ class AlbumController
     if (!is_array($titles)) {
       $titles = $this->resolveMbidSitelinks($mbid, $ua, $debugLog, $debug);
       if ($titles === null) {
-        return $fail('mb-chain'); // errore HTTP nella catena: non cachare
+        // Errore HTTP nella catena: non cachare, e segnala ad apiDescription
+        // che l'assenza della pagina nella lingua richiesta non è definitiva.
+        $this->wikiMbidTransient = true;
+        return $fail('mb-chain');
       }
       // Catena completata (anche se senza sitelink): cache 30 giorni
       $this->setWikiCache($slKey, $titles, 60 * 60 * 24 * 30);
     } elseif ($debug) {
       $debugLog[] = ['step' => 'sitelinks-cache-hit', 'titles' => $titles];
     }
+
+    // Titoli it/en noti: l'esistenza della pagina nella lingua richiesta è
+    // un dato certificato MusicBrainz/Wikidata, non un'ipotesi.
+    $this->wikiMbidResolved = true;
 
     $pageTitle = $titles[$lang] ?? '';
     $pageLang  = $lang;
@@ -1947,7 +1989,14 @@ class AlbumController
       $debugLog[] = ['step' => 'wiki-extract', 'http_code' => $code, 'curl_error' => $err,
                      'extract_length' => strlen($extract)];
     }
-    if ($extract === '') return $fail('empty-extract');
+    if ($extract === '') {
+      // Estratto vuoto per errore di rete/rate limit: la pagina esiste
+      // (sitelink certificato) ma non è stata letta, esito non definitivo.
+      if ($err !== '' || $code === 0 || $code === 429 || $code >= 500) {
+        $this->wikiMbidTransient = true;
+      }
+      return $fail('empty-extract');
+    }
 
     // Nessun filtro euristico qui: la pagina è certificata dalla catena
     // MusicBrainz→Wikidata, quindi l'estratto è per definizione corretto.
