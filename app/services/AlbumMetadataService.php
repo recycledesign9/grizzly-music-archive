@@ -6,10 +6,10 @@ class AlbumMetadataService
 {
     private const MAX_TRACKS = 40;
 
-    // GRIZZLY_SCANNER_EVIDENCE_V1
+    // GRIZZLY_SCANNER_EVIDENCE_V2
     // Cache scanner: la rete viene usata dal worker solo per costruire
     // evidenza persistente. Executor/preflight possono poi lavorare offline.
-    private const SCANNER_EVIDENCE_CACHE_VERSION = 1;
+    private const SCANNER_EVIDENCE_CACHE_VERSION = 2;
     private const SCANNER_EVIDENCE_CACHE_TTL = 2592000; // 30 giorni
     private const SCANNER_EVIDENCE_NEGATIVE_TTL = 900;  // 15 minuti
 
@@ -433,32 +433,65 @@ class AlbumMetadataService
             return $this->emptyScannerEvidence('cache-miss');
         }
 
-        $identity = [
+        $searchedIdentity = [
             'mbid' => '',
             'artist_mbid' => '',
             'release_group' => '',
             'year' => '',
         ];
 
-        $mbid = $releaseMbid;
+        $lookupMbid = $releaseMbid;
 
-        if ($mbid === '') {
-            $identity = $this->identifyRelease($artist, $album, $year);
-            $mbid = strtolower(trim((string)($identity['mbid'] ?? '')));
+        if ($lookupMbid === '') {
+            $searchedIdentity = $this->identifyRelease($artist, $album, $year);
+            $lookupMbid = strtolower(trim((string)($searchedIdentity['mbid'] ?? '')));
         }
 
-        if (!$this->isUuid($mbid)) {
+        if (!$this->isUuid($lookupMbid)) {
             $negative = $this->emptyScannerEvidence('release-not-found');
             $negative['fetched_at'] = time();
             $this->writeScannerEvidenceCache($cacheKey, $negative);
             return $negative;
         }
 
-        $tracks = $this->getTracksFromMusicBrainzRelease($mbid);
+        /*
+         * Always resolve the concrete release entity once we have an MBID.
+         * This single lookup provides:
+         * - canonical release ID after MusicBrainz redirects;
+         * - canonical release-group ID;
+         * - release year;
+         * - complete media/tracklist.
+         *
+         * Previously a tag-supplied release MBID skipped identity lookup and
+         * fetched tracks only, leaving stale/redirected release-group/year tags
+         * untouched. Completeness and identity canonicalization are now separate.
+         */
+        $release = $this->lookupScannerRelease($lookupMbid);
+
+        if (empty($release)) {
+            $negative = $this->emptyScannerEvidence('release-not-found');
+            $negative['release_mbid'] = $lookupMbid;
+            $negative['fetched_at'] = time();
+            $this->writeScannerEvidenceCache($cacheKey, $negative);
+            return $negative;
+        }
+
+        $canonicalMbid = strtolower(trim((string)($release['release_mbid'] ?? '')));
+        if (!$this->isUuid($canonicalMbid)) {
+            $canonicalMbid = $lookupMbid;
+        }
+
+        $tracks = isset($release['tracks']) && is_array($release['tracks'])
+            ? $release['tracks']
+            : [];
 
         if (empty($tracks)) {
             $negative = $this->emptyScannerEvidence('tracklist-not-found');
-            $negative['release_mbid'] = $mbid;
+            $negative['release_mbid'] = $canonicalMbid;
+            $negative['release_group'] = strtolower(trim((string)(
+                $release['release_group'] ?? ''
+            )));
+            $negative['year'] = $release['year'] ?? null;
             $negative['fetched_at'] = time();
             $this->writeScannerEvidenceCache($cacheKey, $negative);
             return $negative;
@@ -486,29 +519,53 @@ class AlbumMetadataService
 
         if (empty($cleanTracks)) {
             $negative = $this->emptyScannerEvidence('tracklist-empty-after-clean');
-            $negative['release_mbid'] = $mbid;
+            $negative['release_mbid'] = $canonicalMbid;
             $negative['fetched_at'] = time();
             $this->writeScannerEvidenceCache($cacheKey, $negative);
             return $negative;
         }
 
-        $resolvedYear = null;
-        $identityYear = trim((string)($identity['year'] ?? ''));
-        if ($identityYear !== '' && preg_match('/^(19|20)\d{2}$/', $identityYear)) {
-            $resolvedYear = (int)$identityYear;
+        $resolvedYear = isset($release['year']) && $release['year'] !== null
+            ? (int)$release['year']
+            : null;
+
+        if (($resolvedYear === null || $resolvedYear <= 0)) {
+            $identityYear = trim((string)($searchedIdentity['year'] ?? ''));
+            if ($identityYear !== '' && preg_match('/^(19|20)\d{2}$/', $identityYear)) {
+                $resolvedYear = (int)$identityYear;
+            }
+        }
+
+        $releaseGroup = strtolower(trim((string)($release['release_group'] ?? '')));
+        if (!$this->isUuid($releaseGroup)) {
+            $releaseGroup = strtolower(trim((string)(
+                $searchedIdentity['release_group'] ?? ''
+            )));
+        }
+
+        $artistMbid = strtolower(trim((string)($release['artist_mbid'] ?? '')));
+        if (!$this->isUuid($artistMbid)) {
+            $artistMbid = strtolower(trim((string)(
+                $searchedIdentity['artist_mbid'] ?? ''
+            )));
         }
 
         $evidence = [
             'status' => 'ok',
-            'source' => 'musicbrainz-release',
-            'release_mbid' => $mbid,
-            'artist_mbid' => strtolower(trim((string)($identity['artist_mbid'] ?? ''))),
-            'release_group' => strtolower(trim((string)($identity['release_group'] ?? ''))),
+            'source' => $releaseMbid !== ''
+                ? 'musicbrainz-release-id'
+                : 'musicbrainz-release-search',
+            'release_mbid' => $canonicalMbid,
+            'artist_mbid' => $artistMbid,
+            'release_group' => $releaseGroup,
             'year' => $resolvedYear,
             'expected_tracks' => count($cleanTracks),
             'tracks' => $cleanTracks,
             'fetched_at' => time(),
             'cache' => 'write',
+            'requested_release_mbid' => $releaseMbid,
+            'canonicalized_release_mbid' => $releaseMbid !== ''
+                && $canonicalMbid !== $releaseMbid,
         ];
 
         if (!$this->writeScannerEvidenceCache($cacheKey, $evidence)) {
@@ -1535,6 +1592,63 @@ class AlbumMetadataService
     // il problema che la regola originale voleva evitare: se una release
     // arriva fin qui, i suoi media sono dischi legittimi dell'album, non
     // bonus disc di un'edizione speciale.
+    /**
+     * Canonical MusicBrainz release lookup used by scanner evidence.
+     *
+     * The response body is authoritative for canonical IDs: MusicBrainz may
+     * redirect obsolete identifiers while returning the current entity. We
+     * never infer redirect equivalence from string similarity.
+     *
+     * @return array<string,mixed>
+     */
+    private function lookupScannerRelease(string $mbid): array
+    {
+        $mbid = strtolower(trim($mbid));
+        if (!$this->isUuid($mbid)) {
+            return [];
+        }
+
+        $url = 'https://musicbrainz.org/ws/2/release/'
+            . rawurlencode($mbid)
+            . '?inc=recordings+media+release-groups+artist-credits&fmt=json';
+
+        $data = $this->httpGetJson($url);
+        if (empty($data) || empty($data['id'])) {
+            return [];
+        }
+
+        $canonicalMbid = strtolower(trim((string)$data['id']));
+        if (!$this->isUuid($canonicalMbid)) {
+            return [];
+        }
+
+        $releaseGroup = strtolower(trim((string)(
+            $data['release-group']['id'] ?? ''
+        )));
+
+        $resolvedYear = null;
+        $logicalDate = trim((string)(
+            $data['release-group']['first-release-date']
+            ?? $data['date']
+            ?? ''
+        ));
+        if ($logicalDate !== '' && preg_match('/^(19|20)\d{2}/', $logicalDate, $m) === 1) {
+            $resolvedYear = (int)$m[0];
+        }
+
+        $media = isset($data['media']) && is_array($data['media'])
+            ? $data['media']
+            : [];
+
+        return [
+            'release_mbid' => $canonicalMbid,
+            'release_group' => $releaseGroup,
+            'artist_mbid' => strtolower(trim($this->artistMbidFromCredit($data))),
+            'year' => $resolvedYear,
+            'tracks' => $this->tracksFromMedia($media),
+        ];
+    }
+
     private function getTracksFromMusicBrainzRelease(string $mbid): array
     {
         $url  = 'https://musicbrainz.org/ws/2/release/' . $mbid . '?inc=recordings+media&fmt=json';
@@ -2219,6 +2333,8 @@ class AlbumMetadataService
             'tracks' => [],
             'fetched_at' => null,
             'cache' => 'none',
+            'requested_release_mbid' => '',
+            'canonicalized_release_mbid' => false,
         ];
     }
 

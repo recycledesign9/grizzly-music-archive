@@ -91,6 +91,58 @@ class TrackMatcher
             return $this->result(true, 'exact', $total, $exactCount, 0, []);
         }
 
+        /*
+         * Deterministic metadata annotation pass.
+         *
+         * A trailing featured-artist credit such as:
+         *
+         *   "Song (ft. Artist)"
+         *   "Song"
+         *
+         * is a contributor annotation, not a fuzzy title variation. Consume
+         * these matches before applying the generic variant budget. Exactly
+         * one side must carry the credit: two titles carrying different
+         * featured-artist credits are not collapsed by this rule.
+         *
+         * Matching remains one-to-one and requires a unique remaining local
+         * title with the same normalized base.
+         */
+        $stillUnmatchedCandidate = [];
+
+        foreach ($unmatchedCandidate as $candidateIndex) {
+            $creditMatches = [];
+
+            foreach (array_keys($remainingLocal) as $localIndex) {
+                if ($this->isTrailingFeaturedArtistVariant(
+                    $candidate[$candidateIndex],
+                    $local[$localIndex]
+                )) {
+                    $creditMatches[] = $localIndex;
+                }
+            }
+
+            if (count($creditMatches) === 1) {
+                unset($remainingLocal[$creditMatches[0]]);
+                $exactCount++;
+                continue;
+            }
+
+            $stillUnmatchedCandidate[] = $candidateIndex;
+        }
+
+        $unmatchedCandidate = $stillUnmatchedCandidate;
+
+        if (empty($unmatchedCandidate)) {
+            return $this->result(
+                true,
+                'deterministic-annotation',
+                $total,
+                $exactCount,
+                0,
+                []
+            );
+        }
+
         $compatibleCount = count($unmatchedCandidate);
         $maxCompatible = $this->maxCompatibleVariants($total);
 
@@ -256,6 +308,84 @@ class TrackMatcher
         }
 
         return 0.0;
+    }
+
+    /**
+     * Return true only for a deterministic trailing featured-artist annotation:
+     * one side has "(feat./ft./featuring Artist)" or "[...]" and the other
+     * side is exactly the same normalized base title without that annotation.
+     *
+     * @param array<string,mixed> $a
+     * @param array<string,mixed> $b
+     */
+    private function isTrailingFeaturedArtistVariant(array $a, array $b): bool
+    {
+        $aBase = $this->stripTrailingFeaturedArtistCredit((string)$a['raw']);
+        $bBase = $this->stripTrailingFeaturedArtistCredit((string)$b['raw']);
+
+        $aHasCredit = $aBase !== null;
+        $bHasCredit = $bBase !== null;
+
+        if ($aHasCredit === $bHasCredit) {
+            return false;
+        }
+
+        $creditedBase = $aHasCredit ? (string)$aBase : (string)$bBase;
+        $plainTitle = $aHasCredit ? (string)$b['raw'] : (string)$a['raw'];
+
+        $creditedKey = $this->deterministicCompact($creditedBase);
+        $plainKey = $this->deterministicCompact($plainTitle);
+
+        return $creditedKey !== '' && $creditedKey === $plainKey;
+    }
+
+    private function stripTrailingFeaturedArtistCredit(string $title): ?string
+    {
+        $title = trim($title);
+
+        if ($title === '') {
+            return null;
+        }
+
+        if (preg_match(
+            '/^(.*?)\s*[\(\[]\s*(?:feat(?:uring)?|ft)\.?\s+[^\)\]]+\s*[\)\]]\s*$/iu',
+            $title,
+            $m
+        ) !== 1) {
+            return null;
+        }
+
+        $base = trim((string)($m[1] ?? ''));
+        return $base !== '' ? $base : null;
+    }
+
+    private function deterministicCompact(string $title): string
+    {
+        $title = trim($title);
+
+        if ($title === '') {
+            return '';
+        }
+
+        if (function_exists('mb_strtolower')) {
+            $title = mb_strtolower($title, 'UTF-8');
+        } else {
+            $title = strtolower($title);
+        }
+
+        $title = $this->normalizeOrthographicVariants($title);
+        $words = preg_split(
+            '/[^\p{L}\p{N}]+/u',
+            $title,
+            -1,
+            PREG_SPLIT_NO_EMPTY
+        );
+
+        if (!is_array($words)) {
+            return '';
+        }
+
+        return implode('', $words);
     }
 
     /**

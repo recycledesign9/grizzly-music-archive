@@ -821,10 +821,15 @@ class AlbumIdentityResolver
             $localTitle = (string)$album['title'];
             $sameTitle = $this->titleMatcher->equivalent($title, $localTitle);
             $relationship = $sameTitle ? 'same-title'
-                : $this->crossTitleRelationship($title, $localTitle, $year);
-            if ($relationship === 'distinct-edition') {
-                continue; // Preserve explicit edition boundaries.
-            }
+                : $this->titleMatcher->relationship(
+                    $title,
+                    $localTitle,
+                    (string)$base['artist'],
+                    $year
+                );
+            // Explicit editions are never auto-reconciled here, but a
+            // complete-tracklist collision must still be surfaced as REVIEW
+            // rather than falling through to NEW_RELEASE/CREATE.
 
             $dbYear = !empty($album['year']) ? (int)$album['year'] : null;
             if ($relationship === 'catalog-alias'
@@ -911,86 +916,23 @@ class AlbumIdentityResolver
             }
         }
 
+        $reviewReasons = ['cross-title-complete-tracklist-collision-needs-review'];
+        foreach ($matches as $match) {
+            if ($match['relationship'] === 'distinct-edition'
+                && !empty($match['exact_tracks'])) {
+                $reviewReasons = ['edition-title-complete-tracklist-collision'];
+                break;
+            }
+        }
+
         return $base + [
             'decision' => self::AMBIGUOUS,
             'confidence' => 'candidate',
             'album_id' => null,
             'match_source' => 'artist+full-tracklist-review',
             'candidate_album_ids' => $this->albumIds($matchedAlbums),
-            'reasons' => ['cross-title-complete-tracklist-collision-needs-review'],
+            'reasons' => $reviewReasons,
         ];
-    }
-
-    /**
-     * Distinguish local catalogue disambiguators (LP numbers and exact year)
-     * from editorial/edition qualifiers. Neither kind is silently stripped by
-     * AlbumTitleMatcher::equivalent(), whose historical meaning is preserved.
-     */
-    private function crossTitleRelationship(string $candidate, string $local, ?int $year): string
-    {
-        $candidateInfo = $this->catalogTitleInfo($candidate, $year);
-        $localInfo = $this->catalogTitleInfo($local, $year);
-
-        $candidateBase = $this->normalizeIdentity($candidateInfo['base']);
-        $localBase = $this->normalizeIdentity($localInfo['base']);
-
-        if ($candidateBase !== '' && $candidateBase === $localBase) {
-            if ($candidateInfo['kind'] === 'catalog'
-                || $localInfo['kind'] === 'catalog') {
-                if ($candidateInfo['kind'] !== 'edition'
-                    && $localInfo['kind'] !== 'edition') {
-                    return 'catalog-alias';
-                }
-            }
-            if ($candidateInfo['kind'] === 'edition'
-                || $localInfo['kind'] === 'edition') {
-                return 'distinct-edition';
-            }
-        }
-
-        // A display title with an explicit edition qualifier does not become
-        // equivalent to a different release solely on matching song names.
-        if ($candidateInfo['kind'] === 'edition' || $localInfo['kind'] === 'edition') {
-            return 'distinct-edition';
-        }
-
-        // Longer branded titles with a base-title prefix (e.g. OKNOTOK) are
-        // not interchangeable aliases without MusicBrainz proof.
-        $a = $this->normalizeIdentity($candidate);
-        $b = $this->normalizeIdentity($local);
-        if ($a !== '' && $b !== '' && $a !== $b
-            && (strpos($a, $b) === 0 || strpos($b, $a) === 0)) {
-            return 'distinct-edition';
-        }
-
-        return 'unrelated';
-    }
-
-    /**
-     * @return array{base:string,kind:string}
-     */
-    private function catalogTitleInfo(string $title, ?int $knownYear): array
-    {
-        $title = trim($title);
-        if (preg_match('/^(.*?)\s+LP\s*([2-9]|[1-9][0-9]+)\s*$/iu', $title, $m) === 1
-            && trim($m[1]) !== '') {
-            return ['base' => trim($m[1]), 'kind' => 'catalog'];
-        }
-
-        if (preg_match('/^(.*?)\s*[\(\[\{]([^()\[\]{}]+)[\)\]\}]\s*$/u', $title, $m) === 1
-            && trim($m[1]) !== '') {
-            $qualifier = trim($m[2]);
-            if (preg_match('/^LP\s*([2-9]|[1-9][0-9]+)$/iu', $qualifier) === 1) {
-                return ['base' => trim($m[1]), 'kind' => 'catalog'];
-            }
-            if ($knownYear !== null && preg_match('/^(19|20)[0-9]{2}$/', $qualifier) === 1
-                && (int)$qualifier === $knownYear) {
-                return ['base' => trim($m[1]), 'kind' => 'catalog'];
-            }
-            return ['base' => trim($m[1]), 'kind' => 'edition'];
-        }
-
-        return ['base' => $title, 'kind' => 'bare'];
     }
 
     /** @param array<int,string> $candidateTracks */

@@ -117,6 +117,156 @@ final class AlbumTitleMatcher
     }
 
     /**
+     * Classify the semantic relationship between two display titles without
+     * broadening equivalent(). This is intentionally conservative and is meant
+     * to be combined with independent evidence (artist/year/tracklist/MBID).
+     *
+     * Returned values:
+     *   same-title       normal exact/qualified equivalence;
+     *   catalog-alias    cataloguing-only representation difference
+     *                    (numbered LP shorthand/suffix or exact year suffix);
+     *   distinct-edition explicit edition/disambiguation boundary;
+     *   unrelated        no safe title relationship.
+     */
+    public function relationship(
+        string $left,
+        string $right,
+        string $artist = '',
+        ?int $knownYear = null
+    ): string {
+        $leftInfo = $this->catalogTitleInfo($left, $artist, $knownYear);
+        $rightInfo = $this->catalogTitleInfo($right, $artist, $knownYear);
+
+        $leftBase = $this->normalizeIdentity($leftInfo['base']);
+        $rightBase = $this->normalizeIdentity($rightInfo['base']);
+
+        // Catalogue syntax must be classified before generic normalized title
+        // equivalence. Otherwise "Artist LP3" and "Artist (LP3)" normalize to
+        // the same string and the catalogue relationship is lost as same-title.
+        if ($leftBase !== '' && $leftBase === $rightBase) {
+            if ($leftInfo['kind'] === 'catalog' && $rightInfo['kind'] === 'catalog') {
+                $leftKey = (string)$leftInfo['catalog_key'];
+                $rightKey = (string)$rightInfo['catalog_key'];
+
+                if ($leftKey !== '' && $rightKey !== '' && $leftKey !== $rightKey) {
+                    $leftIsLp = strpos($leftKey, 'lp:') === 0;
+                    $rightIsLp = strpos($rightKey, 'lp:') === 0;
+
+                    // Two explicit numbered LP identities are distinct when the
+                    // numbers differ. A known-year display qualifier, however,
+                    // is only another catalogue representation of the same base
+                    // and may still be proven by year + full tracklist.
+                    if ($leftIsLp && $rightIsLp) {
+                        return 'distinct-edition';
+                    }
+                }
+
+                return 'catalog-alias';
+            }
+
+            if ($leftInfo['kind'] === 'catalog' || $rightInfo['kind'] === 'catalog') {
+                return 'catalog-alias';
+            }
+        }
+
+        // Preserve normal title equivalence after catalogue-only forms have
+        // had a chance to identify themselves.
+        if ($this->equivalent($left, $right)) {
+            return 'same-title';
+        }
+
+        if ($leftInfo['kind'] === 'edition' || $rightInfo['kind'] === 'edition') {
+            return 'distinct-edition';
+        }
+
+        // Longer branded titles with a base-title prefix are not silently
+        // interchangeable aliases (for example OK Computer vs OKNOTOK).
+        $a = $this->normalizeIdentity($left);
+        $b = $this->normalizeIdentity($right);
+        if ($a !== '' && $b !== '' && $a !== $b
+            && (strpos($a, $b) === 0 || strpos($b, $a) === 0)) {
+            return 'distinct-edition';
+        }
+
+        return 'unrelated';
+    }
+
+    /**
+     * Parse only catalogue-style disambiguators. A bare "LP3" can be resolved
+     * only when the caller also supplies the artist; this prevents the shorthand
+     * from becoming a global fuzzy alias.
+     *
+     * @return array{base:string,kind:string,catalog_key:string}
+     */
+    private function catalogTitleInfo(
+        string $title,
+        string $artist,
+        ?int $knownYear
+    ): array {
+        $title = $this->cleanDisplay($title);
+        $artist = $this->cleanDisplay($artist);
+
+        if ($title === '') {
+            return ['base' => '', 'kind' => 'bare', 'catalog_key' => ''];
+        }
+
+        // Local shorthand: "LP3". It has meaning only in the scope of the
+        // already-known artist.
+        if (preg_match('/^LP\s*([2-9]|[1-9][0-9]+)$/iu', $title, $m) === 1) {
+            return [
+                'base' => $artist,
+                'kind' => 'catalog',
+                'catalog_key' => 'lp:' . (int)$m[1],
+            ];
+        }
+
+        // Display form: "Artist LP3".
+        if (preg_match('/^(.*?)\s+LP\s*([2-9]|[1-9][0-9]+)\s*$/iu', $title, $m) === 1
+            && trim((string)$m[1]) !== '') {
+            return [
+                'base' => trim((string)$m[1]),
+                'kind' => 'catalog',
+                'catalog_key' => 'lp:' . (int)$m[2],
+            ];
+        }
+
+        $parts = $this->splitFinalQualifier($title);
+        if ($parts['qualifier'] !== null) {
+            $qualifier = trim((string)$parts['qualifier']);
+
+            if (preg_match('/^LP\s*([2-9]|[1-9][0-9]+)$/iu', $qualifier, $m) === 1) {
+                return [
+                    'base' => (string)$parts['base'],
+                    'kind' => 'catalog',
+                    'catalog_key' => 'lp:' . (int)$m[1],
+                ];
+            }
+
+            if ($knownYear !== null
+                && preg_match('/^(19|20)[0-9]{2}$/', $qualifier) === 1
+                && (int)$qualifier === $knownYear) {
+                return [
+                    'base' => (string)$parts['base'],
+                    'kind' => 'catalog',
+                    'catalog_key' => 'year:' . $knownYear,
+                ];
+            }
+
+            return [
+                'base' => (string)$parts['base'],
+                'kind' => 'edition',
+                'catalog_key' => '',
+            ];
+        }
+
+        return [
+            'base' => $title,
+            'kind' => 'bare',
+            'catalog_key' => '',
+        ];
+    }
+
+    /**
      * @return array{base:string,qualifier:?string}
      */
     private function splitFinalQualifier(string $title): array
