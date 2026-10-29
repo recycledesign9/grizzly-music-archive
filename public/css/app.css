@@ -2854,11 +2854,6 @@ body:has(#sticky-player[style*="flex"]) {
   gap: 8px;
 }
 
-/* ---- FORMATI: la barra è la .grz-formatbar della Panoramica ---- */
-.artist-formats {
-  margin-bottom: 2.25rem;
-}
-
 /* ---- RESPONSIVE (tablet) ---- */
 @media (max-width: 991.98px) {
   .artist-hero {

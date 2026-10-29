@@ -31,20 +31,6 @@ $mainGenre = $stats['genres'][0] ?? '';
 // Discografia ufficiale gia' recuperata?
 $discoFetched = !empty($artist['disco_fetched_at']);
 
-// Barra dei formati: stessa componente della Panoramica
-// (.grz-formatbar). Conteggi dalla tabella ponte: un album
-// vinile+CD conta 1 vinile E 1 CD, come in getAlbumStats().
-$fmtSegments = [
-  ['accent' => 'vinyl',   'label' => 'Vinili',       'count' => (int)($stats['vinili']   ?? 0)],
-  ['accent' => 'cd',      'label' => 'CD',           'count' => (int)($stats['cd']       ?? 0)],
-  ['accent' => 'tape',    'label' => 'Musicassette', 'count' => (int)($stats['cassette'] ?? 0)],
-  ['accent' => 'digital', 'label' => 'Digital',      'count' => (int)($stats['digital']  ?? 0)],
-];
-$fmtTotal = 0;
-foreach ($fmtSegments as $s) {
-  $fmtTotal += $s['count'];
-}
-
 /* PHP 7.4 compatibile. Chiave del colore formato nel registro:
    segue i token --grz-fmt-* usati dai badge formato. */
 if (!function_exists('artistLedgerFormatKey')) {
@@ -140,29 +126,6 @@ if (!function_exists('artistLedgerFormatKey')) {
       <?= $artistImg ? 'style="background-image:url(\'' . $artistImg . '\')"' : '' ?>></div>
   </div>
 </div>
-
-<!-- ============================================================
-     FORMATI IN ARCHIVIO (stessa barra della Panoramica)
-     ============================================================ -->
-<?php if ($fmtTotal > 0): ?>
-  <section class="artist-formats" aria-label="Formati in archivio">
-    <div class="grz-formatbar" aria-hidden="true">
-      <?php foreach ($fmtSegments as $s): if ($s['count'] <= 0) continue; ?>
-        <span class="grz-formatbar__seg grz-formatbar__seg--<?= $s['accent'] ?>"
-          style="flex: <?= $s['count'] ?> 1 0%"
-          title="<?= $s['label'] ?>: <?= $s['count'] ?>"></span>
-      <?php endforeach; ?>
-    </div>
-    <div class="grz-formatbar__legend">
-      <?php foreach ($fmtSegments as $s): if ($s['count'] <= 0) continue; ?>
-        <span class="grz-formatbar__chip">
-          <span class="grz-formatbar__dot grz-formatbar__dot--<?= $s['accent'] ?>"></span>
-          <strong><?= $s['count'] ?></strong>&nbsp;<?= $s['label'] ?>
-        </span>
-      <?php endforeach; ?>
-    </div>
-  </section>
-<?php endif; ?>
 
 <!-- ============================================================
      DISCOGRAFIA E ARCHIVIO
