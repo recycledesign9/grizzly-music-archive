@@ -1,4 +1,4 @@
-FROM php:8.3.36-apache
+FROM php:8.3.36-apache@sha256:11093ce0630a495ce9436647d2939b5ca44b411d2a04917afe8b2d051ae2d2ed
 
 RUN apt-get update && apt-get install -y \
         libpng-dev \
