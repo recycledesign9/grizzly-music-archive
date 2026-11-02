@@ -670,8 +670,16 @@ class MediaImportService
         // --- 1) Analizza tutte le tracce del gruppo (tutti i dischi) ---
         $files = [];
         foreach ($parts as $p) {
+            $explicitDiscPart = $this->discNumberFromName(
+                basename((string)$p['dir'])
+            ) !== null;
+
             foreach ($this->listByExt($p['dir'], self::AUDIO_EXT) as $abs) {
-                $files[] = ['abs' => $abs, 'disc' => $p['disc']];
+                $files[] = [
+                    'abs' => $abs,
+                    'disc' => $p['disc'],
+                    'explicit_disc_part' => $explicitDiscPart,
+                ];
             }
         }
 
@@ -692,15 +700,18 @@ class MediaImportService
         foreach ($files as $f) {
             $meta = $this->analyze($f['abs']);
 
-            $disc = $f['disc'];
-            if ($meta['disc'] !== null && $meta['disc'] > 0 && $disc === 1) {
-                $disc = $meta['disc'];
-            }
-
-            $trackNum = $meta['track'];
-            if ($trackNum === null) {
-                $trackNum = $this->trackNumberFromFilename(basename($f['abs']));
-            }
+            $filenameTrackNum = $this->trackNumberFromFilename(
+                basename($f['abs'])
+            );
+            $order = $this->resolveScannerTrackOrder(
+                (int)$f['disc'],
+                !empty($f['explicit_disc_part']),
+                $meta['disc'],
+                $meta['track'],
+                $filenameTrackNum
+            );
+            $disc = $order['disc'];
+            $trackNum = $order['track'];
 
             $filenameTitle = $this->titleFromFilename(basename($f['abs']));
             $metaAlbum     = $this->cleanRepeatedParentheticalTitle($meta['album']);
@@ -2167,6 +2178,53 @@ class MediaImportService
      * MP3 e FLAC con identico nome-base nella stessa directory sono due encoding
      * della stessa traccia. Lo scanner preferisce FLAC ma non cancella file.
      */
+    /**
+     * Resolve the ordering coordinates used by the scanner for one audio file.
+     *
+     * Explicit CD1/CD2/Disc N folders are authoritative album-part boundaries.
+     * When an embedded DISCNUMBER contradicts that structural boundary, the
+     * tag must not move the file to another disc. In that conflict case the
+     * leading track number from the filename is preferred when available,
+     * because real-world broken tags can also restart TRACKNUMBER incorrectly.
+     *
+     * Ordinary/flat folders preserve the historical tag-first behaviour.
+     *
+     * @return array{disc:int,track:?int}
+     */
+    private function resolveScannerTrackOrder(
+        int $partDisc,
+        bool $explicitDiscPart,
+        ?int $tagDisc,
+        ?int $tagTrack,
+        ?int $filenameTrack
+    ): array {
+        $disc = max(1, $partDisc);
+        $tagDisc = $tagDisc !== null && $tagDisc > 0 ? (int)$tagDisc : null;
+        $trackNum = $tagTrack !== null ? (int)$tagTrack : null;
+        $filenameTrack = $filenameTrack !== null ? (int)$filenameTrack : null;
+
+        if ($explicitDiscPart) {
+            if (
+                $tagDisc !== null
+                && $tagDisc !== $disc
+                && $filenameTrack !== null
+            ) {
+                $trackNum = $filenameTrack;
+            }
+        } elseif ($tagDisc !== null && $disc === 1) {
+            $disc = $tagDisc;
+        }
+
+        if ($trackNum === null) {
+            $trackNum = $filenameTrack;
+        }
+
+        return [
+            'disc' => $disc,
+            'track' => $trackNum,
+        ];
+    }
+
     private function deduplicateTrackCandidates(array $candidates): array
     {
         $out = [];

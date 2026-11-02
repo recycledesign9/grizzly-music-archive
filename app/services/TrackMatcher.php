@@ -278,6 +278,322 @@ class TrackMatcher
         );
     }
 
+
+    /**
+     * Evidence-oriented comparison used by the album identity resolver.
+     *
+     * Unlike compare(), this method does NOT decide album identity and does not
+     * fail the whole comparison because one title is unmatched. It measures how
+     * much of the two tracklists can be paired conservatively, one-to-one, using
+     * exactly the same title primitives as compare().
+     *
+     * This intentionally leaves compare() semantics unchanged for callers that
+     * need an all-or-nothing complete-tracklist verdict.
+     *
+     * @param array<int,string> $candidateTracks
+     * @param array<int,string> $localTracks
+     * @return array<string,mixed>
+     */
+    public function analyzeEvidence(array $candidateTracks, array $localTracks): array
+    {
+        $candidateTracks = array_values(array_map('strval', $candidateTracks));
+        $localTracks = array_values(array_map('strval', $localTracks));
+
+        $candidateTotal = count($candidateTracks);
+        $localTotal = count($localTracks);
+        $denominator = max($candidateTotal, $localTotal);
+
+        $empty = [
+            'candidate_total' => $candidateTotal,
+            'local_total' => $localTotal,
+            'count_equal' => $candidateTotal > 0 && $candidateTotal === $localTotal,
+            'exact_count' => 0,
+            'deterministic_count' => 0,
+            'compatible_count' => 0,
+            'matched_count' => 0,
+            'unmatched_candidate_count' => $candidateTotal,
+            'unmatched_local_count' => $localTotal,
+            'candidate_coverage' => 0.0,
+            'local_coverage' => 0.0,
+            'coverage' => 0.0,
+            'similarity' => 0.0,
+            'variant_ratio' => 0.0,
+            'conservative_full_match' => false,
+            'invalid_titles' => [],
+            'details' => [],
+        ];
+
+        if ($candidateTotal === 0 || $localTotal === 0) {
+            return $empty;
+        }
+
+        $candidate = [];
+        $invalid = [];
+
+        foreach ($candidateTracks as $index => $title) {
+            $row = $this->prepareTitle($title);
+            if ($row['compact'] === '') {
+                $invalid[] = [
+                    'side' => 'candidate',
+                    'index' => $index,
+                    'title' => $title,
+                ];
+            }
+            $candidate[$index] = $row;
+        }
+
+        $local = [];
+        foreach ($localTracks as $index => $title) {
+            $row = $this->prepareTitle($title);
+            if ($row['compact'] === '') {
+                $invalid[] = [
+                    'side' => 'local',
+                    'index' => $index,
+                    'title' => $title,
+                ];
+            }
+            $local[$index] = $row;
+        }
+
+        if (!empty($invalid)) {
+            $empty['invalid_titles'] = $invalid;
+            return $empty;
+        }
+
+        $remainingLocal = array_fill_keys(array_keys($local), true);
+        $remainingCandidate = [];
+        $exactCount = 0;
+        $deterministicCount = 0;
+        $compatibleCount = 0;
+        $weighted = 0.0;
+        $details = [];
+
+        // Phase 1: exact normalized multiset matching.
+        foreach ($candidate as $candidateIndex => $candidateRow) {
+            $matchedLocalIndex = null;
+
+            foreach (array_keys($remainingLocal) as $localIndex) {
+                if ($candidateRow['compact'] === $local[$localIndex]['compact']) {
+                    $matchedLocalIndex = $localIndex;
+                    break;
+                }
+            }
+
+            if ($matchedLocalIndex !== null) {
+                unset($remainingLocal[$matchedLocalIndex]);
+                $exactCount++;
+                $weighted += 1.0;
+                continue;
+            }
+
+            $remainingCandidate[] = $candidateIndex;
+        }
+
+        // Phase 2: deterministic featured-artist annotations.
+        $stillRemaining = [];
+        foreach ($remainingCandidate as $candidateIndex) {
+            $matches = [];
+
+            foreach (array_keys($remainingLocal) as $localIndex) {
+                if ($this->isTrailingFeaturedArtistVariant(
+                    $candidate[$candidateIndex],
+                    $local[$localIndex]
+                )) {
+                    $matches[] = $localIndex;
+                }
+            }
+
+            if (count($matches) === 1) {
+                $localIndex = (int)$matches[0];
+                unset($remainingLocal[$localIndex]);
+                $deterministicCount++;
+                $weighted += 0.99;
+                $details[] = [
+                    'kind' => 'deterministic',
+                    'candidate_index' => $candidateIndex,
+                    'candidate_title' => $candidateTracks[$candidateIndex],
+                    'local_index' => $localIndex,
+                    'local_title' => $localTracks[$localIndex],
+                    'score' => 0.99,
+                ];
+                continue;
+            }
+
+            $stillRemaining[] = $candidateIndex;
+        }
+        $remainingCandidate = $stillRemaining;
+
+        // Phase 3: conservative compatible-title graph. Unlike compare(), an
+        // unmatched node is evidence, not an immediate global failure.
+        $edges = [];
+        foreach ($remainingCandidate as $candidateIndex) {
+            $edges[$candidateIndex] = [];
+
+            foreach (array_keys($remainingLocal) as $localIndex) {
+                $score = $this->compatibilityScore(
+                    $candidate[$candidateIndex],
+                    $local[$localIndex]
+                );
+
+                if ($score > 0.0) {
+                    $edges[$candidateIndex][$localIndex] = $score;
+                }
+            }
+
+            arsort($edges[$candidateIndex], SORT_NUMERIC);
+        }
+
+        usort($remainingCandidate, function (int $a, int $b) use ($edges): int {
+            $countCmp = count($edges[$a]) <=> count($edges[$b]);
+            if ($countCmp !== 0) {
+                return $countCmp;
+            }
+
+            $aBest = empty($edges[$a]) ? 0.0 : max($edges[$a]);
+            $bBest = empty($edges[$b]) ? 0.0 : max($edges[$b]);
+            return $bBest <=> $aBest;
+        });
+
+        $matchedLocal = [];
+        $matchedCandidate = [];
+
+        $tryMatch = function (
+            int $candidateIndex,
+            array &$seen
+        ) use (
+            &$tryMatch,
+            &$matchedLocal,
+            &$matchedCandidate,
+            $edges
+        ): bool {
+            foreach ($edges[$candidateIndex] as $localIndex => $score) {
+                if (isset($seen[$localIndex])) {
+                    continue;
+                }
+
+                $seen[$localIndex] = true;
+
+                if (!isset($matchedLocal[$localIndex])) {
+                    $matchedLocal[$localIndex] = $candidateIndex;
+                    $matchedCandidate[$candidateIndex] = [
+                        'local_index' => $localIndex,
+                        'score' => $score,
+                    ];
+                    return true;
+                }
+
+                $otherCandidate = $matchedLocal[$localIndex];
+                if ($tryMatch($otherCandidate, $seen)) {
+                    $matchedLocal[$localIndex] = $candidateIndex;
+                    $matchedCandidate[$candidateIndex] = [
+                        'local_index' => $localIndex,
+                        'score' => $score,
+                    ];
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+        foreach ($remainingCandidate as $candidateIndex) {
+            if (empty($edges[$candidateIndex])) {
+                continue;
+            }
+
+            $seen = [];
+            $tryMatch($candidateIndex, $seen);
+        }
+
+        foreach ($matchedCandidate as $candidateIndex => $match) {
+            $localIndex = (int)$match['local_index'];
+            $score = (float)$match['score'];
+            $compatibleCount++;
+            $weighted += $score;
+            unset($remainingLocal[$localIndex]);
+
+            $details[] = [
+                'kind' => 'compatible',
+                'candidate_index' => $candidateIndex,
+                'candidate_title' => $candidateTracks[$candidateIndex],
+                'local_index' => $localIndex,
+                'local_title' => $localTracks[$localIndex],
+                'score' => $score,
+            ];
+        }
+
+        $matchedCount = $exactCount + $deterministicCount + $compatibleCount;
+        $unmatchedCandidateCount = max(0, $candidateTotal - $matchedCount);
+        $unmatchedLocalCount = max(0, $localTotal - $matchedCount);
+        $candidateCoverage = $candidateTotal > 0
+            ? $matchedCount / $candidateTotal
+            : 0.0;
+        $localCoverage = $localTotal > 0
+            ? $matchedCount / $localTotal
+            : 0.0;
+        $coverage = $denominator > 0
+            ? $matchedCount / $denominator
+            : 0.0;
+        $similarity = $denominator > 0
+            ? $weighted / $denominator
+            : 0.0;
+
+        $variantCount = $deterministicCount + $compatibleCount;
+        $variantRatio = $candidateTotal > 0
+            ? $variantCount / $candidateTotal
+            : 0.0;
+
+        foreach ($candidateTracks as $index => $title) {
+            if (isset($matchedCandidate[$index])) {
+                continue;
+            }
+
+            // Exact/deterministic matches were consumed before this map existed;
+            // only report a candidate as unmatched if it survived those phases.
+            if (!in_array($index, $remainingCandidate, true)) {
+                continue;
+            }
+
+            $details[] = [
+                'kind' => 'unmatched-candidate',
+                'candidate_index' => $index,
+                'candidate_title' => $title,
+            ];
+        }
+
+        foreach (array_keys($remainingLocal) as $localIndex) {
+            $details[] = [
+                'kind' => 'unmatched-local',
+                'local_index' => $localIndex,
+                'local_title' => $localTracks[$localIndex],
+            ];
+        }
+
+        $conservativeFullMatch = $candidateTotal === $localTotal
+            && $matchedCount === $candidateTotal
+            && $variantCount <= $this->maxCompatibleVariants($candidateTotal);
+
+        return [
+            'candidate_total' => $candidateTotal,
+            'local_total' => $localTotal,
+            'count_equal' => $candidateTotal === $localTotal,
+            'exact_count' => $exactCount,
+            'deterministic_count' => $deterministicCount,
+            'compatible_count' => $compatibleCount,
+            'matched_count' => $matchedCount,
+            'unmatched_candidate_count' => $unmatchedCandidateCount,
+            'unmatched_local_count' => $unmatchedLocalCount,
+            'candidate_coverage' => $candidateCoverage,
+            'local_coverage' => $localCoverage,
+            'coverage' => $coverage,
+            'similarity' => $similarity,
+            'variant_ratio' => $variantRatio,
+            'conservative_full_match' => $conservativeFullMatch,
+            'invalid_titles' => [],
+            'details' => $details,
+        ];
+    }
+
     /**
      * @param array<string,mixed> $a
      * @param array<string,mixed> $b

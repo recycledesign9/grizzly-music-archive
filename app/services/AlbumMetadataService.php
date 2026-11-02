@@ -13,6 +13,12 @@ class AlbumMetadataService
     private const SCANNER_EVIDENCE_CACHE_TTL = 2592000; // 30 giorni
     private const SCANNER_EVIDENCE_NEGATIVE_TTL = 900;  // 15 minuti
 
+    // GRIZZLY_SCANNER_EDITION_EVIDENCE_V1
+    // Cache separata per la variante di tracklist scelta dallo scanner.
+    // La chiave include la firma della tracklist candidata: due edizioni
+    // diverse dello stesso album non devono mai condividere l'evidenza.
+    private const SCANNER_EDITION_EVIDENCE_CACHE_VERSION = 1;
+
     // EDIZIONI (ottobre 2026). Versione della logica che costruisce le
     // varianti di tracklist di un release-group: cambiandola, le cache
     // in cache/album-editions/ scritte con la logica precedente vengono
@@ -571,6 +577,238 @@ class AlbumMetadataService
         if (!$this->writeScannerEvidenceCache($cacheKey, $evidence)) {
             // Fail closed: se non possiamo rendere l'evidenza riutilizzabile
             // dall'Executor, il worker non deve autorizzare l'import.
+            return $this->emptyScannerEvidence('cache-write-failed');
+        }
+
+        return $evidence;
+    }
+
+    // ----------------------------------------------------------
+    // GRIZZLY_SCANNER_EDITION_EVIDENCE_V1
+    //
+    // Quando la release scelta dalla ricerca leggera non rappresenta la
+    // tracklist fisica osservata, prova le varianti ufficiali DELLO STESSO
+    // release-group. Non cambia mai release quando i file dichiarano un
+    // release-MBID esplicito: quel caso resta un conflitto da trattare
+    // conservativamente nel readiness.
+    //
+    // La selezione qui NON certifica da sola la completezza. Restituisce
+    // soltanto una release candidata con tracklist 1:1; AlbumReadinessService
+    // esegue comunque il proprio TrackMatcher prima di dichiarare READY.
+    //
+    // @param string[] $candidateTracks
+    // @return array<string,mixed>
+    // ----------------------------------------------------------
+    public function resolveScannerEditionEvidence(
+        string $artist,
+        string $album,
+        int $year,
+        string $releaseGroup,
+        array $candidateTracks,
+        string $artistMbid = '',
+        bool $allowNetwork = true
+    ): array {
+        $artist = trim($artist);
+        $album = trim($album);
+        $year = max(0, $year);
+        $releaseGroup = strtolower(trim($releaseGroup));
+        $artistMbid = strtolower(trim($artistMbid));
+
+        if (
+            $artist === ''
+            || $album === ''
+            || !$this->isUuid($releaseGroup)
+            || empty($candidateTracks)
+        ) {
+            return $this->emptyScannerEvidence('edition-invalid-query');
+        }
+
+        $candidateTitles = [];
+        $candidateKeys = [];
+
+        foreach ($candidateTracks as $trackTitle) {
+            $trackTitle = trim((string)$trackTitle);
+            if ($trackTitle === '') {
+                return $this->emptyScannerEvidence('edition-candidate-tracklist-invalid');
+            }
+
+            $key = $this->titleKey($trackTitle);
+            if ($key === '') {
+                return $this->emptyScannerEvidence('edition-candidate-tracklist-invalid');
+            }
+
+            $candidateTitles[] = $trackTitle;
+            $candidateKeys[] = $key;
+        }
+
+        $cacheKey = $this->scannerEditionEvidenceCacheKey(
+            $artist,
+            $album,
+            $year,
+            $releaseGroup,
+            $candidateKeys
+        );
+
+        $cached = $this->readScannerEvidenceCache($cacheKey);
+        if ($cached !== null) {
+            $cached['cache'] = 'hit';
+            return $cached;
+        }
+
+        // Cache delle edizioni già costruita dall'app: può essere usata anche
+        // in preflight offline. Se manca, il browse MusicBrainz è consentito
+        // soltanto al worker su candidato stabile.
+        $editions = $this->readEditionsCache($releaseGroup);
+
+        if ($editions === null) {
+            if (!$allowNetwork) {
+                return $this->emptyScannerEvidence('edition-cache-miss');
+            }
+
+            $editions = $this->getReleaseGroupEditions($releaseGroup, []);
+        }
+
+        if (empty($editions['groups']) || !is_array($editions['groups'])) {
+            $negative = $this->emptyScannerEvidence('edition-release-group-unavailable');
+            $negative['release_group'] = $releaseGroup;
+            $negative['fetched_at'] = time();
+            $this->writeScannerEvidenceCache($cacheKey, $negative);
+            return $negative;
+        }
+
+        $matches = [];
+
+        foreach ($editions['groups'] as $group) {
+            if (!is_array($group)) {
+                continue;
+            }
+
+            $tracks = isset($group['tracks']) && is_array($group['tracks'])
+                ? $group['tracks']
+                : [];
+
+            if (count($tracks) !== count($candidateTitles)) {
+                continue;
+            }
+
+            $groupKeys = isset($group['title_keys']) && is_array($group['title_keys'])
+                ? array_values(array_map('strval', $group['title_keys']))
+                : [];
+
+            if (count($groupKeys) !== count($candidateKeys)) {
+                $groupKeys = [];
+                foreach ($tracks as $track) {
+                    if (!is_array($track)) {
+                        $groupKeys = [];
+                        break;
+                    }
+
+                    $title = trim((string)($track['title'] ?? ''));
+                    if ($title === '') {
+                        $groupKeys = [];
+                        break;
+                    }
+
+                    $groupKeys[] = $this->titleKey($title);
+                }
+            }
+
+            if (count($groupKeys) !== count($candidateKeys)) {
+                continue;
+            }
+
+            list($missing, $extra) = $this->diffTitleKeys(
+                $candidateKeys,
+                $groupKeys
+            );
+
+            if (!empty($missing) || !empty($extra)) {
+                continue;
+            }
+
+            $signature = trim((string)($group['signature'] ?? ''));
+            if ($signature === '') {
+                $signature = implode('|', $groupKeys);
+            }
+
+            $matches[$signature] = $group;
+        }
+
+        if (count($matches) === 0) {
+            $negative = $this->emptyScannerEvidence('edition-tracklist-not-found');
+            $negative['release_group'] = $releaseGroup;
+            $negative['fetched_at'] = time();
+            $this->writeScannerEvidenceCache($cacheKey, $negative);
+            return $negative;
+        }
+
+        if (count($matches) !== 1) {
+            $negative = $this->emptyScannerEvidence('edition-tracklist-ambiguous');
+            $negative['release_group'] = $releaseGroup;
+            $negative['fetched_at'] = time();
+            $this->writeScannerEvidenceCache($cacheKey, $negative);
+            return $negative;
+        }
+
+        $match = reset($matches);
+        if (!is_array($match)) {
+            return $this->emptyScannerEvidence('edition-tracklist-not-found');
+        }
+
+        $releaseMbid = strtolower(trim((string)($match['mbid'] ?? '')));
+        if (!$this->isUuid($releaseMbid)) {
+            return $this->emptyScannerEvidence('edition-release-not-found');
+        }
+
+        $cleanTracks = [];
+        foreach ((array)($match['tracks'] ?? []) as $track) {
+            if (!is_array($track)) {
+                continue;
+            }
+
+            $title = trim((string)($track['title'] ?? ''));
+            if ($title === '') {
+                continue;
+            }
+
+            $cleanTracks[] = [
+                'position' => isset($track['position'])
+                    ? max(1, (int)$track['position'])
+                    : count($cleanTracks) + 1,
+                'title' => $title,
+                'duration' => max(0, (int)($track['duration'] ?? 0)),
+            ];
+        }
+
+        if (count($cleanTracks) !== count($candidateTitles)) {
+            return $this->emptyScannerEvidence('edition-tracklist-invalid');
+        }
+
+        $resolvedYear = max(0, (int)($editions['first_year'] ?? 0));
+        if ($resolvedYear <= 0) {
+            $resolvedYear = max(0, (int)($match['year'] ?? 0));
+        }
+        if ($resolvedYear <= 0) {
+            $resolvedYear = $year;
+        }
+
+        $evidence = [
+            'status' => 'ok',
+            'source' => 'musicbrainz-release-group-edition',
+            'release_mbid' => $releaseMbid,
+            'artist_mbid' => $this->isUuid($artistMbid) ? $artistMbid : '',
+            'release_group' => $releaseGroup,
+            'year' => $resolvedYear > 0 ? $resolvedYear : null,
+            'expected_tracks' => count($cleanTracks),
+            'tracks' => $cleanTracks,
+            'fetched_at' => time(),
+            'cache' => 'write',
+            'requested_release_mbid' => '',
+            'canonicalized_release_mbid' => false,
+            'scanner_edition_fallback' => true,
+        ];
+
+        if (!$this->writeScannerEvidenceCache($cacheKey, $evidence)) {
             return $this->emptyScannerEvidence('cache-write-failed');
         }
 
@@ -2361,6 +2599,49 @@ class AlbumMetadataService
             'album' => $normalize($album),
             'year' => max(0, $year),
             'release_mbid' => strtolower(trim($releaseMbid)),
+        ];
+
+        $json = json_encode(
+            $payload,
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+        );
+
+        if ($json === false) {
+            $json = serialize($payload);
+        }
+
+        return hash('sha256', $json);
+    }
+
+    /**
+     * @param string[] $candidateKeys
+     */
+    private function scannerEditionEvidenceCacheKey(
+        string $artist,
+        string $album,
+        int $year,
+        string $releaseGroup,
+        array $candidateKeys
+    ): string {
+        $normalize = static function (string $value): string {
+            $value = trim($value);
+            $value = preg_replace('/\s+/u', ' ', $value);
+            if (!is_string($value)) {
+                $value = '';
+            }
+            return function_exists('mb_strtolower')
+                ? mb_strtolower($value, 'UTF-8')
+                : strtolower($value);
+        };
+
+        $payload = [
+            'kind' => 'scanner-edition-evidence',
+            'v' => self::SCANNER_EDITION_EVIDENCE_CACHE_VERSION,
+            'artist' => $normalize($artist),
+            'album' => $normalize($album),
+            'year' => max(0, $year),
+            'release_group' => strtolower(trim($releaseGroup)),
+            'tracks' => array_values(array_map('strval', $candidateKeys)),
         ];
 
         $json = json_encode(

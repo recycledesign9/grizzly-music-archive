@@ -351,6 +351,17 @@ class AlbumReadinessService
             isset($tagEvidence['conflicts']) && is_array($tagEvidence['conflicts']) ? $tagEvidence['conflicts'] : []
         )));
 
+        // GRIZZLY_TAG_COMPLETENESS_FALLBACK_V1
+        // TRACKTOTAL/DISCTOTAL conflicts describe an unreliable completeness
+        // source, not necessarily an identity conflict. Keep them visible for
+        // diagnostics, but allow a stronger independent external tracklist to
+        // supersede them. Identity conflicts remain hard blockers.
+        $tagEvidenceConflicts = isset($tagEvidence['conflicts'])
+            && is_array($tagEvidence['conflicts'])
+                ? array_values(array_unique($tagEvidence['conflicts']))
+                : [];
+        $tagEvidenceSuperseded = false;
+
         if ($tagExpected !== null && $tagExpected > 0) {
             // TRACKTOTAL/TOTALTRACKS coerente sui file e' una prova diretta
             // della completezza attesa del candidato corrente.
@@ -403,7 +414,8 @@ class AlbumReadinessService
         // A cache read is allowed on every pass. Network remains restricted to
         // stable candidates. This avoids turning a full scan into a MusicBrainz
         // crawl while still resolving redirected/stale external identities.
-        $needsExternalCompleteness = $expectedTracks === null;
+        $needsExternalCompleteness = $expectedTracks === null
+            || !empty($tagEvidenceConflicts);
         $needsExternalIdentity = $this->needsExternalIdentityCanonicalization(
             $identity,
             $audio,
@@ -411,9 +423,17 @@ class AlbumReadinessService
             $localEvidence
         );
 
+        // Only tag-completeness conflicts are recoverable here. Any identity,
+        // edition or local-count conflict remains a hard stop and must not be
+        // hidden by an external lookup.
+        $hardConflictsBeforeExternal = array_values(array_diff(
+            $conflicts,
+            $tagEvidenceConflicts
+        ));
+
         if (
             ($needsExternalCompleteness || $needsExternalIdentity)
-            && empty($conflicts)
+            && empty($hardConflictsBeforeExternal)
             && empty($tempFiles)
             && empty($unreadable)
         ) {
@@ -427,6 +447,21 @@ class AlbumReadinessService
 
             if (!empty($externalEvidence['matched'])) {
                 $externalExpected = (int)($externalEvidence['expected_tracks'] ?? 0);
+
+                // A successful external match is already backed by the scanner's
+                // TrackMatcher. Supersede dirty TRACKTOTAL/DISCTOTAL only when
+                // that independent source also proves the exact observed count.
+                if (
+                    !empty($tagEvidenceConflicts)
+                    && $externalExpected > 0
+                    && $externalExpected === $observedTracks
+                ) {
+                    $conflicts = array_values(array_diff(
+                        $conflicts,
+                        $tagEvidenceConflicts
+                    ));
+                    $tagEvidenceSuperseded = true;
+                }
 
                 if ($needsExternalCompleteness && $externalExpected > 0) {
                     $expectedTracks = $externalExpected;
@@ -533,10 +568,17 @@ class AlbumReadinessService
 
         $conflicts = array_values(array_unique($conflicts));
 
-        $missingTracks = isset($tagEvidence['missing_tracks'])
+        $missingDiscs = !$tagEvidenceSuperseded
+            && isset($tagEvidence['missing_discs'])
+            && is_array($tagEvidence['missing_discs'])
+                ? $tagEvidence['missing_discs']
+                : [];
+
+        $missingTracks = !$tagEvidenceSuperseded
+            && isset($tagEvidence['missing_tracks'])
             && is_array($tagEvidence['missing_tracks'])
-            ? $tagEvidence['missing_tracks']
-            : [];
+                ? $tagEvidence['missing_tracks']
+                : [];
 
         // Prima classifichiamo SOLO l'evidenza di completezza.
         // La stabilita' persistente viene applicata come gate separato dopo.
@@ -549,9 +591,9 @@ class AlbumReadinessService
         } elseif (!empty($unreadable)) {
             $status = 'PENDING';
             $reasons[] = 'unreadable-audio-files';
-        } elseif (!empty($tagEvidence['missing_discs'])) {
+        } elseif (!empty($missingDiscs)) {
             $status = 'INCOMPLETE';
-            $reasons[] = 'missing-disc(s):' . implode(',', $tagEvidence['missing_discs']);
+            $reasons[] = 'missing-disc(s):' . implode(',', $missingDiscs);
         } elseif (!empty($missingTracks)) {
             $status = 'INCOMPLETE';
 
@@ -672,9 +714,11 @@ class AlbumReadinessService
             'evidence_reasons'   => $evidenceReasons,
             'temporary_files'    => $tempFiles,
             'unreadable_files'   => $unreadable,
-            'missing_discs'      => $tagEvidence['missing_discs'],
+            'missing_discs'      => $missingDiscs,
             'missing_tracks'     => $missingTracks,
             'metadata_conflicts' => $conflicts,
+            'tag_evidence_conflicts' => $tagEvidenceConflicts,
+            'tag_evidence_superseded' => $tagEvidenceSuperseded,
             'external_evidence'  => $externalEvidence,
             'action'             => $action,
             'action_reason'      => $actionReason,
@@ -1417,22 +1461,158 @@ class AlbumReadinessService
             return $result;
         }
 
-        // READY from external evidence requires a FULL one-to-one TrackMatcher
-        // comparison. Same track count alone is never enough.
-        $match = $this->trackMatcher()->compare(
+        // GRIZZLY_EXTERNAL_TRACK_EVIDENCE_V1
+        //
+        // Keep compare() conservative for callers that need an all-or-nothing
+        // tracklist verdict. Readiness has a different job: decide whether a
+        // MusicBrainz search result is strong enough to prove completeness.
+        // For that purpose use the evidence-oriented matcher, which preserves
+        // unmatched titles as measured evidence instead of turning the whole
+        // tracklist into false at the first textual variant.
+        $matcher = $this->trackMatcher();
+        $match = $matcher->compare(
             $candidateTracks,
             $externalTracks
         );
 
         $result['track_match'] = $match;
 
-        if (empty($match['equivalent'])) {
-            $result['status'] = 'external-tracklist-not-equivalent';
-            return $result;
+        // GRIZZLY_SCANNER_EDITION_EVIDENCE_V1
+        //
+        // Una ricerca MusicBrainz per artista/titolo/anno individua prima
+        // l'album e poi una singola release rappresentativa. Quella release
+        // non è necessariamente l'edizione fisica osservata: può avere bonus
+        // track in meno/più oppure una traccia sostituita.
+        //
+        // Se i FILE dichiarano un release-MBID preciso NON cambiamo edizione:
+        // quel riferimento è evidenza diretta e un mismatch resta un conflitto.
+        //
+        // Senza release-MBID esplicito, invece, possiamo usare il release-group
+        // già verificato per cercare una variante ufficiale la cui tracklist
+        // corrisponda 1:1 al candidato. La selezione viene poi nuovamente
+        // verificata dal TrackMatcher qui sotto.
+        $editionFallback = null;
+        $needsEditionFallback = count($candidateTracks) !== count($externalTracks);
+
+        // Se il conteggio coincide ma compare() non è strettamente equivalente,
+        // distinguiamo prima le semplici varianti testuali da una vera traccia
+        // sostituita. Le prime non giustificano un browse delle edizioni.
+        if (!$needsEditionFallback && empty($match['equivalent'])) {
+            if (method_exists($matcher, 'analyzeEvidence')) {
+                $preFallbackEvidence = $matcher->analyzeEvidence(
+                    $candidateTracks,
+                    $externalTracks
+                );
+
+                $result['track_evidence_pre_fallback'] = $preFallbackEvidence;
+
+                $needsEditionFallback = max(
+                    (int)($preFallbackEvidence['unmatched_candidate_count'] ?? 0),
+                    (int)($preFallbackEvidence['unmatched_local_count'] ?? 0)
+                ) > 0;
+            } else {
+                $needsEditionFallback = true;
+            }
+        }
+
+        if (
+            $needsEditionFallback
+            && $tagReleaseMbid === ''
+            && $this->isUuid((string)$result['release_group'])
+            && method_exists($this->metadataService(), 'resolveScannerEditionEvidence')
+        ) {
+            try {
+                $editionFallback = $this->metadataService()->resolveScannerEditionEvidence(
+                    $artist,
+                    $title,
+                    $year,
+                    (string)$result['release_group'],
+                    $candidateTracks,
+                    (string)$result['artist_mbid'],
+                    $this->externalEvidenceNetworkAllowed && $stable
+                );
+            } catch (Throwable $e) {
+                $editionFallback = [
+                    'status' => 'edition-lookup-error',
+                    'cache' => 'none',
+                ];
+            }
+
+            $result['edition_fallback'] = $editionFallback;
+
+            if (($editionFallback['status'] ?? '') === 'ok') {
+                $fallbackTracks = [];
+
+                foreach ((array)($editionFallback['tracks'] ?? []) as $track) {
+                    if (!is_array($track)) {
+                        continue;
+                    }
+
+                    $trackTitle = trim((string)($track['title'] ?? ''));
+                    if ($trackTitle !== '') {
+                        $fallbackTracks[] = $trackTitle;
+                    }
+                }
+
+                if (!empty($fallbackTracks)) {
+                    $externalTracks = $fallbackTracks;
+
+                    $result['status'] = 'ok';
+                    $result['source'] = (string)($editionFallback['source'] ?? '');
+                    $result['cache'] = (string)($editionFallback['cache'] ?? '');
+                    $result['release_mbid'] = strtolower(trim((string)(
+                        $editionFallback['release_mbid'] ?? ''
+                    )));
+                    $result['artist_mbid'] = strtolower(trim((string)(
+                        $editionFallback['artist_mbid'] ?? $result['artist_mbid']
+                    )));
+                    $result['release_group'] = strtolower(trim((string)(
+                        $editionFallback['release_group'] ?? $result['release_group']
+                    )));
+                    $result['year'] = isset($editionFallback['year'])
+                        && $editionFallback['year'] !== null
+                        ? (int)$editionFallback['year']
+                        : $result['year'];
+                    $result['expected_tracks'] = count($externalTracks);
+
+                    $match = $matcher->compare(
+                        $candidateTracks,
+                        $externalTracks
+                    );
+
+                    $result['track_match'] = $match;
+                }
+            }
         }
 
         if (count($candidateTracks) !== count($externalTracks)) {
             $result['status'] = 'external-track-count-mismatch';
+            return $result;
+        }
+
+        // A strict full match is always sufficient. Otherwise require the
+        // evidence-v1 API and a strong one-to-one structural match. If the
+        // method is unavailable for any reason, fail closed.
+        if (!empty($match['equivalent'])) {
+            $result['matched'] = true;
+            $result['expected_tracks'] = count($externalTracks);
+            $result['status'] = 'ok';
+            return $result;
+        }
+
+        if (!method_exists($matcher, 'analyzeEvidence')) {
+            $result['status'] = 'external-track-evidence-unavailable';
+            return $result;
+        }
+
+        $trackEvidence = $matcher->analyzeEvidence(
+            $candidateTracks,
+            $externalTracks
+        );
+        $result['track_evidence'] = $trackEvidence;
+
+        if (!$this->strongExternalTrackEvidence($trackEvidence)) {
+            $result['status'] = 'external-tracklist-not-supported';
             return $result;
         }
 
@@ -1441,6 +1621,42 @@ class AlbumReadinessService
         $result['status'] = 'ok';
 
         return $result;
+    }
+
+
+    /**
+     * Search-derived external completeness must be backed by strong track
+     * evidence. Small releases remain strict because one mismatch would be a
+     * large fraction of their identity. Normal albums may tolerate a small
+     * minority of textual variants while preserving one-to-one matching.
+     */
+    private function strongExternalTrackEvidence(array $evidence): bool
+    {
+        $candidateTotal = max(0, (int)($evidence['candidate_total'] ?? 0));
+        $localTotal = max(0, (int)($evidence['local_total'] ?? 0));
+        $matched = max(0, (int)($evidence['matched_count'] ?? 0));
+
+        if ($candidateTotal === 0
+            || $candidateTotal !== $localTotal
+            || $matched === 0) {
+            return false;
+        }
+
+        if ($candidateTotal < 5) {
+            return $matched === $candidateTotal;
+        }
+
+        $coverage = (float)($evidence['coverage'] ?? 0.0);
+        $similarity = (float)($evidence['similarity'] ?? 0.0);
+        $maxUnmatched = max(1, (int)floor($candidateTotal * 0.20));
+        $unmatched = max(
+            (int)($evidence['unmatched_candidate_count'] ?? 0),
+            (int)($evidence['unmatched_local_count'] ?? 0)
+        );
+
+        return $unmatched <= $maxUnmatched
+            && $coverage >= 0.80
+            && $similarity >= 0.75;
     }
 
     /** @return array<int,string> */
