@@ -747,6 +747,146 @@ function albumSnapshot(string $albumDir): string
     return sha1(implode("\n", $rows));
 }
 
+/**
+ * Snapshot limitato alle parti assegnate al candidato dalla discovery.
+ *
+ * Per un candidato standard con una sola part coincidente con albumKey mantiene
+ * la signature storica. Per i gruppi multi-disco osserva solo le part CDn/DiscN
+ * assegnate, senza inglobare eventuali album fratelli sotto lo stesso parent.
+ */
+function candidateSnapshot(string $albumDir, array $parts): string
+{
+    $base = rtrim(str_replace('\\', '/', $albumDir), '/');
+
+    if ($base === '' || empty($parts)) {
+        return '';
+    }
+
+    $normalizedParts = [];
+    foreach ($parts as $part) {
+        if (!is_array($part)) {
+            return '';
+        }
+
+        $dir = isset($part['dir'])
+            ? rtrim(str_replace('\\', '/', (string)$part['dir']), '/')
+            : '';
+
+        if ($dir === '') {
+            return '';
+        }
+
+        $normalizedParts[$dir] = true;
+    }
+
+    // Candidato standard: evita churn delle imported_signature esistenti.
+    if (count($normalizedParts) === 1 && isset($normalizedParts[$base])) {
+        return albumSnapshot($base);
+    }
+
+    $allowed = ['mp3', 'flac', 'jpg', 'jpeg', 'png', 'webp'];
+    $rows = [];
+    $seen = [];
+
+    $appendPath = static function (string $path) use (
+        $base,
+        $allowed,
+        &$rows,
+        &$seen
+    ): bool {
+        if (!is_file($path) || is_link($path)) {
+            return true;
+        }
+
+        $name = basename($path);
+        if ($name !== '' && $name[0] === '.') {
+            return true;
+        }
+
+        $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+        if (!in_array($ext, $allowed, true)) {
+            return true;
+        }
+
+        $path = str_replace('\\', '/', $path);
+        if ($path !== $base && strpos($path, $base . '/') !== 0) {
+            return false;
+        }
+
+        if (isset($seen[$path])) {
+            return true;
+        }
+        $seen[$path] = true;
+
+        $size = @filesize($path);
+        $mtime = @filemtime($path);
+        $ctime = @filectime($path);
+        if ($size === false || $mtime === false || $ctime === false) {
+            return false;
+        }
+
+        $rel = strpos($path, $base . '/') === 0
+            ? substr($path, strlen($base) + 1)
+            : $name;
+
+        $rows[] = $rel . '|' . (int)$size . '|' . (int)$mtime . '|' . (int)$ctime;
+        return true;
+    };
+
+    try {
+        foreach (array_keys($normalizedParts) as $dir) {
+            if (!is_dir($dir) || !is_readable($dir)) {
+                return '';
+            }
+
+            if ($dir !== $base && strpos($dir, $base . '/') !== 0) {
+                return '';
+            }
+
+            if ($dir === $base) {
+                // Gruppo misto (audio diretto + CDn): leggi solo i file diretti
+                // del parent. I subtree non assegnati possono essere altri album.
+                $entries = @scandir($dir);
+                if ($entries === false) {
+                    return '';
+                }
+
+                foreach ($entries as $entry) {
+                    if (
+                        $entry === '.'
+                        || $entry === '..'
+                        || ($entry !== '' && $entry[0] === '.')
+                    ) {
+                        continue;
+                    }
+
+                    if (!$appendPath($dir . '/' . $entry)) {
+                        return '';
+                    }
+                }
+
+                continue;
+            }
+
+            $it = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::LEAVES_ONLY
+            );
+
+            foreach ($it as $file) {
+                if (!$appendPath($file->getPathname())) {
+                    return '';
+                }
+            }
+        }
+    } catch (Throwable $e) {
+        return '';
+    }
+
+    sort($rows, SORT_STRING);
+    return sha1(implode("\n", $rows));
+}
+
 // One worker per Grizzly installation, regardless of which folder is selected.
 $tmpDir    = rtrim(sys_get_temp_dir(), '/');
 $stateFile = $tmpDir . '/grizzly-media-import-state.json';
@@ -1157,7 +1297,9 @@ while (true) {
     // mounted while one or more subdirectories temporarily stop responding.
     // A partial list must never be interpreted as authoritative absence.
     try {
-        $albumKeys = $service->discoverAlbumKeys($realImport, true);
+        // Una sola discovery autorevole per ciclo: key e parts devono provenire
+        // dalla stessa osservazione del filesystem.
+        $albumCandidates = $service->discoverAlbumCandidates($realImport, true);
     } catch (Throwable $e) {
         workerLog(
             '[WAIT] Discovery filesystem non affidabile: ' . $e->getMessage()
@@ -1197,8 +1339,8 @@ while (true) {
     // deve restare in corso e il ciclo successivo deve poter riprovare.
     $cycleRescanHadError = false;
 
-    foreach ($albumKeys as $albumKey) {
-        $albumKey = rtrim(str_replace('\\', '/', $albumKey), '/');
+    foreach ($albumCandidates as $albumKey => $candidateParts) {
+        $albumKey = rtrim(str_replace('\\', '/', (string)$albumKey), '/');
         $albumLabel = MediaScanWorkerStatePolicy::label($albumKey, $realImport);
 
         // Una directory ignorata NON deve conservare imported_signature nel
@@ -1227,7 +1369,7 @@ while (true) {
             );
         }
 
-        $signature = albumSnapshot($albumKey);
+        $signature = candidateSnapshot($albumKey, $candidateParts);
         if ($signature === '') {
             $cycleFilesystemHealthy = false;
             workerLog(
@@ -1358,33 +1500,18 @@ while (true) {
             }
         }
 
-        // Costruisce le stesse parti candidate usate dal Readiness engine.
-        // MediaImportService continua a essere la discovery authority per la
-        // lista albumKeys, quindi le esclusioni configurate restano applicate
-        // esattamente come prima.
+        // Le parts arrivano dalla STESSA discovery che ha prodotto albumKey.
+        // Non rifare discovery sul singolo candidato: un rename/move tra due
+        // osservazioni produrrebbe un falso errore di grouping. analyzeCandidate()
+        // resta strict e fallisce chiuso se una part non e' piu' leggibile.
         try {
-            $candidateGroups = $readinessService->discoverCandidates(
-                $albumKey,
-                true
-            );
-            $readinessParts = null;
+            $readinessParts = is_array($candidateParts)
+                ? $candidateParts
+                : [];
 
-            foreach ($candidateGroups as $candidateKey => $candidateParts) {
-                $candidateKey = rtrim(
-                    str_replace('\\\\', '/', (string)$candidateKey),
-                    '/'
-                );
-
-                if ($candidateKey === $albumKey) {
-                    $readinessParts = $candidateParts;
-                    break;
-                }
-            }
-
-            if (!is_array($readinessParts) || empty($readinessParts)) {
+            if (empty($readinessParts)) {
                 throw new RuntimeException(
-                    'Readiness grouping non coerente con discovery per: '
-                    . $albumKey
+                    'Candidate parts assenti per: ' . $albumKey
                 );
             }
 

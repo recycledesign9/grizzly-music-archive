@@ -202,12 +202,31 @@ class MediaImportService
 
     /**
      * Restituisce le directory-album individuate dallo stesso motore usato da
-     * scan(). Serve al worker automatico per applicare la stability window
-     * senza duplicare la logica di raggruppamento.
+     * scan(). Mantiene la API legacy per i chiamanti che necessitano soltanto
+     * delle chiavi.
      *
      * @return array<int,string>
      */
     public function discoverAlbumKeys(
+        string $importDir,
+        bool $strictFilesystem = false
+    ): array {
+        return array_keys(
+            $this->discoverAlbumCandidates($importDir, $strictFilesystem)
+        );
+    }
+
+    /**
+     * Restituisce la discovery completa come:
+     * albumKey => lista di [dir, disc].
+     *
+     * Il worker usa questa API per mantenere key e parts appartenenti alla
+     * STESSA osservazione del filesystem. Non deve quindi ridiscoverire il
+     * candidato con un secondo motore mentre il filesystem puo' cambiare.
+     *
+     * @return array<string,array<int,array{dir:string,disc:int}>>
+     */
+    public function discoverAlbumCandidates(
         string $importDir,
         bool $strictFilesystem = false
     ): array {
@@ -222,7 +241,7 @@ class MediaImportService
         }
 
         $root = rtrim(str_replace('\\', '/', $real), '/');
-        return array_keys($this->discoverAlbums($root, $strictFilesystem));
+        return $this->discoverAlbums($root, $strictFilesystem);
     }
 
     /**

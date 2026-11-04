@@ -236,7 +236,7 @@ class AlbumReadinessService
             return strcmp((string)$a['path'], (string)$b['path']);
         });
 
-        $tempFiles = $this->findInProgressFiles($albumKey, $strictFilesystem);
+        $tempFiles = $this->findInProgressFiles($albumKey, $parts, $strictFilesystem);
         $latestMtime = $this->latestRelevantMtime($audio, $tempFiles);
 
         $stableFor = 0;
@@ -818,39 +818,111 @@ class AlbumReadinessService
     /** @return array<int,string> */
     private function findInProgressFiles(
         string $albumKey,
+        array $parts,
         bool $strictFilesystem = false
     ): array
     {
+        $albumKey = rtrim(str_replace('\\', '/', $albumKey), '/');
         $hits = [];
-        if (!is_dir($albumKey) || !is_readable($albumKey)) {
-            if ($strictFilesystem) {
-                throw new RuntimeException(
-                    'Readiness candidate missing or unreadable: ' . $albumKey
-                );
+        $partDirs = [];
+
+        foreach ($parts as $part) {
+            if (!is_array($part)) {
+                continue;
             }
-            return $hits;
+
+            $dir = isset($part['dir'])
+                ? rtrim(str_replace('\\', '/', (string)$part['dir']), '/')
+                : '';
+
+            if ($dir !== '') {
+                $partDirs[$dir] = true;
+            }
         }
 
-        try {
-            $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($albumKey, FilesystemIterator::SKIP_DOTS),
-                RecursiveIteratorIterator::LEAVES_ONLY
-            );
+        if (empty($partDirs)) {
+            $partDirs[$albumKey] = true;
+        }
 
-            foreach ($iterator as $file) {
-                if (!$file->isFile() || $file->isLink()) {
+        $singleRootCandidate = count($partDirs) === 1
+            && isset($partDirs[$albumKey]);
+
+        try {
+            foreach (array_keys($partDirs) as $dir) {
+                if (!is_dir($dir) || !is_readable($dir)) {
+                    if ($strictFilesystem) {
+                        throw new RuntimeException(
+                            'Readiness candidate part missing or unreadable: ' . $dir
+                        );
+                    }
+
+                    $hits[] = $dir . '/[filesystem-scan-error]';
                     continue;
                 }
 
-                $name = $file->getFilename();
-                if ($this->isInProgressFilename($name)) {
-                    $hits[] = str_replace('\\', '/', $file->getPathname());
+                // Candidato standard: preserva il comportamento storico.
+                // Nei gruppi multidisc il parent può contenere album fratelli:
+                // una part coincidente col parent viene letta solo direttamente,
+                // mentre le part CDn vengono osservate nei propri subtree.
+                if ($singleRootCandidate || $dir !== $albumKey) {
+                    $iterator = new RecursiveIteratorIterator(
+                        new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+                        RecursiveIteratorIterator::LEAVES_ONLY
+                    );
+
+                    foreach ($iterator as $file) {
+                        if (!$file->isFile() || $file->isLink()) {
+                            continue;
+                        }
+
+                        $name = $file->getFilename();
+                        if ($this->isInProgressFilename($name)) {
+                            $hits[] = str_replace('\\', '/', $file->getPathname());
+                        }
+                    }
+
+                    continue;
+                }
+
+                $entries = @scandir($dir);
+                if ($entries === false) {
+                    if ($strictFilesystem) {
+                        throw new RuntimeException(
+                            'Readiness cannot list candidate part: ' . $dir
+                        );
+                    }
+
+                    $hits[] = $dir . '/[filesystem-scan-error]';
+                    continue;
+                }
+
+                foreach ($entries as $entry) {
+                    if (
+                        $entry === '.'
+                        || $entry === '..'
+                        || ($entry !== '' && $entry[0] === '.')
+                    ) {
+                        continue;
+                    }
+
+                    $path = $dir . '/' . $entry;
+                    if (!is_file($path) || is_link($path)) {
+                        continue;
+                    }
+
+                    if ($this->isInProgressFilename($entry)) {
+                        $hits[] = str_replace('\\', '/', $path);
+                    }
                 }
             }
         } catch (Throwable $e) {
             if ($strictFilesystem) {
+                if ($e instanceof RuntimeException) {
+                    throw $e;
+                }
+
                 throw new RuntimeException(
-                    'Readiness recursive scan failed for: ' . $albumKey,
+                    'Readiness candidate-parts scan failed for: ' . $albumKey,
                     0,
                     $e
                 );
@@ -860,6 +932,7 @@ class AlbumReadinessService
             $hits[] = $albumKey . '/[filesystem-scan-error]';
         }
 
+        $hits = array_values(array_unique($hits));
         sort($hits, SORT_STRING);
         return $hits;
     }
