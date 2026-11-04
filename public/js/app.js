@@ -91,6 +91,15 @@ const Player = (function () {
   let rulerTicks = [];        // [{ el, at }] tacche del righello dei minuti
   let prevRestarts = null;    // ultimo stato dell'etichetta di "precedente"
 
+  // Ascolto concluso: la coda è finita senza ripetizione e il player è
+  // rimasto caricato sull'ultima traccia, in pausa a 0:00 (endOfQueue).
+  // Distinto dalla pausa manuale, che ha lo stesso stato dell'audio:
+  // in questo caso le righe della tracklist tornano al numero, mentre
+  // dopo una pausa manuale mantengono icona ed evidenziazione.
+  // Si azzera al primo avvio dell'audio (evento 'play'), a ogni cambio
+  // di traccia (playAt) e allo stop (resetPlayerState).
+  let listenEnded = false;
+
   function fmt(s) {
     s = Math.floor(s || 0);
     return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
@@ -163,6 +172,7 @@ const Player = (function () {
 
   function resetPlayerState(reason) {
     // reason: 'stopped' | 'completed' | 'no-playable-track'
+    listenEnded = false;
     panel.style.display = 'none';
 
     try {
@@ -306,7 +316,12 @@ const Player = (function () {
 
       const btn = li.querySelector('.btn-track-play');
 
-      if (tid === t.id && !rowInContext(li)) {
+      // Ascolto concluso: nessuna riga è "in riproduzione" né "in ascolto
+      // da …". Il ripristino qui sopra ha già riportato numero, titolo e
+      // slot allo stato normale; la riga cade nel ramo finale (play).
+      const isCurrent = !listenEnded && tid === t.id;
+
+      if (isCurrent && !rowInContext(li)) {
         // Stesso brano, contesto diverso: segnale leggero, nessuna pausa.
         // Il play della riga avvia questo contesto da questa traccia.
         li.classList.add('track-elsewhere');
@@ -321,7 +336,7 @@ const Player = (function () {
           }
         }
         if (btn) { btn.innerHTML = '<i class="bi bi-play-fill"></i>'; btn.title = 'Riproduci da qui'; }
-      } else if (tid === t.id) {
+      } else if (isCurrent) {
         li.classList.add('track-playing');
         if (slot) {
           slot.innerHTML = '<span class="bar"></span><span class="bar"></span><span class="bar"></span>';
@@ -433,6 +448,10 @@ const Player = (function () {
     if (!t || !t.src) {
       return;
     }
+
+    // Nuova traccia in avvio: l'eventuale ascolto concluso è superato,
+    // updateUI() qui sotto deve evidenziare subito la riga.
+    listenEnded = false;
 
     audio.src = t.src;
     audio.load();
@@ -633,11 +652,19 @@ const Player = (function () {
   // Fine coda senza ripetizione: il player resta caricato sull'ultima
   // traccia, in pausa a 0:00, così play la riascolta. Lo stop resta
   // il modo per chiuderlo.
+  // Le righe della tracklist tornano al numero (listenEnded): updateUI()
+  // le ridisegna senza evidenziazione ed emette player:changed, come
+  // faceva prima la notifyChange() diretta.
   function endOfQueue() {
+    listenEnded = true;
     try { audio.pause(); } catch (e) { }
     try { audio.currentTime = 0; } catch (e) { }
     syncPosition();
-    notifyChange();
+    if (playlist[cursor]) {
+      updateUI();
+    } else {
+      notifyChange();
+    }
   }
 
   // Ripeti la traccia usa audio.loop: a fine brano il browser riparte
@@ -674,6 +701,14 @@ const Player = (function () {
     // quindi nessun entry-point presente o futuro può bypassare la regola.
     if (window.YTPlayer && typeof window.YTPlayer.stopVideo === 'function') {
       window.YTPlayer.stopVideo();
+    }
+    // Ripresa dopo un ascolto concluso (play dello sticky player, spazio,
+    // pulsante hero, play della riga): la riga torna evidenziata. Va
+    // ridisegnata prima di setPlaying(), che aggiorna icona e animazione
+    // dell'equalizzatore appena ricreato.
+    if (listenEnded) {
+      listenEnded = false;
+      updateUI();
     }
     setPlaying(true);
   });
