@@ -369,7 +369,11 @@ class AlbumIdentityResolver
 
                 if (
                     $hasCandidateTracklist
-                    && $this->tracklistsEqual($candidateTracks, (int)$album['id'])
+                    && $this->tracklistsFallbackMatch(
+                        $candidateTracks,
+                        (int)$album['id'],
+                        $evidenceStatus
+                    )
                 ) {
                     $fallbackTracklistMatches[] = $album;
                 }
@@ -1098,6 +1102,74 @@ class AlbumIdentityResolver
         $comparison = $this->trackMatcher->compare($candidateTracks, $localTracks);
 
         return !empty($comparison['equivalent']);
+    }
+
+
+    /**
+     * Album-level fallback evidence.
+     *
+     * Preserve the historical all-or-nothing TrackMatcher::compare() result
+     * whenever it succeeds. Only a candidate that Readiness has already marked
+     * READY may fall back to measured evidence from analyzeEvidence().
+     *
+     * This keeps PENDING/INCOMPLETE candidates conservative while allowing an
+     * otherwise coherent existing album to tolerate a small minority of title
+     * variants (for example "Daddy" vs "Daddy / [untitled]").
+     *
+     * @param array<int,string> $candidateTracks
+     */
+    private function tracklistsFallbackMatch(
+        array $candidateTracks,
+        int $albumId,
+        string $evidenceStatus
+    ): bool {
+        if ($this->tracklistsEqual($candidateTracks, $albumId)) {
+            return true;
+        }
+
+        if (strtoupper(trim($evidenceStatus)) !== 'READY') {
+            return false;
+        }
+
+        if (!method_exists($this->trackMatcher, 'analyzeEvidence')) {
+            return false;
+        }
+
+        $localTracks = $this->localTrackTitles($albumId);
+        $evidence = $this->trackMatcher->analyzeEvidence(
+            $candidateTracks,
+            $localTracks
+        );
+
+        $candidateTotal = max(0, (int)($evidence['candidate_total'] ?? 0));
+        $localTotal = max(0, (int)($evidence['local_total'] ?? 0));
+        $matched = max(0, (int)($evidence['matched_count'] ?? 0));
+
+        if ($candidateTotal === 0 || $candidateTotal !== $localTotal) {
+            return false;
+        }
+
+        if (!empty($evidence['conservative_full_match'])) {
+            return true;
+        }
+
+        // Small releases remain strict: one mismatch would represent too much
+        // of the album identity.
+        if ($candidateTotal < 5) {
+            return $matched === $candidateTotal;
+        }
+
+        $coverage = (float)($evidence['coverage'] ?? 0.0);
+        $similarity = (float)($evidence['similarity'] ?? 0.0);
+        $maxUnmatched = max(1, (int)floor($candidateTotal * 0.20));
+        $unmatched = max(
+            (int)($evidence['unmatched_candidate_count'] ?? 0),
+            (int)($evidence['unmatched_local_count'] ?? 0)
+        );
+
+        return $unmatched <= $maxUnmatched
+            && $coverage >= 0.80
+            && $similarity >= 0.75;
     }
 
     /**
