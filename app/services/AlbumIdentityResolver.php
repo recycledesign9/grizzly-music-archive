@@ -238,6 +238,7 @@ class AlbumIdentityResolver
             $groupAlbums = $this->albumsByReleaseGroup($releaseGroup);
             $groupMetadataMatches = [];
             $groupTracklistMatches = [];
+            $groupEditionCollisions = [];
 
             foreach ($groupAlbums as $album) {
                 if (!$this->weakAlbumMetadataCompatible(
@@ -254,9 +255,44 @@ class AlbumIdentityResolver
 
                 $groupMetadataMatches[] = $album;
 
-                if ($this->tracklistsEqual($candidateTracks, (int)$album['id'])) {
-                    $groupTracklistMatches[] = $album;
+                if (!$this->tracklistsFallbackMatch(
+                    $candidateTracks,
+                    (int)$album['id'],
+                    $evidenceStatus
+                )) {
+                    continue;
                 }
+
+                $localTitle = trim((string)($album['title'] ?? ''));
+                if ($title !== '' && $localTitle !== '') {
+                    $relationship = $this->titleMatcher->relationship(
+                        $title,
+                        $localTitle,
+                        $artist,
+                        $year
+                    );
+
+                    if ($relationship === 'distinct-edition') {
+                        $groupEditionCollisions[] = $album;
+                        continue;
+                    }
+                }
+
+                $groupTracklistMatches[] = $album;
+            }
+
+            if (!empty($groupEditionCollisions)) {
+                return $base + [
+                    'decision' => self::AMBIGUOUS,
+                    'confidence' => 'candidate',
+                    'album_id' => null,
+                    'match_source' => 'release-group+tracklist+edition-boundary',
+                    'candidate_album_ids' => $this->albumIds(array_merge(
+                        $groupTracklistMatches,
+                        $groupEditionCollisions
+                    )),
+                    'reasons' => ['edition-title-release-group-collision'],
+                ];
             }
 
             if (count($groupTracklistMatches) > 1) {
@@ -1106,15 +1142,11 @@ class AlbumIdentityResolver
 
 
     /**
-     * Album-level fallback evidence.
+     * Shared album-level track evidence.
      *
-     * Preserve the historical all-or-nothing TrackMatcher::compare() result
-     * whenever it succeeds. Only a candidate that Readiness has already marked
-     * READY may fall back to measured evidence from analyzeEvidence().
-     *
-     * This keeps PENDING/INCOMPLETE candidates conservative while allowing an
-     * otherwise coherent existing album to tolerate a small minority of title
-     * variants (for example "Daddy" vs "Daddy / [untitled]").
+     * Preserve TrackMatcher::compare() as the authoritative complete-match
+     * verdict. Only a READY candidate may fall back to the central bounded
+     * near-full policy exposed by TrackMatcher.
      *
      * @param array<int,string> $candidateTracks
      */
@@ -1131,7 +1163,8 @@ class AlbumIdentityResolver
             return false;
         }
 
-        if (!method_exists($this->trackMatcher, 'analyzeEvidence')) {
+        if (!method_exists($this->trackMatcher, 'analyzeEvidence')
+            || !method_exists($this->trackMatcher, 'isStrongNearFullEvidence')) {
             return false;
         }
 
@@ -1141,35 +1174,7 @@ class AlbumIdentityResolver
             $localTracks
         );
 
-        $candidateTotal = max(0, (int)($evidence['candidate_total'] ?? 0));
-        $localTotal = max(0, (int)($evidence['local_total'] ?? 0));
-        $matched = max(0, (int)($evidence['matched_count'] ?? 0));
-
-        if ($candidateTotal === 0 || $candidateTotal !== $localTotal) {
-            return false;
-        }
-
-        if (!empty($evidence['conservative_full_match'])) {
-            return true;
-        }
-
-        // Small releases remain strict: one mismatch would represent too much
-        // of the album identity.
-        if ($candidateTotal < 5) {
-            return $matched === $candidateTotal;
-        }
-
-        $coverage = (float)($evidence['coverage'] ?? 0.0);
-        $similarity = (float)($evidence['similarity'] ?? 0.0);
-        $maxUnmatched = max(1, (int)floor($candidateTotal * 0.20));
-        $unmatched = max(
-            (int)($evidence['unmatched_candidate_count'] ?? 0),
-            (int)($evidence['unmatched_local_count'] ?? 0)
-        );
-
-        return $unmatched <= $maxUnmatched
-            && $coverage >= 0.80
-            && $similarity >= 0.75;
+        return $this->trackMatcher->isStrongNearFullEvidence($evidence);
     }
 
     /**

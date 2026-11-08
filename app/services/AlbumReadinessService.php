@@ -1698,38 +1698,21 @@ class AlbumReadinessService
 
 
     /**
-     * Search-derived external completeness must be backed by strong track
-     * evidence. Small releases remain strict because one mismatch would be a
-     * large fraction of their identity. Normal albums may tolerate a small
-     * minority of textual variants while preserving one-to-one matching.
+     * Search-derived external completeness delegates to the same bounded
+     * near-full evidence policy used by final album identity resolution.
+     *
+     * TrackMatcher remains the single owner of evidence thresholds so
+     * Readiness and Identity cannot silently diverge over time.
      */
     private function strongExternalTrackEvidence(array $evidence): bool
     {
-        $candidateTotal = max(0, (int)($evidence['candidate_total'] ?? 0));
-        $localTotal = max(0, (int)($evidence['local_total'] ?? 0));
-        $matched = max(0, (int)($evidence['matched_count'] ?? 0));
+        $matcher = $this->trackMatcher();
 
-        if ($candidateTotal === 0
-            || $candidateTotal !== $localTotal
-            || $matched === 0) {
+        if (!method_exists($matcher, 'isStrongNearFullEvidence')) {
             return false;
         }
 
-        if ($candidateTotal < 5) {
-            return $matched === $candidateTotal;
-        }
-
-        $coverage = (float)($evidence['coverage'] ?? 0.0);
-        $similarity = (float)($evidence['similarity'] ?? 0.0);
-        $maxUnmatched = max(1, (int)floor($candidateTotal * 0.20));
-        $unmatched = max(
-            (int)($evidence['unmatched_candidate_count'] ?? 0),
-            (int)($evidence['unmatched_local_count'] ?? 0)
-        );
-
-        return $unmatched <= $maxUnmatched
-            && $coverage >= 0.80
-            && $similarity >= 0.75;
+        return $matcher->isStrongNearFullEvidence($evidence);
     }
 
     /** @return array<int,string> */

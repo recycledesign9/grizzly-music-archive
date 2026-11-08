@@ -595,6 +595,64 @@ class TrackMatcher
     }
 
     /**
+     * Shared policy for strong near-full track evidence.
+     *
+     * compare() remains the authoritative all-or-nothing matcher. This method
+     * is only for callers that already have analyzeEvidence() output and need
+     * to decide whether a very small number of genuinely unmatched titles can
+     * still support a higher-level album identity decision.
+     *
+     * The policy is deliberately bounded by release size instead of using a
+     * flat percentage:
+     * - releases with fewer than 8 tracks must be complete;
+     * - 8..19 tracks may have at most 1 unmatched title;
+     * - 20+ tracks may have at most 2 unmatched titles and still need >=92%
+     *   coverage.
+     *
+     * @param array<string,mixed> $evidence
+     */
+    public function isStrongNearFullEvidence(array $evidence): bool
+    {
+        $candidateTotal = max(0, (int)($evidence['candidate_total'] ?? 0));
+        $localTotal = max(0, (int)($evidence['local_total'] ?? 0));
+        $matched = max(0, (int)($evidence['matched_count'] ?? 0));
+
+        if ($candidateTotal === 0
+            || $candidateTotal !== $localTotal
+            || $matched === 0
+            || !empty($evidence['invalid_titles'])) {
+            return false;
+        }
+
+        if (!empty($evidence['conservative_full_match'])) {
+            return true;
+        }
+
+        $unmatched = max(
+            (int)($evidence['unmatched_candidate_count'] ?? 0),
+            (int)($evidence['unmatched_local_count'] ?? 0)
+        );
+
+        $coverage = (float)($evidence['coverage'] ?? 0.0);
+        $similarity = (float)($evidence['similarity'] ?? 0.0);
+
+        if ($candidateTotal < 8) {
+            return false;
+        }
+
+        if ($candidateTotal < 20) {
+            return $unmatched <= 1
+                && $coverage >= 0.90
+                && $similarity >= 0.88;
+        }
+
+        return $unmatched <= 2
+            && $coverage >= 0.92
+            && $similarity >= 0.90;
+    }
+
+
+    /**
      * @param array<string,mixed> $a
      * @param array<string,mixed> $b
      */
