@@ -311,7 +311,9 @@ $cancelUrl = $isEdit
         </div>
         <div class="grz-lookup-result__side">
           <span>MusicBrainz · Cover Art Archive · Last.fm</span>
-          <button type="button" class="btn btn-link grz-lookup-retry" id="lookupRetry">Non è questa edizione?</button>
+          <!-- Visibile solo quando esiste l'elenco delle edizioni
+               (renderEditions); senza elenco non avrebbe nulla da aprire. -->
+          <button type="button" class="btn btn-link grz-lookup-retry" id="lookupRetry" hidden>Non è questa edizione?</button>
         </div>
       </div>
 
@@ -1146,6 +1148,15 @@ $cancelUrl = $isEdit
       if (msg) msg.textContent = '';
       setEditionsOpen(false);
       if (box) box.hidden = true;
+      setRetryVisible(false);
+    }
+
+    // Il link "Non è questa edizione?" apre l'elenco delle edizioni:
+    // compare solo quando l'elenco esiste. Prima restava sempre visibile
+    // e, senza elenco, spostava soltanto il fuoco sul campo titolo.
+    function setRetryVisible(visible) {
+      const btn = document.getElementById('lookupRetry');
+      if (btn) btn.hidden = !visible;
     }
 
     // Apre o chiude l'elenco delle edizioni
@@ -1254,6 +1265,7 @@ $cancelUrl = $isEdit
       updateEditionsHead(editionState.partial);
       setEditionsOpen(false);
       box.hidden = false;
+      setRetryVisible(true);
     }
 
     function setEditionsBusy(busy) {

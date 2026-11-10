@@ -31,7 +31,10 @@ class AlbumMetadataService
     // v4: cleanTracks() non scarta piu' le tracce quando l'annotazione
     // riguarda la maggioranza della tracklist (album di remix: tutte le
     // tracce "(The 2025 remixes)" venivano eliminate per la parola "mix").
-    private const EDITIONS_LOGIC_VERSION = 4;
+    // v5: cleanTracks() scarta una traccia annotata solo se nella stessa
+    // release c'e' anche il brano base; la soglia della maggioranza
+    // toglieva meta' di Guerolito (7 remix "(X remix)" su 14).
+    private const EDITIONS_LOGIC_VERSION = 5;
 
     // Durata della cache delle edizioni: il catalogo di un album cambia
     // di rado, ma nuove ristampe vengono aggiunte a MusicBrainz nel tempo.
@@ -3077,23 +3080,32 @@ class AlbumMetadataService
         $clean      = [];
         $seenTitles = [];
 
-        // Prima passata: quante tracce verrebbero scartate per le parole
-        // marcatore. Le parole servono a togliere poche tracce aggiunte in
-        // coda (take alternativi, jam, missaggi); se riguardano piu' di
-        // meta' della tracklist descrivono l'album stesso (un album di
-        // remix: "Autoharp (The 2025 remixes)" e tutte le altre) e non si
-        // scarta nulla. Prima la tracklist dei remix risultava vuota.
-        $skippable = 0;
-        $nonEmpty  = 0;
+        // Le parole marcatore (take, jam, mix...) servono a togliere le
+        // versioni alternative aggiunte a un'edizione: "Song (Take 7)" o
+        // "Song (Single Mix)" accanto a "Song". Una traccia annotata viene
+        // quindi scartata SOLO se la stessa release contiene anche il
+        // brano base senza annotazione.
+        //
+        // Prima la regola era quantitativa: si scartava tutto se le tracce
+        // annotate erano al massimo meta' della tracklist. Su Guerolito
+        // (Beck, album di remix) la CD US ha 7 titoli in forma "(X remix)"
+        // e 7 in forma "(remixed by X)" o senza annotazione: esattamente
+        // meta', quindi le 7 tracce "(X remix)" venivano tolte e la
+        // tracklist proposta era di 7 brani invece di 14. Con la regola
+        // del brano base i remix restano, perche' nessun "Girl" compare
+        // accanto a "Girl (Octet remix)"; resta valida anche per i dischi
+        // in cui tutte le tracce sono annotate (Hooverphonic, "(The 2025
+        // remixes)").
+        $baseKeys = [];
         foreach ($tracks as $t) {
             $title = trim($t['title'] ?? '');
-            if ($title === '') continue;
-            $nonEmpty++;
-            if ($this->trackHasSkipAnnotation(strtolower($title))) {
-                $skippable++;
+            if ($title === '' || $this->trackHasSkipAnnotation(strtolower($title))) {
+                continue;
+            }
+            foreach ($this->plainTitleKeys($title) as $k) {
+                $baseKeys[$k] = true;
             }
         }
-        $applySkip = $nonEmpty > 0 && ($skippable * 2) <= $nonEmpty;
 
         foreach ($tracks as $t) {
             $title      = trim($t['title'] ?? '');
@@ -3101,8 +3113,11 @@ class AlbumMetadataService
 
             if ($title === '') continue;
 
-            if ($applySkip && $this->trackHasSkipAnnotation($titleLower)) {
-                continue;
+            if ($this->trackHasSkipAnnotation($titleLower)) {
+                $base = $this->annotatedBaseKey($title);
+                if ($base !== '' && isset($baseKeys[$base])) {
+                    continue;
+                }
             }
 
             // Deduplicazione: normalizza e confronta
@@ -3153,6 +3168,44 @@ class AlbumMetadataService
             }
         }
         return false;
+    }
+
+    // Chiavi con cui una traccia SENZA annotazione marcatore puo' fare da
+    // brano base: il titolo intero e il titolo senza le parentesi
+    // ("Ghost Range (E-Pro)" vale anche come "Ghost Range"). Il segmento
+    // dopo un trattino finale non viene tolto: "Song - Part 2" non deve
+    // diventare il brano base di "Song - Studio Jam".
+    private function plainTitleKeys(string $title): array
+    {
+        $keys = [];
+
+        $full = $this->titleKey($title);
+        if ($full !== '') {
+            $keys[] = $full;
+        }
+
+        $noParens = trim((string)preg_replace('/\s*[\(\[][^\)\]]*[\)\]]/u', '', $title));
+        if ($noParens !== '') {
+            $k = $this->titleKey($noParens);
+            if ($k !== '' && $k !== $full) {
+                $keys[] = $k;
+            }
+        }
+
+        return $keys;
+    }
+
+    // Chiave del brano base di una traccia annotata: titolo senza parentesi
+    // e senza il segmento dopo il trattino finale ("Song (Take 7)" e
+    // "Song - Studio Jam" danno entrambi "song"). Stringa vuota se non
+    // resta nulla, per esempio un titolo interamente tra parentesi.
+    private function annotatedBaseKey(string $title): string
+    {
+        $base = (string)preg_replace('/\s*[\(\[][^\)\]]*[\)\]]/u', '', $title);
+        $base = (string)preg_replace('/\s+-\s+.*$/u', '', $base);
+        $base = trim($base);
+
+        return $base === '' ? '' : $this->titleKey($base);
     }
 
     // ----------------------------------------------------------
