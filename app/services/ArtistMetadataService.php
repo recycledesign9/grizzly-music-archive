@@ -50,6 +50,13 @@ class ArtistMetadataService
      */
     // v2: scarta le schede Wikipedia di album/singoli pescate per nome
     // quando il nome artista coincide col titolo di un'opera (Modern Nature).
+    //
+    // 2026-11: aggiunta la guardia sulle bio Last.fm "condivise" (pagina
+    // unica per più artisti omonimi, vedi resolveSharedNameLastFmBio).
+    // La versione resta 2 di proposito: la guardia tocca solo le bio con
+    // fonte Last.fm che elencano più artisti, e un incremento farebbe
+    // ricalcolare la bio di TUTTI gli artisti. Le poche schede coinvolte
+    // si riallineano azzerando bio_fetch_version solo su quelle.
     public const BIO_LOGIC_VERSION = 2;
 
     /**
@@ -149,8 +156,26 @@ class ArtistMetadataService
      * schede dell'artista e, a parità di chiave titolo+anno, vince il
      * release-group presente in archivio. Gli album con anni diversi
      * restano regolati come prima (si tiene il più vecchio).
+     *
+     * v18: fix del 2026-11 — la ricerca di v15 veniva letta su PIÙ PAGINE
+     * (offset 0, 100, 200...). I risultati della ricerca MusicBrainz sono
+     * ordinati per punteggio e qui hanno tutti lo stesso punteggio: tra
+     * una richiesta e l'altra l'ordine cambia, quindi la seconda pagina
+     * ripete album già ricevuti nella prima e ne salta altrettanti. Caso
+     * confermato The Beatles: 165 righe ricevute, 125 release-group
+     * unici, 40 album mai arrivati e diversi a ogni scansione ("Sgt.
+     * Pepper's Lonely Hearts Club Band" in archivio finiva in "Fuori
+     * dagli album in studio", "Revolver" spariva). Il risultato veniva
+     * comunque salvato come completo. Ora: (a) i secondary-type sono
+     * esclusi già nella query (NOT secondarytype:*), così la risposta
+     * contiene solo gli album candidati e sta quasi sempre in una pagina
+     * (Beatles: 18 risultati invece di 165); (b) i release-group vengono
+     * raccolti per ID e confrontati con il totale dichiarato: se servono
+     * più pagine e gli ID unici sono meno del totale la scansione viene
+     * ripetuta accumulando, e se non si arriva al totale il risultato è
+     * marcato partial invece che completo. Filtri e deduplica invariati.
      */
-    public const DISCOGRAPHY_LOGIC_VERSION = 17;
+    public const DISCOGRAPHY_LOGIC_VERSION = 18;
 
     /** Lunghezza massima bio salvata (caratteri) per non esagerare */
     private const BIO_MAX_CHARS = 2200;
@@ -229,6 +254,7 @@ class ArtistMetadataService
         }
 
         $wikidataId = '';
+        $areaHints  = []; // luoghi MusicBrainz dell'artista (guardia Last.fm)
 
         if (!empty($mb['id'])) {
             $resolvedMbid = $this->normalizeMusicBrainzId((string) $mb['id']);
@@ -246,6 +272,13 @@ class ArtistMetadataService
                 }
 
                 $wikidataId = $this->extractWikidataId($mb['relations'] ?? []);
+
+                foreach (['area', 'begin-area', 'begin_area'] as $areaKey) {
+                    $areaName = trim((string) ($mb[$areaKey]['name'] ?? ''));
+                    if ($areaName !== '') {
+                        $areaHints[] = $areaName;
+                    }
+                }
             } else {
                 $fetchOk = false;
             }
@@ -351,6 +384,19 @@ class ArtistMetadataService
 
         if ($wantBio && $result['bio'] === '') {
             $lf = $this->fetchLastFmBio($name, $result['mb_artist_id']);
+
+            // Last.fm ha UNA pagina per nome: per gli omonimi la bio è un
+            // elenco di più artisti. Si tiene solo la voce dell'artista
+            // in archivio, oppure niente se non è identificabile.
+            if (!empty($lf['bio'])) {
+                $lf['bio'] = $this->resolveSharedNameLastFmBio(
+                    (string) $lf['bio'],
+                    $name,
+                    $localAlbumTitles,
+                    $areaHints
+                );
+            }
+
             if (!empty($lf['bio'])) {
                 $result['bio']        = $this->trimBio($lf['bio']);
                 $result['bio_source'] = 'lastfm';
@@ -1101,6 +1147,193 @@ class ArtistMetadataService
         ];
     }
 
+    /**
+     * Guardia sulle bio Last.fm "condivise".
+     *
+     * Last.fm tiene una sola pagina per NOME, non per artista: quando più
+     * artisti si chiamano allo stesso modo la bio è un testo unico che li
+     * elenca tutti ("There are more than one artist with this name:
+     * 1. ... 2. ... 3. ..."), anche se la richiesta è fatta con l'MBID
+     * giusto. Salvata così com'è, la scheda descrive anche gli omonimi
+     * (caso confermato: PISS, Vancouver, con dentro una band hardcore di
+     * Berlino e un duo power electronics inglese).
+     *
+     * Comportamento:
+     *  - bio normale (un solo artista) → restituita invariata;
+     *  - bio condivisa con voci numerate → si cerca la voce dell'artista
+     *    in archivio con due prove, in ordine di forza:
+     *      a) il titolo di un album dell'artista presente in archivio
+     *         compare nella voce (anche dentro un URL: "…/album/
+     *         you-made-me-skin-on-linen");
+     *      b) un luogo MusicBrainz dell'artista (area, città di
+     *         formazione) compare nella voce.
+     *    Si accetta solo se la prova indica UNA voce sola;
+     *  - bio condivisa senza una voce identificabile → stringa vuota.
+     *    Meglio nessuna bio che la bio di un omonimo.
+     *
+     * @param string[] $localAlbumTitles titoli degli album in archivio
+     * @param string[] $areaHints        nomi di luogo da MusicBrainz
+     */
+    private function resolveSharedNameLastFmBio(
+        string $bio,
+        string $artistName,
+        array $localAlbumTitles,
+        array $areaHints
+    ): string {
+        $bio = trim($bio);
+        if ($bio === '' || !$this->looksLikeSharedNameBio($bio)) {
+            return $bio;
+        }
+
+        // Voci numerate a inizio riga: "1. ", "2) ", "(3) ", "4: ".
+        $parts = preg_split(
+            '/^[ \t]*\(?(\d{1,2})[\.\)\]:][ \t]+/mu',
+            $bio,
+            -1,
+            PREG_SPLIT_DELIM_CAPTURE
+        );
+        if (!is_array($parts) || count($parts) < 5) {
+            return ''; // meno di due voci numerate: non separabile
+        }
+
+        // $parts = [premessa, "1", testo1, "2", testo2, ...]: le voci
+        // valgono solo se la numerazione parte da 1 ed è consecutiva.
+        $entries  = [];
+        $expected = 1;
+        for ($i = 1; $i + 1 < count($parts); $i += 2) {
+            if ((int) $parts[$i] !== $expected) {
+                return '';
+            }
+            $entries[] = trim((string) $parts[$i + 1]);
+            $expected++;
+        }
+        if (count($entries) < 2) {
+            return '';
+        }
+
+        $normEntries = [];
+        foreach ($entries as $entry) {
+            $normEntries[] = ' ' . $this->normalizeForContainment($entry) . ' ';
+        }
+        $normArtist = $this->normalizeForContainment($artistName);
+
+        // a) prova forte: titolo di un album in archivio.
+        $needles = [];
+        foreach ($localAlbumTitles as $title) {
+            $title = preg_replace('/\s*[\(\[][^\)\]]*[\)\]]\s*/u', ' ', (string) $title);
+            $norm  = $this->normalizeForContainment((string) $title);
+            if ($norm === '' || $norm === $normArtist) {
+                continue; // omonimo dell'artista: compare in ogni voce
+            }
+            // Titoli troppo brevi o generici ("Demo", "Live", "II") non
+            // identificano nessuno: una parola sola deve avere almeno 8
+            // caratteri, più parole almeno 6 in tutto.
+            $minLen = (strpos($norm, ' ') === false) ? 8 : 6;
+            if (mb_strlen($norm) < $minLen) {
+                continue;
+            }
+            $needles[$norm] = true;
+        }
+        $picked = $this->singleEntryContaining($normEntries, array_keys($needles));
+
+        // b) prova più debole: luogo MusicBrainz dell'artista.
+        if ($picked === null) {
+            $needles = [];
+            foreach ($areaHints as $area) {
+                $norm = $this->normalizeForContainment((string) $area);
+                if (mb_strlen($norm) < 4 || $norm === $normArtist) {
+                    continue;
+                }
+                $needles[$norm] = true;
+            }
+            $picked = $this->singleEntryContaining($normEntries, array_keys($needles));
+        }
+
+        return ($picked === null) ? '' : $entries[$picked];
+    }
+
+    /**
+     * Vero se la bio Last.fm dichiara in apertura di riguardare più
+     * artisti con lo stesso nome. Il controllo è volutamente stretto
+     * (formule tipiche di Last.fm nelle prime righe, oppure un elenco
+     * numerato che comincia subito): una bio normale che inizia con
+     * "There are few bands as…" non deve essere toccata.
+     */
+    private function looksLikeSharedNameBio(string $bio): bool
+    {
+        $head = mb_substr($bio, 0, 300);
+
+        $quantity = '(?:more\s+than\s+\w+|multiple|several|many|various|numerous'
+            . '|a\s+few|a\s+couple\s+of|a\s+number\s+of'
+            . '|two|three|four|five|six|seven|eight|nine|ten|\d{1,2})';
+        $subject  = '(?:artists?|bands?|groups?|acts?|projects?|musicians?'
+            . '|performers?|singers?|rappers?|djs?|producers?)';
+
+        // "There are more than one artist with this name", "There are at
+        // least 3 bands called X", "There are two artists named X"...
+        if (preg_match(
+            '/^\W{0,5}there\s+(?:are|is|were|have\s+been|has\s+been)\s+'
+            . '(?:(?:at\s+least|currently|actually|also|now)\s+)*'
+            . $quantity . '\s+(?:\w+\s+){0,3}?' . $subject
+            . '\b.{0,60}?\b(?:names?|called|named|known\s+as)\b/isu',
+            $head
+        )) {
+            return true;
+        }
+
+        // "X is the name of at least two bands", "X may refer to:".
+        if (preg_match(
+            '/\bis\s+the\s+name\s+of\s+(?:at\s+least\s+)?' . $quantity . '\b/iu',
+            $head
+        ) || preg_match('/\b(?:may|can|could)\s+refer\s+to\b/iu', $head)) {
+            return true;
+        }
+
+        // Elenco numerato senza premessa: comincia con "1." e più sotto
+        // ha una riga che comincia con "2.".
+        return (bool) preg_match('/^\W{0,3}1[\.\)\]:][ \t]+/u', $bio)
+            && (bool) preg_match('/^[ \t]*\(?2[\.\)\]:][ \t]+/mu', $bio);
+    }
+
+    /**
+     * Indice dell'UNICA voce che contiene almeno uno dei termini cercati
+     * (frase intera, già normalizzata). null se nessuna o più di una.
+     *
+     * @param string[] $normEntries voci normalizzate, con spazi ai bordi
+     * @param string[] $needles     termini normalizzati
+     */
+    private function singleEntryContaining(array $normEntries, array $needles): ?int
+    {
+        if (empty($needles)) {
+            return null;
+        }
+
+        $hits = [];
+        foreach ($normEntries as $idx => $text) {
+            foreach ($needles as $needle) {
+                if (mb_strpos($text, ' ' . $needle . ' ') !== false) {
+                    $hits[] = $idx;
+                    break;
+                }
+            }
+        }
+
+        return count($hits) === 1 ? $hits[0] : null;
+    }
+
+    /**
+     * Normalizzazione per la ricerca di una frase dentro un testo:
+     * minuscole, tutto ciò che non è lettera o cifra diventa spazio,
+     * spazi compattati. Trasforma anche gli slug degli URL in parole
+     * ("you-made-me-skin-on-linen" → "you made me skin on linen").
+     */
+    private function normalizeForContainment(string $text): string
+    {
+        $text = mb_strtolower($text, 'UTF-8');
+        $text = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $text);
+        return trim((string) $text);
+    }
+
     // ============================================================
     // IMMAGINE — download locale opzionale
     // ============================================================
@@ -1545,6 +1778,7 @@ class ArtistMetadataService
         // MusicBrainz nella query Lucene:
         //
         //   arid:"<mbid>" AND primarytype:album AND status:official
+        //   AND NOT secondarytype:*
         //
         // Il campo "status" dell'indice release-group corrisponde allo
         // stato delle release contenute nel gruppo: un release-group entra
@@ -1561,132 +1795,118 @@ class ArtistMetadataService
         // c'è più il tetto di pagine sulle release: la ricerca restituisce
         // una riga per release-group, quindi anche i cataloghi enormi
         // stanno in poche pagine e ogni candidato è verificato.
+        //
+        // v18: la lettura delle pagine sta in
+        // scanOfficialStudioReleaseGroups(), che raccoglie i release-group
+        // per ID e segnala se l'elenco ricevuto è completo. Qui restano
+        // solo i filtri e la deduplica, invariati.
         $candidates = []; // "titolo|anno" => ['rgId','title','year']
         $fetchOk    = true;
 
         foreach ($artistIds as $aid) {
-            $limit  = 100;
-            $offset = 0;
-            $guard  = 0;
+            $scan = $this->scanOfficialStudioReleaseGroups((string) $aid);
 
-            do {
-                $query = 'arid:"' . $aid . '" AND primarytype:album AND status:official';
-                $url   = 'https://musicbrainz.org/ws/2/release-group'
-                    . '?query=' . rawurlencode($query)
-                    . '&fmt=json&limit=' . $limit . '&offset=' . $offset;
+            // Elenco non completo (pagina fallita, oppure meno
+            // release-group unici del totale dichiarato dalla ricerca):
+            // ciò che è arrivato si usa, ma l'esito è partial.
+            if (!$scan['complete']) {
+                $fetchOk = false;
+            }
 
-                $resp = $this->httpGetJsonWithStatus($url);
-                usleep(self::MB_THROTTLE_US);
-
-                if (!$resp['ok']) {
-                    $fetchOk = false;
-                    break;
+            foreach ($scan['groups'] as $rg) {
+                $primary   = $rg['primary-type'] ?? '';
+                $secondary = $rg['secondary-types'] ?? [];
+                if (strcasecmp($primary, 'Album') !== 0 || !empty($secondary)) {
+                    continue;
                 }
 
-                $data   = $resp['data'];
-                $groups = $data['release-groups'] ?? [];
-                // L'endpoint di ricerca riporta il totale in "count"
-                // (il browse usava "release-group-count").
-                $total  = (int) ($data['count'] ?? count($groups));
+                $rgId  = $rg['id'] ?? '';
+                $title = trim($rg['title'] ?? '');
+                if ($rgId === '' || $title === '') {
+                    continue;
+                }
+                // Disambiguation MusicBrainz: distingue gli album
+                // omonimi dello stesso artista (es. "LP2", "LP3").
+                $disamb = trim((string) ($rg['disambiguation'] ?? ''));
 
-                foreach ($groups as $rg) {
-                    $primary   = $rg['primary-type'] ?? '';
-                    $secondary = $rg['secondary-types'] ?? [];
-                    if (strcasecmp($primary, 'Album') !== 0 || !empty($secondary)) {
-                        continue;
-                    }
-
-                    $rgId  = $rg['id'] ?? '';
-                    $title = trim($rg['title'] ?? '');
-                    if ($rgId === '' || $title === '') {
-                        continue;
-                    }
-                    // Disambiguation MusicBrainz: distingue gli album
-                    // omonimi dello stesso artista (es. "LP2", "LP3").
-                    $disamb = trim((string) ($rg['disambiguation'] ?? ''));
-
-                    // Controllo difensivo sullo stato: se la risposta
-                    // include l'elenco delle release del gruppo con il
-                    // loro status, si pretende almeno una Official anche
-                    // lato PHP. Se l'elenco manca ci si affida al vincolo
-                    // status:official già presente nella query.
-                    if (!empty($rg['releases']) && is_array($rg['releases'])) {
-                        $hasOfficial = false;
-                        foreach ($rg['releases'] as $r) {
-                            if (strcasecmp((string) ($r['status'] ?? ''), 'Official') === 0) {
-                                $hasOfficial = true;
-                                break;
-                            }
-                        }
-                        if (!$hasOfficial) {
-                            continue;
+                // Controllo difensivo sullo stato: se la risposta
+                // include l'elenco delle release del gruppo con il
+                // loro status, si pretende almeno una Official anche
+                // lato PHP. Se l'elenco manca ci si affida al vincolo
+                // status:official già presente nella query.
+                if (!empty($rg['releases']) && is_array($rg['releases'])) {
+                    $hasOfficial = false;
+                    foreach ($rg['releases'] as $r) {
+                        if (strcasecmp((string) ($r['status'] ?? ''), 'Official') === 0) {
+                            $hasOfficial = true;
+                            break;
                         }
                     }
-
-                    // FILTRO-TITOLO NON-STUDIO: MusicBrainz a volte
-                    // classifica live/rough-mix come "Album senza
-                    // secondary-type" anche su release ufficiali. Questi
-                    // marcatori nel titolo sono un segnale forte e si
-                    // scarta qui. Precisione prima di completezza.
-                    if ($this->isNonStudioDiscographyTitle($title)) {
+                    if (!$hasOfficial) {
                         continue;
-                    }
-
-                    // Scarta le COLLABORAZIONI: tiene il release-group solo
-                    // se OGNI voce dell'artist-credit ha un artist.id
-                    // ammesso (artista principale o sue band omonime).
-                    if (!empty($allowedIds)) {
-                        $creditOk = true;
-                        foreach ($rg['artist-credit'] ?? [] as $ac) {
-                            $acId = $ac['artist']['id'] ?? '';
-                            if ($acId !== '' && !in_array($acId, $allowedIds, true)) {
-                                $creditOk = false;
-                                break;
-                            }
-                        }
-                        if (!$creditOk) {
-                            continue;
-                        }
-                    }
-
-                    // Anno dalla first-release-date (completa o solo
-                    // anno: dopo v15 la data non decide più l'ufficialità,
-                    // serve solo per ordinare). Senza anno non è databile
-                    // e viene scartato come prima.
-                    $fr = $rg['first-release-date'] ?? '';
-                    if (!preg_match('/^(\d{4})/', $fr, $mYear)) {
-                        continue;
-                    }
-                    $year = (int) $mYear[1];
-
-                    // Dedup per TITOLO + DISAMBIGUATION + ANNO: due
-                    // release-group omonimi di anni diversi sono album
-                    // distinti, non duplicati.
-                    $key = $this->discographyTitleKey($title, $disamb) . '|' . $year;
-
-                    // A parità di chiave (release-group duplicati dello
-                    // stesso album su MusicBrainz) vince quello collegato a
-                    // una scheda in archivio, così l'aggancio per
-                    // release-group nella pagina artista funziona. Senza
-                    // preferenza resta il primo incontrato, come prima.
-                    $isPreferred = isset($preferred[strtolower($rgId)]);
-                    $replace     = isset($candidates[$key])
-                        && $isPreferred
-                        && !isset($preferred[strtolower($candidates[$key]['rgId'])]);
-
-                    if (!isset($candidates[$key]) || $replace) {
-                        $candidates[$key] = [
-                            'rgId'   => $rgId,
-                            'title'  => $title,
-                            'year'   => $year,
-                            'disamb' => $disamb,
-                        ];
                     }
                 }
 
-                $offset += $limit;
-                $guard++;
-            } while (!empty($groups) && $offset < $total && $guard < 6);
+                // FILTRO-TITOLO NON-STUDIO: MusicBrainz a volte
+                // classifica live/rough-mix come "Album senza
+                // secondary-type" anche su release ufficiali. Questi
+                // marcatori nel titolo sono un segnale forte e si
+                // scarta qui. Precisione prima di completezza.
+                if ($this->isNonStudioDiscographyTitle($title)) {
+                    continue;
+                }
+
+                // Scarta le COLLABORAZIONI: tiene il release-group solo
+                // se OGNI voce dell'artist-credit ha un artist.id
+                // ammesso (artista principale o sue band omonime).
+                if (!empty($allowedIds)) {
+                    $creditOk = true;
+                    foreach ($rg['artist-credit'] ?? [] as $ac) {
+                        $acId = $ac['artist']['id'] ?? '';
+                        if ($acId !== '' && !in_array($acId, $allowedIds, true)) {
+                            $creditOk = false;
+                            break;
+                        }
+                    }
+                    if (!$creditOk) {
+                        continue;
+                    }
+                }
+
+                // Anno dalla first-release-date (completa o solo
+                // anno: dopo v15 la data non decide più l'ufficialità,
+                // serve solo per ordinare). Senza anno non è databile
+                // e viene scartato come prima.
+                $fr = $rg['first-release-date'] ?? '';
+                if (!preg_match('/^(\d{4})/', $fr, $mYear)) {
+                    continue;
+                }
+                $year = (int) $mYear[1];
+
+                // Dedup per TITOLO + DISAMBIGUATION + ANNO: due
+                // release-group omonimi di anni diversi sono album
+                // distinti, non duplicati.
+                $key = $this->discographyTitleKey($title, $disamb) . '|' . $year;
+
+                // A parità di chiave (release-group duplicati dello
+                // stesso album su MusicBrainz) vince quello collegato a
+                // una scheda in archivio, così l'aggancio per
+                // release-group nella pagina artista funziona. Senza
+                // preferenza resta il primo incontrato, come prima.
+                $isPreferred = isset($preferred[strtolower($rgId)]);
+                $replace     = isset($candidates[$key])
+                    && $isPreferred
+                    && !isset($preferred[strtolower($candidates[$key]['rgId'])]);
+
+                if (!isset($candidates[$key]) || $replace) {
+                    $candidates[$key] = [
+                        'rgId'   => $rgId,
+                        'title'  => $title,
+                        'year'   => $year,
+                        'disamb' => $disamb,
+                    ];
+                }
+            }
         } // fine foreach ($artistIds)
 
         $out = [];
@@ -1730,7 +1950,8 @@ class ArtistMetadataService
         //    'error' e si ritenta (quasi sempre un fallimento mascherato
         //    di MusicBrainz, non un artista senza dischi).
         //  - $out PIENO + scan riuscita → ok=true, partial=false.
-        //  - $out PIENO + una pagina fallita → ok=true, partial=true: ciò
+        //  - $out PIENO + scansione incompleta (pagina fallita o meno
+        //    ID unici del totale dichiarato) → ok=true, partial=true: ciò
         //    che si mostra è corretto (solo release-group con release
         //    ufficiali) ma può essere incompleto; il retry breve completa.
         $partial = false;
@@ -1745,6 +1966,113 @@ class ArtistMetadataService
         }
 
         return ['ok' => $ok, 'partial' => $partial, 'items' => $out];
+    }
+
+    /**
+     * Legge dall'endpoint di ricerca i release-group "Album ufficiale
+     * senza secondary-type" di UNA entità artista e li restituisce una
+     * sola volta ciascuno (chiave: MBID del release-group), insieme a un
+     * flag che dice se l'elenco è completo.
+     *
+     * Perché non basta scorrere le pagine: la ricerca ordina per
+     * punteggio e i risultati di questa query hanno tutti lo stesso
+     * punteggio, quindi l'ordine non è stabile tra una richiesta e
+     * l'altra. Con offset diversi le pagine si sovrappongono: alcuni
+     * release-group arrivano due volte, altri mai (The Beatles: 165
+     * righe, 125 ID unici). Tre difese:
+     *
+     *  1) NOT secondarytype:* nella query: compilation, live e colonne
+     *     sonore restano fuori già lato MusicBrainz, quindi il totale
+     *     scende agli album candidati e per quasi tutti gli artisti sta
+     *     in una pagina sola, dove il problema non può presentarsi;
+     *  2) raccolta per ID: una riga ripetuta non conta due volte;
+     *  3) confronto con il totale dichiarato ("count"): se servono più
+     *     pagine e gli ID unici sono meno del totale, la scansione viene
+     *     ripetuta accumulando gli ID (ogni passaggio perde un insieme
+     *     diverso) e si ferma appena il totale è raggiunto. C'è un tetto
+     *     di richieste per non superare i tempi di risposta della
+     *     pagina: se il totale non è raggiunto entro il tetto,
+     *     complete=false e il chiamante marca partial.
+     *
+     * complete=false anche quando una richiesta fallisce o quando il
+     * totale supera il tetto di pagine. Riguarda solo gli artisti con
+     * più di 100 album in studio ufficiali; per tutti gli altri è una
+     * richiesta sola, come prima.
+     *
+     * @return array{groups:array<int,array>,complete:bool}
+     */
+    private function scanOfficialStudioReleaseGroups(string $aid): array
+    {
+        $query = 'arid:"' . $aid . '" AND primarytype:album'
+            . ' AND status:official AND NOT secondarytype:*';
+
+        $limit       = 100;
+        $pageCap     = 6;  // come prima: al massimo 600 righe per passaggio
+        $maxRequests = 16; // tetto complessivo (~25 s con il throttle)
+
+        $byId     = []; // MBID release-group => riga della ricerca
+        $declared = 0;
+        $requests = 0;
+        $failed   = false;
+
+        while ($requests < $maxRequests) {
+            $offset = 0;
+            $guard  = 0;
+            $total  = 0;
+
+            do {
+                $url = 'https://musicbrainz.org/ws/2/release-group'
+                    . '?query=' . rawurlencode($query)
+                    . '&fmt=json&limit=' . $limit . '&offset=' . $offset;
+
+                $resp = $this->httpGetJsonWithStatus($url);
+                usleep(self::MB_THROTTLE_US);
+                $requests++;
+
+                if (!$resp['ok']) {
+                    $failed = true;
+                    break 2;
+                }
+
+                $data   = $resp['data'];
+                $groups = $data['release-groups'] ?? [];
+                // L'endpoint di ricerca riporta il totale in "count"
+                // (il browse usava "release-group-count").
+                $total  = (int) ($data['count'] ?? count($groups));
+
+                foreach ($groups as $rg) {
+                    $id = strtolower(trim((string) ($rg['id'] ?? '')));
+                    if ($id !== '' && !isset($byId[$id])) {
+                        $byId[$id] = $rg;
+                    }
+                }
+
+                $offset += $limit;
+                $guard++;
+            } while (!empty($groups)
+                && $offset < $total
+                && $guard < $pageCap
+                && count($byId) < $total
+                && $requests < $maxRequests);
+
+            $declared = $total;
+
+            // Tutti gli ID dichiarati sono arrivati: elenco completo.
+            if (count($byId) >= $declared) {
+                break;
+            }
+
+            // Totale oltre il tetto di pagine: ripetere non può
+            // completarlo, si esce con ciò che si ha (complete=false).
+            if ($declared > $limit * $pageCap) {
+                break;
+            }
+        }
+
+        return [
+            'groups'   => array_values($byId),
+            'complete' => !$failed && count($byId) >= $declared,
+        ];
     }
 
     /**
