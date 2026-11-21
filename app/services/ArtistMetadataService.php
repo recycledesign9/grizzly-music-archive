@@ -15,7 +15,11 @@ require_once __DIR__ . '/ImageOptimizer.php';
  *   2) Wikidata     -> titolo pagina Wikipedia IT + nazionalita + immagine P18
  *   3) Wikipedia IT -> bio italiana COMPLETA (intro) + immagine
  *   4) [fallback]   -> Wikipedia EN
- *   5) [fallback]   -> Last.fm artist.getInfo (bio inglese)
+ *
+ * Un errore transitorio di Wikidata o Wikipedia (rete, timeout, 429,
+ * 5xx) rende fetch_ok=false: lo stato bio diventa 'error' e il recupero
+ * viene ripetuto dopo il cooldown, invece di salvare come "non trovato"
+ * una bio che esiste.
  *
  * IMMAGINE — identita' prima del contenuto:
  *   a) Deezer artist ID persistito, oppure derivato in modo verificato da
@@ -35,6 +39,48 @@ class ArtistMetadataService
     private const MB_MIN_SCORE = 85;
 
     /**
+     * Vero se, durante il fetch in corso, una chiamata della catena bio
+     * (Wikidata, Wikipedia) è fallita per un errore transitorio. Viene
+     * azzerato all'inizio di fetchByName() e letto alla fine: con bio
+     * richiesta, rende fetch_ok=false.
+     */
+    private $bioTransient = false;
+
+    /**
+     * Dettaglio degli errori transitori del fetch in corso: una voce
+     * [status, url] per chiamata fallita. Solo diagnostica, letto da
+     * lastTransientErrors(); non viene salvato da nessuna parte.
+     *
+     * @var array<int,array{status:int,url:string}>
+     */
+    private $bioTransientLog = [];
+
+    /**
+     * Distanza minima fra due richieste a Wikipedia/Wikidata nello stesso
+     * processo. Le API Wikimedia rispondono 429 (troppe richieste) quando
+     * arrivano chiamate ravvicinate: misurato su MAMP il 21/11/2026, 11
+     * artisti su 24 in errore con chiamate senza pausa.
+     */
+    private const WIKIMEDIA_GAP_US = 300000;
+
+    /** Attesa massima per un singolo 429, anche se Retry-After chiede di più. */
+    private const WIKIMEDIA_MAX_WAIT_US = 5000000;
+
+    /**
+     * Attese complessive concesse ai nuovi tentativi Wikimedia in un solo
+     * fetchByName(): oltre questo tetto la chiamata fallisce subito e la
+     * bio va in stato 'error' (nuovo tentativo dopo il cooldown), così la
+     * richiesta della pagina artista non si allunga oltre misura.
+     */
+    private const WIKIMEDIA_WAIT_BUDGET_US = 8000000;
+
+    /** Istante (microtime) dell'ultima richiesta Wikimedia del processo. */
+    private static $wikimediaLastAt = 0.0;
+
+    /** Budget di attesa residuo per il fetchByName() in corso (µs). */
+    private $wikimediaWaitBudget = self::WIKIMEDIA_WAIT_BUDGET_US;
+
+    /**
      * Versioni della logica di fetch. Da incrementare OGNI VOLTA che si
      * modifica in modo sostanziale l'algoritmo di recupero — non la
      * frequenza di chiamata, ma cosa/come viene cercato o filtrato.
@@ -51,12 +97,11 @@ class ArtistMetadataService
     // v2: scarta le schede Wikipedia di album/singoli pescate per nome
     // quando il nome artista coincide col titolo di un'opera (Modern Nature).
     //
-    // 2026-11: aggiunta la guardia sulle bio Last.fm "condivise" (pagina
-    // unica per più artisti omonimi, vedi resolveSharedNameLastFmBio).
-    // La versione resta 2 di proposito: la guardia tocca solo le bio con
-    // fonte Last.fm che elencano più artisti, e un incremento farebbe
-    // ricalcolare la bio di TUTTI gli artisti. Le poche schede coinvolte
-    // si riallineano azzerando bio_fetch_version solo su quelle.
+    // 2026-11: la catena bio usa solo MusicBrainz, Wikidata e Wikipedia e
+    // distingue l'errore transitorio dal "non trovato". La versione resta 2
+    // di proposito: un incremento ricalcolerebbe la bio di TUTTI gli
+    // artisti. Le schede da ricalcolare vengono azzerate nel database
+    // dalla migration della release.
     public const BIO_LOGIC_VERSION = 2;
 
     /**
@@ -218,6 +263,10 @@ class ArtistMetadataService
         $result = $this->emptyResult();
         $name   = trim($name);
 
+        $this->bioTransient        = false;
+        $this->bioTransientLog     = [];
+        $this->wikimediaWaitBudget = self::WIKIMEDIA_WAIT_BUDGET_US;
+
         if ($name === '') {
             return $result;
         }
@@ -254,7 +303,6 @@ class ArtistMetadataService
         }
 
         $wikidataId = '';
-        $areaHints  = []; // luoghi MusicBrainz dell'artista (guardia Last.fm)
 
         if (!empty($mb['id'])) {
             $resolvedMbid = $this->normalizeMusicBrainzId((string) $mb['id']);
@@ -272,13 +320,6 @@ class ArtistMetadataService
                 }
 
                 $wikidataId = $this->extractWikidataId($mb['relations'] ?? []);
-
-                foreach (['area', 'begin-area', 'begin_area'] as $areaKey) {
-                    $areaName = trim((string) ($mb[$areaKey]['name'] ?? ''));
-                    if ($areaName !== '') {
-                        $areaHints[] = $areaName;
-                    }
-                }
             } else {
                 $fetchOk = false;
             }
@@ -382,27 +423,12 @@ class ArtistMetadataService
             }
         }
 
-        if ($wantBio && $result['bio'] === '') {
-            $lf = $this->fetchLastFmBio($name, $result['mb_artist_id']);
-
-            // Last.fm ha UNA pagina per nome: per gli omonimi la bio è un
-            // elenco di più artisti. Si tiene solo la voce dell'artista
-            // in archivio, oppure niente se non è identificabile.
-            if (!empty($lf['bio'])) {
-                $lf['bio'] = $this->resolveSharedNameLastFmBio(
-                    (string) $lf['bio'],
-                    $name,
-                    $localAlbumTitles,
-                    $areaHints
-                );
-            }
-
-            if (!empty($lf['bio'])) {
-                $result['bio']        = $this->trimBio($lf['bio']);
-                $result['bio_source'] = 'lastfm';
-                $result['bio_lang']   = 'en';
-                $result['bio_url']    = $lf['url'] ?? '';
-            }
+        // Un errore transitorio su Wikidata o Wikipedia non è un "non
+        // trovato": lo stato bio diventa 'error' e il controller ripete il
+        // recupero dopo il cooldown. Una bio trovata in questo giro viene
+        // salvata comunque (updateBioMeta non cancella mai un dato buono).
+        if ($wantBio && $this->bioTransient) {
+            $fetchOk = false;
         }
 
         $result['fetch_ok']       = $fetchOk;
@@ -438,6 +464,37 @@ class ArtistMetadataService
 
         $data['_fetch_ok'] = true;
         return $data;
+    }
+
+    /**
+     * Solo l'identità MusicBrainz di un artista, senza bio né immagini.
+     *
+     * Usa la stessa ricerca e la stessa prova d'identità della pagina
+     * artista: con dischi locali il candidato deve possederne almeno uno,
+     * e un solo candidato deve superare la prova. Serve ai consigli della
+     * scheda disco quando l'artista non ha ancora un MBID salvato.
+     *
+     * ok=false se MusicBrainz non ha risposto: un MBID vuoto in quel caso
+     * non significa "artista inesistente".
+     *
+     * @param string[] $localAlbumTitles
+     * @return array{ok:bool,mbid:string}
+     */
+    public function resolveArtistMbid(string $name, array $localAlbumTitles = []): array
+    {
+        $name = trim($name);
+        if ($name === '') {
+            return ['ok' => true, 'mbid' => ''];
+        }
+
+        $mb = $this->searchMusicBrainzArtist($name, $localAlbumTitles);
+        $ok = !array_key_exists('_fetch_ok', $mb) || (bool) $mb['_fetch_ok'];
+
+        $mbid = !empty($mb['id'])
+            ? $this->normalizeMusicBrainzId((string) $mb['id'])
+            : '';
+
+        return ['ok' => $ok, 'mbid' => $mbid];
     }
 
     private function normalizeMusicBrainzId(string $mbid): string
@@ -490,13 +547,27 @@ class ArtistMetadataService
         }
 
         if (!empty($normLocal)) {
-            $matched = [];
+            $matched       = [];
+            $checkFailed   = false;
             $normLocalList = array_keys($normLocal);
 
             foreach ($candidates as $a) {
-                if ($this->artistOwnsLocalAlbum((string) $a['id'], $normLocalList)) {
+                $owns = $this->artistOwnsLocalAlbum((string) $a['id'], $normLocalList);
+                if ($owns === null) {
+                    $checkFailed = true;
+                    continue;
+                }
+                if ($owns) {
                     $matched[] = $a;
                 }
+            }
+
+            // Una verifica fallita per errore (503, timeout) non è un "non
+            // possiede il disco": senza quella risposta non si può dire se
+            // l'identità è univoca. Nessuna scelta e fetch_ok=false, così il
+            // tentativo viene ripetuto dopo il cooldown.
+            if ($checkFailed) {
+                return ['_fetch_ok' => false];
             }
 
             // Zero prove o piu' prove compatibili = ambiguo. Non indovinare.
@@ -521,17 +592,26 @@ class ArtistMetadataService
      * locali (confronto su titoli normalizzati dei release-group).
      * Costa una richiesta MB (throttled) per candidato verificato.
      *
+     * Restituisce null quando MusicBrainz non ha risposto (503, 429,
+     * timeout anche dopo i nuovi tentativi): il chiamante non deve
+     * leggerlo come "non possiede il disco".
+     *
      * @param string   $mbid       MBID artista candidato
      * @param string[] $normLocal  Titoli locali già normalizzati
      */
-    private function artistOwnsLocalAlbum(string $mbid, array $normLocal): bool
+    private function artistOwnsLocalAlbum(string $mbid, array $normLocal): ?bool
     {
         $url = 'https://musicbrainz.org/ws/2/release-group'
             . '?artist=' . urlencode($mbid)
             . '&type=album&limit=100&fmt=json';
 
-        $data = $this->httpGetJson($url);
+        $resp = $this->httpGetJsonWithStatus($url);
         usleep(self::MB_THROTTLE_US);
+
+        if (!$resp['ok']) {
+            return null;
+        }
+        $data = $resp['data'];
 
         foreach ($data['release-groups'] ?? [] as $rg) {
             $t = $this->normalizeTitleForMatch((string) ($rg['title'] ?? ''));
@@ -635,7 +715,7 @@ class ArtistMetadataService
             . '&piprop=original|thumbnail&pithumbsize=600'
             . '&titles=' . rawurlencode($title);
 
-        $data  = $this->httpGetJson($apiUrl);
+        $data  = $this->httpGetJsonTracked($apiUrl);
         $pages = $data['query']['pages'] ?? [];
 
         if (empty($pages)) {
@@ -779,7 +859,7 @@ class ArtistMetadataService
         $url = 'https://www.wikidata.org/wiki/Special:EntityData/'
             . rawurlencode($wikidataId) . '.json';
 
-        $data = $this->httpGetJson($url);
+        $data = $this->httpGetJsonTracked($url);
 
         $sitelinks = $data['entities'][$wikidataId]['sitelinks'] ?? [];
         $key       = $lang . 'wiki';
@@ -1082,7 +1162,7 @@ class ArtistMetadataService
         $url = 'https://www.wikidata.org/wiki/Special:EntityData/'
             . rawurlencode($wikidataId) . '.json';
 
-        $data   = $this->httpGetJson($url);
+        $data   = $this->httpGetJsonTracked($url);
         $claims = $data['entities'][$wikidataId]['claims'] ?? [];
 
         $countryQid = '';
@@ -1098,7 +1178,7 @@ class ArtistMetadataService
 
         $cUrl = 'https://www.wikidata.org/wiki/Special:EntityData/'
             . rawurlencode($countryQid) . '.json';
-        $cData   = $this->httpGetJson($cUrl);
+        $cData   = $this->httpGetJsonTracked($cUrl);
         $labels  = $cData['entities'][$countryQid]['labels'] ?? [];
 
         if (!empty($labels['it']['value'])) {
@@ -1108,230 +1188,6 @@ class ArtistMetadataService
             return $labels['en']['value'];
         }
         return '';
-    }
-
-    // ============================================================
-    // LAST.FM (fallback)
-    // ============================================================
-
-    private function fetchLastFmBio(string $name, string $mbid = ''): array
-    {
-        if (ExternalApiConfig::getLastFmKey() === '') {
-            return ['bio' => '', 'url' => ''];
-        }
-
-        $url = 'https://ws.audioscrobbler.com/2.0/?method=artist.getinfo'
-            . '&api_key=' . ExternalApiConfig::getLastFmKey()
-            . '&format=json&lang=en';
-
-        if ($mbid !== '') {
-            $url .= '&mbid=' . urlencode($mbid);
-        } else {
-            $url .= '&artist=' . urlencode($name);
-        }
-
-        $data = $this->httpGetJson($url);
-
-        $raw = $data['artist']['bio']['content'] ?? '';
-        if ($raw === '') {
-            return ['bio' => '', 'url' => ''];
-        }
-
-        $bio = strip_tags($raw);
-        $bio = preg_replace('/\s*Read more on Last\.fm.*$/is', '', $bio);
-        $bio = trim($bio);
-
-        return [
-            'bio' => $bio,
-            'url' => $data['artist']['url'] ?? '',
-        ];
-    }
-
-    /**
-     * Guardia sulle bio Last.fm "condivise".
-     *
-     * Last.fm tiene una sola pagina per NOME, non per artista: quando più
-     * artisti si chiamano allo stesso modo la bio è un testo unico che li
-     * elenca tutti ("There are more than one artist with this name:
-     * 1. ... 2. ... 3. ..."), anche se la richiesta è fatta con l'MBID
-     * giusto. Salvata così com'è, la scheda descrive anche gli omonimi
-     * (caso confermato: PISS, Vancouver, con dentro una band hardcore di
-     * Berlino e un duo power electronics inglese).
-     *
-     * Comportamento:
-     *  - bio normale (un solo artista) → restituita invariata;
-     *  - bio condivisa con voci numerate → si cerca la voce dell'artista
-     *    in archivio con due prove, in ordine di forza:
-     *      a) il titolo di un album dell'artista presente in archivio
-     *         compare nella voce (anche dentro un URL: "…/album/
-     *         you-made-me-skin-on-linen");
-     *      b) un luogo MusicBrainz dell'artista (area, città di
-     *         formazione) compare nella voce.
-     *    Si accetta solo se la prova indica UNA voce sola;
-     *  - bio condivisa senza una voce identificabile → stringa vuota.
-     *    Meglio nessuna bio che la bio di un omonimo.
-     *
-     * @param string[] $localAlbumTitles titoli degli album in archivio
-     * @param string[] $areaHints        nomi di luogo da MusicBrainz
-     */
-    private function resolveSharedNameLastFmBio(
-        string $bio,
-        string $artistName,
-        array $localAlbumTitles,
-        array $areaHints
-    ): string {
-        $bio = trim($bio);
-        if ($bio === '' || !$this->looksLikeSharedNameBio($bio)) {
-            return $bio;
-        }
-
-        // Voci numerate a inizio riga: "1. ", "2) ", "(3) ", "4: ".
-        $parts = preg_split(
-            '/^[ \t]*\(?(\d{1,2})[\.\)\]:][ \t]+/mu',
-            $bio,
-            -1,
-            PREG_SPLIT_DELIM_CAPTURE
-        );
-        if (!is_array($parts) || count($parts) < 5) {
-            return ''; // meno di due voci numerate: non separabile
-        }
-
-        // $parts = [premessa, "1", testo1, "2", testo2, ...]: le voci
-        // valgono solo se la numerazione parte da 1 ed è consecutiva.
-        $entries  = [];
-        $expected = 1;
-        for ($i = 1; $i + 1 < count($parts); $i += 2) {
-            if ((int) $parts[$i] !== $expected) {
-                return '';
-            }
-            $entries[] = trim((string) $parts[$i + 1]);
-            $expected++;
-        }
-        if (count($entries) < 2) {
-            return '';
-        }
-
-        $normEntries = [];
-        foreach ($entries as $entry) {
-            $normEntries[] = ' ' . $this->normalizeForContainment($entry) . ' ';
-        }
-        $normArtist = $this->normalizeForContainment($artistName);
-
-        // a) prova forte: titolo di un album in archivio.
-        $needles = [];
-        foreach ($localAlbumTitles as $title) {
-            $title = preg_replace('/\s*[\(\[][^\)\]]*[\)\]]\s*/u', ' ', (string) $title);
-            $norm  = $this->normalizeForContainment((string) $title);
-            if ($norm === '' || $norm === $normArtist) {
-                continue; // omonimo dell'artista: compare in ogni voce
-            }
-            // Titoli troppo brevi o generici ("Demo", "Live", "II") non
-            // identificano nessuno: una parola sola deve avere almeno 8
-            // caratteri, più parole almeno 6 in tutto.
-            $minLen = (strpos($norm, ' ') === false) ? 8 : 6;
-            if (mb_strlen($norm) < $minLen) {
-                continue;
-            }
-            $needles[$norm] = true;
-        }
-        $picked = $this->singleEntryContaining($normEntries, array_keys($needles));
-
-        // b) prova più debole: luogo MusicBrainz dell'artista.
-        if ($picked === null) {
-            $needles = [];
-            foreach ($areaHints as $area) {
-                $norm = $this->normalizeForContainment((string) $area);
-                if (mb_strlen($norm) < 4 || $norm === $normArtist) {
-                    continue;
-                }
-                $needles[$norm] = true;
-            }
-            $picked = $this->singleEntryContaining($normEntries, array_keys($needles));
-        }
-
-        return ($picked === null) ? '' : $entries[$picked];
-    }
-
-    /**
-     * Vero se la bio Last.fm dichiara in apertura di riguardare più
-     * artisti con lo stesso nome. Il controllo è volutamente stretto
-     * (formule tipiche di Last.fm nelle prime righe, oppure un elenco
-     * numerato che comincia subito): una bio normale che inizia con
-     * "There are few bands as…" non deve essere toccata.
-     */
-    private function looksLikeSharedNameBio(string $bio): bool
-    {
-        $head = mb_substr($bio, 0, 300);
-
-        $quantity = '(?:more\s+than\s+\w+|multiple|several|many|various|numerous'
-            . '|a\s+few|a\s+couple\s+of|a\s+number\s+of'
-            . '|two|three|four|five|six|seven|eight|nine|ten|\d{1,2})';
-        $subject  = '(?:artists?|bands?|groups?|acts?|projects?|musicians?'
-            . '|performers?|singers?|rappers?|djs?|producers?)';
-
-        // "There are more than one artist with this name", "There are at
-        // least 3 bands called X", "There are two artists named X"...
-        if (preg_match(
-            '/^\W{0,5}there\s+(?:are|is|were|have\s+been|has\s+been)\s+'
-            . '(?:(?:at\s+least|currently|actually|also|now)\s+)*'
-            . $quantity . '\s+(?:\w+\s+){0,3}?' . $subject
-            . '\b.{0,60}?\b(?:names?|called|named|known\s+as)\b/isu',
-            $head
-        )) {
-            return true;
-        }
-
-        // "X is the name of at least two bands", "X may refer to:".
-        if (preg_match(
-            '/\bis\s+the\s+name\s+of\s+(?:at\s+least\s+)?' . $quantity . '\b/iu',
-            $head
-        ) || preg_match('/\b(?:may|can|could)\s+refer\s+to\b/iu', $head)) {
-            return true;
-        }
-
-        // Elenco numerato senza premessa: comincia con "1." e più sotto
-        // ha una riga che comincia con "2.".
-        return (bool) preg_match('/^\W{0,3}1[\.\)\]:][ \t]+/u', $bio)
-            && (bool) preg_match('/^[ \t]*\(?2[\.\)\]:][ \t]+/mu', $bio);
-    }
-
-    /**
-     * Indice dell'UNICA voce che contiene almeno uno dei termini cercati
-     * (frase intera, già normalizzata). null se nessuna o più di una.
-     *
-     * @param string[] $normEntries voci normalizzate, con spazi ai bordi
-     * @param string[] $needles     termini normalizzati
-     */
-    private function singleEntryContaining(array $normEntries, array $needles): ?int
-    {
-        if (empty($needles)) {
-            return null;
-        }
-
-        $hits = [];
-        foreach ($normEntries as $idx => $text) {
-            foreach ($needles as $needle) {
-                if (mb_strpos($text, ' ' . $needle . ' ') !== false) {
-                    $hits[] = $idx;
-                    break;
-                }
-            }
-        }
-
-        return count($hits) === 1 ? $hits[0] : null;
-    }
-
-    /**
-     * Normalizzazione per la ricerca di una frase dentro un testo:
-     * minuscole, tutto ciò che non è lettera o cifra diventa spazio,
-     * spazi compattati. Trasforma anche gli slug degli URL in parole
-     * ("you-made-me-skin-on-linen" → "you made me skin on linen").
-     */
-    private function normalizeForContainment(string $text): string
-    {
-        $text = mb_strtolower($text, 'UTF-8');
-        $text = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $text);
-        return trim((string) $text);
     }
 
     // ============================================================
@@ -2200,6 +2056,113 @@ class ArtistMetadataService
     }
 
     /**
+     * GET JSON per la catena bio (Wikidata, Wikipedia) con registrazione
+     * degli errori transitori in $this->bioTransient. Restituisce i dati,
+     * oppure [] sia per "non trovato" sia per errore: la differenza la
+     * legge fetchByName() dal flag.
+     */
+    private function httpGetJsonTracked(string $url): array
+    {
+        $res = $this->httpGetJsonOptional($url);
+        if (!$res['ok']) {
+            $this->bioTransient      = true;
+            $this->bioTransientLog[] = ['status' => (int) $res['status'], 'url' => $url];
+        }
+        return $res['data'];
+    }
+
+    /**
+     * Errori transitori dell'ultimo fetchByName() (status HTTP e URL).
+     * Status 0 = nessuna risposta (rete, DNS, TLS, timeout).
+     *
+     * @return array<int,array{status:int,url:string}>
+     */
+    public function lastTransientErrors(): array
+    {
+        return $this->bioTransientLog;
+    }
+
+    /**
+     * GET JSON per Wikipedia/Wikidata che distingue un errore transitorio
+     * da un "non trovato".
+     *
+     *   ok=false  rete, timeout, 429, 5xx, oppure 200 con corpo non JSON;
+     *   ok=true   risposta valida, oppure 404/altro 4xx (risorsa inesistente:
+     *             esito definitivo, dati vuoti).
+     *
+     * Rispetta i limiti Wikimedia: tiene una pausa minima fra le richieste
+     * (WIKIMEDIA_GAP_US) e, su 429, attende quanto indicato da Retry-After
+     * (al massimo WIKIMEDIA_MAX_WAIT_US; 2 s e poi 4 s se l'header manca)
+     * prima di riprovare. Fino a 3 tentativi, entro il budget di attesa del
+     * fetch in corso.
+     *
+     * @return array{ok:bool,data:array,status:int}
+     */
+    private function httpGetJsonOptional(string $url): array
+    {
+        $status    = 0;
+        $raw       = '';
+        $transient = true;
+
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            $this->wikimediaPace();
+
+            $res       = $this->httpGetBinaryWithStatus($url, 'application/json');
+            $status    = (int) $res['status'];
+            $raw       = (string) $res['bytes'];
+            $transient = ($status === 0 || $status === 429 || $status >= 500);
+
+            if (!$transient || $attempt === 3) {
+                break;
+            }
+
+            if ($status === 429) {
+                $retryAfter = (int) ($res['retry_after'] ?? 0);
+                $waitUs     = $retryAfter > 0
+                    ? min($retryAfter * 1000000, self::WIKIMEDIA_MAX_WAIT_US)
+                    : 2000000 * $attempt;
+            } else {
+                $waitUs = 1000000;
+            }
+
+            // Budget esaurito: niente altre attese, la chiamata resta
+            // fallita e la bio verrà riprovata dopo il cooldown.
+            if ($waitUs > $this->wikimediaWaitBudget) {
+                break;
+            }
+            $this->wikimediaWaitBudget -= $waitUs;
+            usleep($waitUs);
+        }
+
+        if ($transient) {
+            return ['ok' => false, 'data' => [], 'status' => $status];
+        }
+        if ($status >= 400) {
+            return ['ok' => true, 'data' => [], 'status' => $status];
+        }
+
+        $json = json_decode($raw, true);
+        if (!is_array($json)) {
+            return ['ok' => false, 'data' => [], 'status' => $status];
+        }
+
+        return ['ok' => true, 'data' => $json, 'status' => $status];
+    }
+
+    /**
+     * Attende quanto serve perché fra due richieste Wikimedia dello stesso
+     * processo passino almeno WIKIMEDIA_GAP_US.
+     */
+    private function wikimediaPace(): void
+    {
+        $elapsedUs = (int) ((microtime(true) - self::$wikimediaLastAt) * 1000000);
+        if ($elapsedUs < self::WIKIMEDIA_GAP_US) {
+            usleep(self::WIKIMEDIA_GAP_US - $elapsedUs);
+        }
+        self::$wikimediaLastAt = microtime(true);
+    }
+
+    /**
      * GET JSON singolo con stato HTTP, usato per Deezer.
      *
      * @return array{ok:bool,data:array}
@@ -2231,7 +2194,7 @@ class ArtistMetadataService
      * DAVVERO a buon fine (bytes ricevuti + JSON valido), a differenza
      * di httpGetJson() che restituisce [] sia per "nessun risultato" sia
      * per "richiesta fallita" — ambiguità accettabile per le chiamate di
-     * fallback (Wikipedia/Wikidata/Deezer/Last.fm, dove un fallimento è
+     * fallback (immagini Wikipedia/Wikidata, Deezer, dove un fallimento è
      * un esito normale e già previsto della catena), ma NON per i due
      * punti che decidono se la cache va marcata come confermata:
      * la ricerca artista su MusicBrainz e la discografia.
@@ -2347,7 +2310,7 @@ class ArtistMetadataService
      * status = 0 quando la richiesta non è nemmeno arrivata a una
      * risposta HTTP (DNS, TLS, timeout di connessione).
      *
-     * @return array{status:int,bytes:string}
+     * @return array{status:int,bytes:string,retry_after:int}
      */
     private function httpGetBinaryWithStatus(string $url, string $accept = '*/*'): array
     {
@@ -2374,18 +2337,23 @@ class ArtistMetadataService
         // attraversate nella catena di redirect (301/302/307 compresi):
         // lo status che conta è quello dell'ULTIMA riga "HTTP/...",
         // non della prima.
-        $status = 0;
+        $status     = 0;
+        $retryAfter = 0;
         if (isset($http_response_header) && is_array($http_response_header)) {
             foreach ($http_response_header as $h) {
                 if (preg_match('~^HTTP/\S+\s+(\d{3})~', $h, $m)) {
-                    $status = (int) $m[1];
+                    $status     = (int) $m[1];
+                    $retryAfter = 0; // vale solo l'header della risposta finale
+                } elseif (preg_match('~^Retry-After:\s*(\d+)~i', $h, $m)) {
+                    $retryAfter = (int) $m[1];
                 }
             }
         }
 
         return [
-            'status' => $status,
-            'bytes'  => ($raw === false) ? '' : $raw,
+            'status'      => $status,
+            'bytes'       => ($raw === false) ? '' : $raw,
+            'retry_after' => $retryAfter,
         ];
     }
 }

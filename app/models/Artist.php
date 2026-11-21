@@ -672,11 +672,19 @@ class Artist {
     }
 
     public function needsBioRefetch(array $artist, int $currentVersion): bool {
+        // Una bio presente non scade. Una bio ASSENTE con esito 'ok' (fonti
+        // interrogate, niente trovato) viene rivalidata dopo 30 giorni:
+        // Wikipedia e Wikidata crescono nel tempo, e senza scadenza un
+        // "non trovato" resterebbe definitivo per sempre.
+        $hasBio = trim((string)($artist['bio'] ?? '')) !== '';
+
         return $this->needsRefetch(
             $artist['bio_fetched_at']    ?? null,
             $artist['bio_status']        ?? null,
             $artist['bio_fetch_version'] ?? 0,
-            $currentVersion
+            $currentVersion,
+            180,
+            $hasBio ? 0 : 30
         );
     }
 
@@ -703,7 +711,7 @@ class Artist {
     public function needsDiscographyRefetch(array $artist, int $currentVersion): bool {
         // TTL 30 giorni sull'esito 'ok': la discografia di un artista
         // attivo si rivalida da sola alla prima visita dopo la scadenza.
-        // La bio (sopra) resta senza TTL: non invecchia allo stesso modo.
+        // La bio (sopra) scade solo quando è assente.
         return $this->needsRefetch(
             $artist['disco_fetched_at']    ?? null,
             $artist['disco_status']        ?? null,

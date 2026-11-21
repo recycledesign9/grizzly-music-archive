@@ -115,7 +115,7 @@ class AlbumMetadataService
             $result['mbid']  = $mb['id'] ?? '';
             $result['artist_mbid'] = $this->artistMbidFromCredit($mb);
             // Identita' logica dell'album: il release-group resta valido anche
-            // se la tracklist viene poi completata/sostituita da Discogs o Last.fm.
+            // se la tracklist viene poi completata/sostituita da Discogs o Deezer.
             $result['release_group'] = (string)($mb['release-group']['id'] ?? '');
 
             // Genere da MusicBrainz release-group. MusicBrainz non
@@ -323,35 +323,34 @@ class AlbumMetadataService
             }
         }
 
-        // ================= LASTFM (FALLBACK: TRACKLIST VUOTA O DURATE MANCANTI) =================
-        // Ramo originale invariato: tracklist assente → Last.fm la fornisce.
-        // Nuovo ramo (elseif): tracklist già presente da MB/Discogs ma con
-        // TUTTE le durate a 0 (es. Urban Hymns — né la release MusicBrainz
-        // né quella Discogs scelta hanno il campo durata compilato per
-        // singolo track). Last.fm viene interpellato SOLO per le durate,
-        // riempite per posizione senza toccare titoli/posizioni già
-        // assegnati — stessa filosofia del fix Discogs qui sopra.
+        // ================= DEEZER (RIPIEGO: TRACKLIST VUOTA O DURATE MANCANTI) =================
+        // Interviene solo dopo MusicBrainz e Discogs, in due casi:
+        //  - nessuna tracklist: si usa quella dell'album Deezer con artista
+        //    e titolo identici (edizione standard se presente);
+        //  - tracklist presente ma con TUTTE le durate a 0 (es. Urban Hymns):
+        //    si riempiono solo le durate, abbinando le tracce per TITOLO.
+        // L'abbinamento per posizione non è affidabile: Deezer ha spesso
+        // solo l'edizione deluxe o ristampata, con tracce in più o in ordine
+        // diverso. Misura del 21/11/2026 sugli 8 dischi dell'archivio senza
+        // durate: per titolo 83 tracce su 96, per posizione 61 su 96 (e le
+        // altre 35 avrebbero ricevuto la durata di un brano diverso).
+        // Deezer non richiede chiavi.
         if (empty($result['tracks']) || $this->tracksHaveNoDuration($result['tracks'])) {
-            $lfm = $this->getLastFmAlbumInfo($artistRaw, $albumRaw);
+            $dz = $this->getDeezerAlbumTracks($artistRaw, $albumRaw);
 
-            if (empty($result['tracks'])) {
-                if (!empty($lfm['tracks'])) {
-                    $result['tracks'] = $this->cleanTracks($lfm['tracks']);
+            if (!empty($dz)) {
+                if (empty($result['tracks'])) {
+                    $result['tracks'] = $this->cleanTracks($dz);
+                } else {
+                    $result['tracks'] = $this->fillDurationsByTitle($result['tracks'], $dz);
                 }
-            } elseif (!empty($lfm['tracks'])) {
-                foreach ($result['tracks'] as $i => &$track) {
-                    if (!empty($lfm['tracks'][$i]['duration'])) {
-                        $track['duration'] = $lfm['tracks'][$i]['duration'];
-                    }
-                }
-                unset($track);
             }
         }
 
         $result['debug_source'] = !$isMbValid ? 'discogs' : 'musicbrainz';
 
         // Le varianti descrivono tracklist MusicBrainz: se la tracklist
-        // finale arriva da Discogs o Last.fm non sono più confrontabili
+        // finale arriva da Discogs o Deezer non sono più confrontabili
         // con quella applicata e non vengono proposte.
         if (!$isMbValid) {
             unset($result['editions'], $result['editions_partial']);
@@ -363,7 +362,7 @@ class AlbumMetadataService
     // ----------------------------------------------------------
     // Identificazione MusicBrainz leggera per lo scanner.
     // Restituisce release MBID + release-group senza browse delle edizioni,
-    // cover o fallback Discogs/Last.fm. Serve solo come identita' forte.
+    // cover o ripieghi Discogs/Deezer. Serve solo come identita' forte.
     // ----------------------------------------------------------
     public function identifyRelease(string $artist, string $album, int $year = 0): array
     {
@@ -394,7 +393,7 @@ class AlbumMetadataService
     // GRIZZLY_SCANNER_EVIDENCE_V1
     //
     // Evidenza MusicBrainz minima per il media scanner.
-    // NON usa cover, CAA, Discogs, Last.fm o browse delle edizioni.
+    // NON usa cover, CAA, Discogs, Deezer o browse delle edizioni.
     //
     // Regola:
     // - prima prova la cache persistente;
@@ -2987,36 +2986,156 @@ class AlbumMetadataService
         return 0;
     }
 
-    // ================= LASTFM =================
+    // ================= DEEZER (tracklist e durate) =================
 
-    private function getLastFmAlbumInfo(string $artist, string $album): array
+    /**
+     * Tracce dell'album Deezer con artista e titolo identici a quelli
+     * cercati (confronto su chiavi normalizzate: annotazioni tra
+     * parentesi e suffissi "- Deluxe", "- Remastered" esclusi).
+     *
+     * Tra più corrispondenze si preferisce quella con il titolo identico
+     * anche nelle annotazioni; altrimenti quella con meno tracce, che di
+     * norma è l'edizione standard e non la deluxe.
+     *
+     * Restituisce [] se Deezer non risponde o non trova il disco: il form
+     * resta con quello che hanno dato MusicBrainz e Discogs.
+     *
+     * @return array<int,array{position:int,title:string,duration:int}>
+     */
+    private function getDeezerAlbumTracks(string $artist, string $album): array
     {
-        if (ExternalApiConfig::getLastFmKey() === '') return [];
+        $artist = trim($artist);
+        $album  = trim($album);
+        if ($artist === '' || $album === '') {
+            return [];
+        }
 
-        $url = 'https://ws.audioscrobbler.com/2.0/?method=album.getinfo'
-            . '&api_key=' . ExternalApiConfig::getLastFmKey()
-            . '&artist=' . urlencode($artist)
-            . '&album=' . urlencode($album)
-            . '&format=json';
+        $q = 'artist:"' . str_replace('"', '', $artist) . '" album:"' . str_replace('"', '', $album) . '"';
+        $search = $this->httpGetJson('https://api.deezer.com/search/album?q=' . rawurlencode($q));
+        if (empty($search['data']) || !empty($search['error'])) {
+            return [];
+        }
 
-        $data = $this->httpGetJson($url);
+        $wantArtist = $this->titleKey($artist);
+        $wantTitle  = $this->titleKey($this->normalize($album));
+        $wantRaw    = $this->titleKey($album);
 
-        $tracks = [];
-        $raw    = $data['album']['tracks']['track'] ?? [];
+        $best = null;
+        foreach (array_slice((array)$search['data'], 0, 10) as $al) {
+            $aName = (string)($al['artist']['name'] ?? '');
+            $title = (string)($al['title'] ?? '');
+            if ($aName === '' || $title === '' || empty($al['id'])) {
+                continue;
+            }
+            if ($this->titleKey($aName) !== $wantArtist
+                || $this->titleKey($this->normalize($title)) !== $wantTitle) {
+                continue;
+            }
 
-        if (isset($raw['name'])) $raw = [$raw];
+            $exact = ($this->titleKey($title) === $wantRaw);
+            $count = (int)($al['nb_tracks'] ?? 0);
 
-        foreach ($raw as $i => $t) {
-            if (!empty($t['name'])) {
-                $tracks[] = [
-                    'position' => $i + 1,
-                    'title'    => $t['name'],
-                    'duration' => (int)($t['duration'] ?? 0)
-                ];
+            if ($best === null
+                || ($exact && !$best['exact'])
+                || ($exact === $best['exact'] && $count > 0 && ($best['count'] === 0 || $count < $best['count']))) {
+                $best = ['id' => (int)$al['id'], 'exact' => $exact, 'count' => $count];
             }
         }
 
-        return ['tracks' => $tracks];
+        if ($best === null) {
+            return [];
+        }
+
+        $data = $this->httpGetJson('https://api.deezer.com/album/' . $best['id'] . '/tracks?limit=200');
+        if (empty($data['data']) || !empty($data['error'])) {
+            return [];
+        }
+
+        $tracks = [];
+        foreach ((array)$data['data'] as $t) {
+            // Le annotazioni di rimasterizzazione di Deezer ("- 2003
+            // Remaster", "(Remastered 2015)") non fanno parte del titolo.
+            $title = (string)($t['title'] ?? '');
+            $title = (string)(preg_replace('/\s*[\(\[][^\)\]]*remaster[^\)\]]*[\)\]]/i', '', $title) ?? $title);
+            $title = (string)(preg_replace('/\s+-\s+[^-]*remaster.*$/i', '', $title) ?? $title);
+            $title = trim($title);
+            if ($title === '') {
+                continue;
+            }
+            $tracks[] = [
+                'position' => count($tracks) + 1,
+                'title'    => $title,
+                'duration' => max(0, (int)($t['duration'] ?? 0)),
+            ];
+        }
+
+        return $tracks;
+    }
+
+    /**
+     * Riempie le durate mancanti di $tracks con quelle di $source,
+     * abbinando le tracce per titolo (stesso confronto uno a uno usato per
+     * le edizioni: prima i titoli identici, poi quelli tolleranti). Titoli
+     * e posizioni di $tracks non cambiano; una traccia senza
+     * corrispondenza resta senza durata.
+     */
+    private function fillDurationsByTitle(array $tracks, array $source): array
+    {
+        $baseKeys  = [];
+        $otherKeys = [];
+        foreach ($tracks as $i => $t) {
+            $baseKeys[$i] = $this->titleKey((string)($t['title'] ?? ''));
+        }
+        foreach ($source as $j => $t) {
+            $otherKeys[$j] = (int)($t['duration'] ?? 0) > 0
+                ? $this->titleKey((string)($t['title'] ?? ''))
+                : '';
+        }
+
+        $pairs = $this->pairTitleKeys($baseKeys, $otherKeys);
+
+        foreach ($pairs as $i => $j) {
+            if (empty($tracks[$i]['duration'])) {
+                $tracks[$i]['duration'] = (int)$source[$j]['duration'];
+            }
+        }
+
+        return $tracks;
+    }
+
+    /**
+     * Abbinamento uno a uno fra due elenchi di chiavi titolo, con le stesse
+     * regole di diffTitleKeys(): prima le chiavi identiche, poi quelle che
+     * titleKeysMatch() considera lo stesso brano.
+     *
+     * @return array<int,int> indice di $baseKeys => indice di $otherKeys
+     */
+    private function pairTitleKeys(array $baseKeys, array $otherKeys): array
+    {
+        $baseFree  = array_filter($baseKeys, function ($k) { return $k !== ''; });
+        $otherFree = array_filter($otherKeys, function ($k) { return $k !== ''; });
+        $pairs     = [];
+
+        foreach ($baseFree as $i => $k) {
+            foreach ($otherFree as $j => $o) {
+                if ($k === $o) {
+                    $pairs[$i] = $j;
+                    unset($baseFree[$i], $otherFree[$j]);
+                    break;
+                }
+            }
+        }
+        foreach ($baseFree as $i => $k) {
+            foreach ($otherFree as $j => $o) {
+                if ($this->titleKeysMatch($k, $o)) {
+                    $pairs[$i] = $j;
+                    unset($baseFree[$i], $otherFree[$j]);
+                    break;
+                }
+            }
+        }
+
+        return $pairs;
     }
 
     // ================= COVER =================

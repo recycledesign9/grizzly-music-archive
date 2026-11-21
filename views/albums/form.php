@@ -310,7 +310,20 @@ $cancelUrl = $isEdit
           <div id="lookupMeta" class="grz-lookup-result__meta"></div>
         </div>
         <div class="grz-lookup-result__side">
-          <span>MusicBrainz · Cover Art Archive · Last.fm</span>
+          <?php
+            // Fonti realmente interrogate da "Cerca nelle fonti": Discogs
+            // solo se il token è configurato, Deezer come ripiego per
+            // tracklist e durate.
+            if (!class_exists('ExternalApiConfig')) {
+              require_once BASE_PATH . '/app/services/ExternalApiConfig.php';
+            }
+            $lookupSources = ['MusicBrainz', 'Cover Art Archive'];
+            if (ExternalApiConfig::getDiscogsToken() !== '') {
+              $lookupSources[] = 'Discogs';
+            }
+            $lookupSources[] = 'Deezer';
+          ?>
+          <span><?= htmlspecialchars(implode(' · ', $lookupSources), ENT_QUOTES, 'UTF-8') ?></span>
           <!-- Visibile solo quando esiste l'elenco delle edizioni
                (renderEditions); senza elenco non avrebbe nulla da aprire. -->
           <button type="button" class="btn btn-link grz-lookup-retry" id="lookupRetry" hidden>Non è questa edizione?</button>
