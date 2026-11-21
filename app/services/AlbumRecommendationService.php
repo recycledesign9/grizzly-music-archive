@@ -5,803 +5,789 @@ require_once __DIR__ . '/ExternalApiConfig.php';
 /**
  * AlbumRecommendationService
  * ------------------------------------------------------------
- * Recupera artisti simili da Last.fm per costruire raccomandazioni
- * musicali nella scheda album.
+ * Fonti dei consigli della scheda disco e della dashboard, tutte senza
+ * credenziali obbligatorie:
  *
- * Cache file:
- *   cache/recommendations/{sha1}.json
+ *   1) identità MusicBrainz dell'artista (MBID). Se manca in archivio si
+ *      ricava dall'artista accreditato sul release-group del disco oppure
+ *      con la ricerca e la prova d'identità di ArtistMetadataService;
+ *   2) artisti simili da ListenBrainz Labs (similar-artists), corretti per
+ *      popolarità: indice = score / sqrt(ascoltatori), soglia MIN_INDEX.
+ *      Senza correzione la lista premia gli artisti più ascoltati in
+ *      assoluto (Radiohead, Beatles, Pink Floyd compaiono quasi ovunque);
+ *   3) generi MusicBrainz del release-group del disco (solo il campo
+ *      "genres", non i tag liberi);
+ *   4) facoltativo, con token ListenBrainz: album più ascoltati degli
+ *      artisti simili che non sono in archivio (sezione di scoperta).
+ *
+ * Gli errori delle fonti (rete, 429, 5xx, 401) non vengono mai salvati in
+ * cache: il chiamante riceve ok=false e non conserva il risultato
+ * complessivo, così la richiesta successiva riprova.
+ *
+ * Tempo: la scheda interrompe la richiesta dopo 15 secondi. Il servizio
+ * lavora entro un budget (startBudget) e, finito il tempo, salta le
+ * chiamate rimaste segnando il risultato come incompleto.
+ *
+ * Cache file: cache/recommendations/{sha1}.json
  *
  * Compatibile PHP 7.4.
  */
 class AlbumRecommendationService
 {
-    private const LASTFM_LIMIT = 30;
-    private const CACHE_TTL_OK = 604800;   // 7 giorni
-    private const CACHE_TTL_EMPTY = 43200; // 12 ore
+    private const CACHE_TTL_OK    = 604800;  // 7 giorni
+    private const CACHE_TTL_LONG  = 2592000; // 30 giorni
+    private const CACHE_TTL_EMPTY = 43200;   // 12 ore
 
     /**
-     * @return array<int,array{name:string,match:float}>
+     * Algoritmo ListenBrainz Labs per gli artisti simili. Sovrascrivibile
+     * definendo LISTENBRAINZ_SIMILAR_ALGORITHM in config.php/.env, nel caso
+     * ListenBrainz ritiri questo dataset.
      */
-    public function getSimilarArtists(string $artistName): array
+    private const LB_SIMILAR_ALGORITHM =
+        'session_based_days_7500_session_300_contribution_5_threshold_10_limit_100_filter_True_skip_30';
+
+    /** Righe della risposta ListenBrainz considerate (servono anche oltre le prime 30). */
+    private const LB_SIMILAR_ROWS = 60;
+
+    /**
+     * Soglia sull'indice corretto per popolarità. Misurata sull'archivio il
+     * 18/11/2026: il rumore sta intorno a 0,02, la riga valida più bassa a 0,10.
+     */
+    private const MIN_INDEX = 0.08;
+
+    /** Liste di simili considerate per riconoscere gli artisti "hub". */
+    private const SIMILAR_PRIMARY = 30;
+
+    /** Liste in cache necessarie per applicare il filtro sugli hub. */
+    private const HUB_MIN_LISTS = 30;
+
+    /**
+     * Quota massima di liste dell'archivio in cui un artista può comparire
+     * per essere proposto nella scoperta (vedi rankExternalCandidates).
+     */
+    private const HUB_MAX_SHARE = 0.10;
+
+    /** Rate limit MusicBrainz: 1 richiesta al secondo. */
+    private const MB_THROTTLE_US = 1100000;
+
+    /** Istante (microtime) entro cui chiudere il lavoro; 0 = nessun limite. */
+    private $deadline = 0.0;
+
+    /** Vero se almeno una chiamata è stata saltata per mancanza di tempo. */
+    private $budgetExceeded = false;
+
+    /** Ultimo accesso a MusicBrainz nel processo (per il throttle). */
+    private static $mbLastAt = 0.0;
+
+    // ============================================================
+    // BUDGET DI TEMPO
+    // ============================================================
+
+    /** Imposta il tempo massimo (secondi) per le chiamate esterne. */
+    public function startBudget(float $seconds): void
     {
-        $artistName = trim($artistName);
+        $this->deadline       = microtime(true) + max(1.0, $seconds);
+        $this->budgetExceeded = false;
+    }
 
-        if ($artistName === '' || ExternalApiConfig::getLastFmKey() === '') {
-            return [];
+    public function budgetExceeded(): bool
+    {
+        return $this->budgetExceeded;
+    }
+
+    /** Secondi rimasti; null se non è stato impostato un budget. */
+    private function remaining(): ?float
+    {
+        if ($this->deadline <= 0) {
+            return null;
+        }
+        return $this->deadline - microtime(true);
+    }
+
+    /** Vero se c'è tempo per una chiamata che può durare $needed secondi. */
+    private function hasTime(float $needed): bool
+    {
+        $left = $this->remaining();
+        if ($left === null || $left >= $needed) {
+            return true;
+        }
+        $this->budgetExceeded = true;
+        return false;
+    }
+
+    // ============================================================
+    // 1) IDENTITÀ MUSICBRAINZ DELL'ARTISTA
+    // ============================================================
+
+    /**
+     * MBID da usare come sorgente dei simili per il disco.
+     *
+     * Ordine:
+     *   a) MBID già salvato sull'artista;
+     *   b) artisti accreditati sul release-group del disco (identità certa:
+     *      è il disco stesso a indicarli);
+     *   c) ricerca per nome con la prova d'identità della pagina artista
+     *      (il candidato deve possedere uno dei dischi locali);
+     *   d) nomi composti ("A & B", "A feat. B"): la stessa prova su ogni
+     *      parte.
+     *
+     * save_mbid è valorizzato solo quando l'identità è UNA e certa e può
+     * essere salvata sull'artista (b con un solo accreditato, oppure c).
+     * Con più accreditati o con le parti di un nome composto gli MBID
+     * servono solo come sorgente dei simili: la riga in archivio
+     * rappresenta la coppia, non i singoli.
+     *
+     * ok=false se una fonte ha risposto con errore: l'identità potrebbe
+     * esistere, quindi il risultato complessivo non va messo in cache.
+     *
+     * @param array    $artist      riga artists (mb_artist_id, name)
+     * @param string[] $localTitles titoli dei dischi dell'artista in archivio
+     * @param array    $rgInfo      risultato di getReleaseGroupInfo() del disco
+     * @return array{ok:bool,mbids:string[],save_mbid:string,source:string}
+     */
+    public function resolveArtistIdentity(array $artist, array $localTitles, array $rgInfo): array
+    {
+        $out = ['ok' => true, 'mbids' => [], 'save_mbid' => '', 'source' => ''];
+
+        $known = $this->normalizeMbid((string)($artist['mb_artist_id'] ?? ''));
+        if ($known !== '') {
+            $out['mbids']  = [$known];
+            $out['source'] = 'archive';
+            return $out;
         }
 
-        $cacheKey = $this->normalizeArtistName($artistName);
+        // b) accreditati sul release-group
+        $credited = $rgInfo['artists'] ?? [];
+        if (!empty($credited)) {
+            $out['mbids']  = array_values(array_unique($credited));
+            $out['source'] = 'release-group';
+            if (count($out['mbids']) === 1) {
+                $out['save_mbid'] = $out['mbids'][0];
+            }
+            return $out;
+        }
+        if (empty($rgInfo['ok'])) {
+            $out['ok'] = false;
+        }
+
+        $name = trim((string)($artist['name'] ?? ''));
+        if ($name === '') {
+            return $out;
+        }
+
+        require_once __DIR__ . '/ArtistMetadataService.php';
+        $meta = new ArtistMetadataService();
+
+        // c) ricerca per nome con prova d'identità (ricerca + verifiche:
+        //    almeno 3-4 richieste MusicBrainz)
+        if (!$this->hasTime(5.0)) {
+            $out['ok'] = false;
+            return $out;
+        }
+        $res = $this->resolveByName($meta, $name, $localTitles);
+        if (!$res['ok']) {
+            $out['ok'] = false;
+        }
+        if ($res['mbid'] !== '') {
+            $out['mbids']     = [$res['mbid']];
+            $out['save_mbid'] = $res['mbid'];
+            $out['source']    = 'search';
+            return $out;
+        }
+
+        // d) nome composto
+        $parts = preg_split('/\s+(?:&|and|feat\.?|ft\.?|featuring|with|vs\.?|x)\s+/iu', $name);
+        if (is_array($parts) && count($parts) > 1) {
+            foreach ($parts as $part) {
+                $part = trim($part);
+                if ($part === '') {
+                    continue;
+                }
+                if (!$this->hasTime(5.0)) {
+                    $out['ok'] = false;
+                    break;
+                }
+                $r = $this->resolveByName($meta, $part, $localTitles);
+                if (!$r['ok']) {
+                    $out['ok'] = false;
+                }
+                if ($r['mbid'] !== '') {
+                    $out['mbids'][] = $r['mbid'];
+                }
+            }
+            $out['mbids'] = array_values(array_unique($out['mbids']));
+            if (!empty($out['mbids'])) {
+                $out['source'] = 'name-parts';
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Ricerca per nome con prova d'identità, con memoria degli esiti
+     * definitivi:
+     *   - MBID trovato: in cache 30 giorni. Per un artista singolo il
+     *     controller lo salva anche sull'artista; per le parti di un nome
+     *     composto ("A & B") la cache è l'unica memoria, e senza di essa
+     *     ogni visita ripeterebbe due ricerche esaurendo il tempo;
+     *   - nessun candidato confermato: in cache 7 giorni, così la scheda di
+     *     un artista che MusicBrainz non conosce non ripete la ricerca.
+     * Gli errori non vanno in cache.
+     *
+     * @return array{ok:bool,mbid:string}
+     */
+    private function resolveByName(ArtistMetadataService $meta, string $name, array $localTitles): array
+    {
+        $titles = [];
+        foreach ($localTitles as $t) {
+            $titles[] = $this->normalizeArtistName((string)$t);
+        }
+        sort($titles);
+        $cacheKey = 'mb-id-name:v1:' . $this->normalizeArtistName($name) . '|' . sha1(implode('|', $titles));
+
         $cached = $this->readCache($cacheKey);
-
         if ($cached !== null) {
-            return $cached;
+            return ['ok' => true, 'mbid' => $this->normalizeMbid((string)($cached['mbid'] ?? ''))];
         }
 
-        $url = 'https://ws.audioscrobbler.com/2.0/'
-            . '?method=artist.getsimilar'
-            . '&artist=' . rawurlencode($artistName)
-            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
-            . '&format=json'
-            . '&autocorrect=1'
-            . '&limit=' . self::LASTFM_LIMIT;
+        $res = $meta->resolveArtistMbid($name, $localTitles);
+        if ($res['ok']) {
+            $this->writeCache(
+                $cacheKey,
+                ['mbid' => $res['mbid']],
+                $res['mbid'] !== '' ? self::CACHE_TTL_LONG : self::CACHE_TTL_OK
+            );
+        }
 
-        $resp = $this->httpGetJson($url);
+        return $res;
+    }
 
-        // Rete/API KO: non cachare.
+    // ============================================================
+    // 2) ARTISTI SIMILI — ListenBrainz
+    // ============================================================
+
+    /**
+     * Artisti simili per uno o più MBID sorgente, corretti per popolarità.
+     *
+     * Ogni riga: mbid, name, index (score / sqrt(ascoltatori)), match
+     * (index normalizzato sul massimo, 0..1), rank (0 = più simile).
+     * Le righe sono già filtrate con MIN_INDEX e ordinate; con più MBID
+     * sorgente vale l'indice più alto per ciascun artista.
+     *
+     * @param string[] $sourceMbids
+     * @return array{ok:bool,rows:array<int,array{mbid:string,name:string,index:float,match:float,rank:int}>}
+     */
+    public function getSimilarArtists(array $sourceMbids): array
+    {
+        $ok     = true;
+        $merged = [];
+        $skip   = [];
+
+        foreach ($sourceMbids as $m) {
+            $m = $this->normalizeMbid((string)$m);
+            if ($m !== '') {
+                $skip[$m] = true;
+            }
+        }
+
+        foreach (array_keys($skip) as $mbid) {
+            $res = $this->similarForMbid($mbid);
+            if (!$res['ok']) {
+                $ok = false;
+                continue;
+            }
+            foreach ($res['rows'] as $row) {
+                if (isset($skip[$row['mbid']])) {
+                    continue;
+                }
+                if (!isset($merged[$row['mbid']]) || $row['index'] > $merged[$row['mbid']]['index']) {
+                    $merged[$row['mbid']] = $row;
+                }
+            }
+        }
+
+        $rows = array_values($merged);
+        usort($rows, function (array $a, array $b): int {
+            return $b['index'] <=> $a['index'];
+        });
+
+        $max = !empty($rows) ? (float)$rows[0]['index'] : 0.0;
+        foreach ($rows as $i => &$r) {
+            $r['match'] = $max > 0 ? round($r['index'] / $max, 4) : 0.0;
+            $r['rank']  = $i;
+        }
+        unset($r);
+
+        return ['ok' => $ok, 'rows' => $rows];
+    }
+
+    /**
+     * Simili di un singolo MBID: similar-artists (ListenBrainz Labs) più
+     * popolarità (API ListenBrainz). In cache solo gli esiti validi.
+     *
+     * @return array{ok:bool,rows:array}
+     */
+    private function similarForMbid(string $mbid): array
+    {
+        $cacheKey = 'lb-sim:v1:' . $mbid;
+        $cached   = $this->readCache($cacheKey);
+        if ($cached !== null) {
+            return ['ok' => true, 'rows' => $cached];
+        }
+
+        if (!$this->hasTime(4.0)) {
+            return ['ok' => false, 'rows' => []];
+        }
+
+        $algorithm = (defined('LISTENBRAINZ_SIMILAR_ALGORITHM') && trim((string)LISTENBRAINZ_SIMILAR_ALGORITHM) !== '')
+            ? trim((string)LISTENBRAINZ_SIMILAR_ALGORITHM)
+            : self::LB_SIMILAR_ALGORITHM;
+
+        $resp = $this->httpJson(
+            'https://labs.api.listenbrainz.org/similar-artists/json?artist_mbids='
+                . rawurlencode($mbid) . '&algorithm=' . rawurlencode($algorithm)
+        );
         if (!$resp['ok']) {
-            return [];
+            return ['ok' => false, 'rows' => []];
         }
 
-        $data = $resp['data'];
-
-        // Last.fm può restituire un errore dentro JSON valido.
-        if (!empty($data['error'])) {
-            return [];
+        // La risposta può essere una lista piatta di righe oppure una
+        // lista di blocchi {data: [...]}: si accettano entrambe le forme.
+        $raw = [];
+        foreach ((array)$resp['data'] as $x) {
+            if (is_array($x) && isset($x['data']) && is_array($x['data'])) {
+                foreach ($x['data'] as $y) {
+                    $raw[] = $y;
+                }
+            } elseif (is_array($x) && isset($x['artist_mbid'])) {
+                $raw[] = $x;
+            }
         }
 
-        $out = [];
-        $seen = [];
-        $currentNorm = $this->normalizeArtistName($artistName);
+        if (empty($raw)) {
+            // Artista sconosciuto a ListenBrainz: esito valido, cache breve.
+            $this->writeCache($cacheKey, [], self::CACHE_TTL_EMPTY);
+            return ['ok' => true, 'rows' => []];
+        }
 
-        foreach (($data['similarartists']['artist'] ?? []) as $row) {
-            $name = trim((string)($row['name'] ?? ''));
-            if ($name === '') {
+        $raw = array_slice($raw, 0, self::LB_SIMILAR_ROWS);
+
+        $ids = [];
+        foreach ($raw as $r) {
+            $id = $this->normalizeMbid((string)($r['artist_mbid'] ?? ''));
+            if ($id !== '') {
+                $ids[] = $id;
+            }
+        }
+
+        if (!$this->hasTime(3.0)) {
+            return ['ok' => false, 'rows' => []];
+        }
+        $pop = $this->httpJson(
+            'https://api.listenbrainz.org/1/popularity/artist',
+            ['artist_mbids' => array_values(array_unique($ids))]
+        );
+        if (!$pop['ok']) {
+            // Senza popolarità la correzione non si può applicare.
+            return ['ok' => false, 'rows' => []];
+        }
+
+        $users = [];
+        foreach ((array)$pop['data'] as $p) {
+            if (is_array($p) && isset($p['artist_mbid'])) {
+                $users[$this->normalizeMbid((string)$p['artist_mbid'])] = (int)($p['total_user_count'] ?? 0);
+            }
+        }
+
+        $rows = [];
+        foreach ($raw as $r) {
+            $id = $this->normalizeMbid((string)($r['artist_mbid'] ?? ''));
+            $u  = $users[$id] ?? 0;
+            if ($id === '' || $u <= 0) {
                 continue;
             }
-
-            $norm = $this->normalizeArtistName($name);
-
-            if ($norm === '' || $norm === $currentNorm || isset($seen[$norm])) {
+            $idx = (float)($r['score'] ?? 0) / sqrt($u);
+            if ($idx < self::MIN_INDEX) {
                 continue;
             }
-
-            $match = (float)($row['match'] ?? 0);
-            if ($match <= 0) {
-                continue;
-            }
-
-            $seen[$norm] = true;
-            $out[] = [
-                'name'  => $name,
-                'match' => $match,
+            $rows[] = [
+                'mbid'  => $id,
+                'name'  => trim((string)($r['name'] ?? '')),
+                'index' => round($idx, 5),
             ];
         }
 
-        $this->writeCache(
-            $cacheKey,
-            $out,
-            !empty($out) ? self::CACHE_TTL_OK : self::CACHE_TTL_EMPTY
+        usort($rows, function (array $a, array $b): int {
+            return $b['index'] <=> $a['index'];
+        });
+
+        $this->writeCache($cacheKey, $rows, !empty($rows) ? self::CACHE_TTL_OK : self::CACHE_TTL_EMPTY);
+
+        return ['ok' => true, 'rows' => $rows];
+    }
+
+    // ============================================================
+    // 3) RELEASE-GROUP DEL DISCO — generi e artisti accreditati
+    // ============================================================
+
+    /**
+     * Generi MusicBrainz (campo "genres", conteggio > 0) e MBID degli
+     * artisti accreditati sul release-group. Una sola richiesta.
+     *
+     * @return array{ok:bool,genres:string[],artists:string[]}
+     */
+    public function getReleaseGroupInfo(string $releaseGroup): array
+    {
+        $rg = $this->normalizeMbid($releaseGroup);
+        if ($rg === '') {
+            return ['ok' => true, 'genres' => [], 'artists' => []];
+        }
+
+        $cacheKey = 'mb-rg:v1:' . $rg;
+        $cached   = $this->readCache($cacheKey);
+        if ($cached !== null) {
+            return [
+                'ok'      => true,
+                'genres'  => (array)($cached['genres'] ?? []),
+                'artists' => (array)($cached['artists'] ?? []),
+            ];
+        }
+
+        if (!$this->hasTime(3.0)) {
+            return ['ok' => false, 'genres' => [], 'artists' => []];
+        }
+
+        $resp = $this->musicBrainzJson(
+            'https://musicbrainz.org/ws/2/release-group/' . $rg . '?inc=genres+artist-credits&fmt=json'
         );
+        if (!$resp['ok']) {
+            // Un 404 (release-group rimosso o unito) è un esito definitivo.
+            if ((int)$resp['status'] === 404) {
+                $this->writeCache($cacheKey, ['genres' => [], 'artists' => []], self::CACHE_TTL_LONG);
+                return ['ok' => true, 'genres' => [], 'artists' => []];
+            }
+            return ['ok' => false, 'genres' => [], 'artists' => []];
+        }
 
-        return $out;
+        $genres = [];
+        foreach ((array)($resp['data']['genres'] ?? []) as $g) {
+            $n = trim((string)($g['name'] ?? ''));
+            if ($n !== '' && (int)($g['count'] ?? 0) > 0) {
+                $genres[] = $n;
+            }
+        }
+
+        $artists = [];
+        foreach ((array)($resp['data']['artist-credit'] ?? []) as $ac) {
+            $id = $this->normalizeMbid((string)($ac['artist']['id'] ?? ''));
+            if ($id !== '') {
+                $artists[] = $id;
+            }
+        }
+
+        $payload = ['genres' => $genres, 'artists' => array_values(array_unique($artists))];
+        $this->writeCache($cacheKey, $payload, self::CACHE_TTL_LONG);
+
+        return ['ok' => true] + $payload;
     }
 
+    // ============================================================
+    // 4) SCOPERTA — album fuori archivio (token ListenBrainz)
+    // ============================================================
+
     /**
-     * Tag dell'ALBUM specifico da Last.fm (album.getInfo), normalizzati e
-     * minuscoli: es. ["noise rock","alternative rock","italian"]. A
-     * differenza di artist.getSimilar (che ragiona sull'artista), questi
-     * descrivono il DISCO — sono il segnale che rende i consigli
-     * "album-aware": Il Vile e Che cosa vedi dei Marlene Kuntz hanno tag
-     * diversi e quindi possono riordinare i candidati in modo diverso.
+     * Un album rappresentativo per alcuni artisti simili che NON sono in
+     * archivio: il release-group più ascoltato di tipo Album che non sia
+     * evidentemente un live o una raccolta. La conferma "album in studio"
+     * su MusicBrainz arriva poi da filterExternalAlbumCandidates().
      *
-     * Una sola chiamata per album corrente (non per candidato). Cache
-     * propria con chiave "tags:<artista>|<album>".
+     * Richiede il token ListenBrainz (l'endpoint top-release-groups risponde
+     * 401 senza). Senza token restituisce ok=true e nessun suggerimento: è
+     * una funzione facoltativa.
      *
-     * @return array<int,string>
+     * @param array    $similar    righe di getSimilarArtists()
+     * @param string[] $skipMbids  MBID da saltare (artisti in archivio, sorgente)
+     * @return array{ok:bool,rows:array<int,array{name:string,album:string,cover:string,match:float}>}
      */
-    public function getAlbumTags(string $artistName, string $albumTitle): array
+    public function getExternalSuggestions(array $similar, array $skipMbids, int $limit = 5, int $maxLookups = 8): array
     {
-        $artistName = trim($artistName);
-        $albumTitle = trim($albumTitle);
-
-        if ($artistName === '' || $albumTitle === ''
-            || ExternalApiConfig::getLastFmKey() === '') {
-            return [];
+        $token = $this->listenBrainzToken();
+        if ($token === '' || empty($similar)) {
+            return ['ok' => true, 'rows' => []];
         }
 
-        $cacheKey = 'tags:' . $this->normalizeArtistName($artistName)
-            . '|' . $this->normalizeArtistName($albumTitle);
-
-        $cached = $this->readCache($cacheKey);
-        if ($cached !== null) {
-            return $cached;
-        }
-
-        $url = 'https://ws.audioscrobbler.com/2.0/'
-            . '?method=album.getinfo'
-            . '&artist=' . rawurlencode($artistName)
-            . '&album=' . rawurlencode($albumTitle)
-            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
-            . '&format=json&autocorrect=1';
-
-        $resp = $this->httpGetJson($url);
-        if (!$resp['ok'] || !empty($resp['data']['error'])) {
-            // Rete/errore: NON cachare (potrebbe essere transitorio), così
-            // si ritenta alla prossima apertura.
-            return [];
-        }
-
-        $out = [];
-        $seen = [];
-        $rawTags = $resp['data']['album']['tags']['tag'] ?? [];
-
-        // Last.fm ritorna 'tag' come lista di oggetti, ma con un solo tag
-        // può restituire un singolo oggetto: normalizziamo a lista.
-        if (isset($rawTags['name'])) {
-            $rawTags = [$rawTags];
-        }
-
-        if (is_array($rawTags)) {
-            foreach ($rawTags as $t) {
-                $tag = $this->normalizeArtistName((string) ($t['name'] ?? ''));
-                if ($tag !== '' && !isset($seen[$tag])) {
-                    $seen[$tag] = true;
-                    $out[] = $tag;
-                }
+        $skip = [];
+        foreach ($skipMbids as $m) {
+            $m = $this->normalizeMbid((string)$m);
+            if ($m !== '') {
+                $skip[$m] = true;
             }
         }
 
-        // Esito valido (anche lista vuota di tag): cache lunga.
-        $this->writeCache($cacheKey, $out, self::CACHE_TTL_OK);
+        $candidates = $this->rankExternalCandidates($similar, $skip);
 
-        return $out;
-    }
+        $ok      = true;
+        $out     = [];
+        $lookups = 0;
 
-
-
-    /**
-     * Segnale specifico del DISCO ottenuto dalle sue tracce.
-     * Campiona prima, centro e ultima traccia e usa track.getSimilar.
-     * hits = numero di TRACCE SORGENTE differenti che suggeriscono l'artista.
-     *
-     * @param array<int,string> $trackTitles
-     * @return array<string,array{name:string,score:float,hits:int}>
-     */
-    public function getTrackBasedArtistScores(
-        string $artistName,
-        array $trackTitles,
-        int $sampleSize = 3
-    ): array {
-        $artistName = trim($artistName);
-        if ($artistName === '' || empty($trackTitles)
-            || ExternalApiConfig::getLastFmKey() === '') {
-            return [];
-        }
-        $sampledTracks = $this->sampleSourceTracks($trackTitles, $sampleSize);
-        if (empty($sampledTracks)) return [];
-
-        $scores = [];
-        $sourceNorm = $this->normalizeArtistName($artistName);
-
-        foreach ($sampledTracks as $trackTitle) {
-            $rows = $this->getSimilarTracks($artistName, $trackTitle, 25);
-            $bestForThisSource = [];
-
-            foreach ($rows as $rank => $row) {
-                $candidate = trim((string)($row['artist'] ?? ''));
-                $norm = $this->normalizeArtistName($candidate);
-                if ($candidate === '' || $norm === '' || $norm === $sourceNorm) continue;
-
-                $rankScore = max(15.0, 250.0 - ($rank * 9.0));
-                if (!isset($bestForThisSource[$norm]) || $rankScore > $bestForThisSource[$norm]['score']) {
-                    $bestForThisSource[$norm] = ['name'=>$candidate,'score'=>$rankScore];
-                }
+        foreach ($candidates as $row) {
+            if (count($out) >= $limit || $lookups >= $maxLookups) {
+                break;
             }
+            $mbid = (string)($row['mbid'] ?? '');
+            $lookups++;
 
-            foreach ($bestForThisSource as $norm => $row) {
-                if (!isset($scores[$norm])) {
-                    $scores[$norm] = ['name'=>$row['name'],'score'=>0.0,'hits'=>0];
-                }
-                $scores[$norm]['score'] += (float)$row['score'];
-                $scores[$norm]['hits']++;
+            $top = $this->topStudioAlbum($mbid, (string)($row['name'] ?? ''), $token);
+            if (!$top['ok']) {
+                $ok = false;
+                continue;
             }
-        }
-
-        foreach ($scores as &$row) {
-            if ($row['hits'] > 1) $row['score'] += 160.0 * ($row['hits'] - 1);
-        }
-        unset($row);
-        return $scores;
-    }
-
-    /** @return array<int,string> */
-    private function sampleSourceTracks(array $trackTitles, int $sampleSize = 3): array
-    {
-        $tracks=[];
-        foreach ($trackTitles as $title) {
-            $title=trim((string)$title);
-            if ($title!=='') $tracks[]=$title;
-        }
-        if (empty($tracks)) return [];
-        $sampleSize=max(1,min(3,$sampleSize));
-        $indexes=[0];
-        if (count($tracks)>=3) $indexes[]=(int)floor((count($tracks)-1)/2);
-        if (count($tracks)>=2) $indexes[]=count($tracks)-1;
-        $indexes=array_slice(array_values(array_unique($indexes)),0,$sampleSize);
-        $out=[];
-        foreach ($indexes as $idx) if (isset($tracks[$idx])) $out[]=$tracks[$idx];
-        return $out;
-    }
-
-    /**
-     * @return array<int,array{artist:string,track:string,match:float}>
-     */
-    private function getSimilarTracks(
-        string $artistName,
-        string $trackTitle,
-        int $limit = 25
-    ): array {
-        $limit = max(5, min(40, $limit));
-
-        $cacheKey = 'track-similar:'
-            . $this->normalizeArtistName($artistName)
-            . '|'
-            . $this->normalizeArtistName($trackTitle)
-            . ':'
-            . $limit;
-
-        $cached = $this->readCache($cacheKey);
-        if ($cached !== null) {
-            return $cached;
-        }
-
-        $url = 'https://ws.audioscrobbler.com/2.0/'
-            . '?method=track.getsimilar'
-            . '&artist=' . rawurlencode($artistName)
-            . '&track=' . rawurlencode($trackTitle)
-            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
-            . '&format=json'
-            . '&autocorrect=1'
-            . '&limit=' . $limit;
-
-        $resp = $this->httpGetJson($url);
-
-        if (!$resp['ok'] || !empty($resp['data']['error'])) {
-            return [];
-        }
-
-        $rows = $resp['data']['similartracks']['track'] ?? [];
-
-        if (isset($rows['name'])) {
-            $rows = [$rows];
-        }
-
-        $out = [];
-
-        foreach ((array)$rows as $row) {
-            $artist = trim((string)($row['artist']['name'] ?? ''));
-            $track  = trim((string)($row['name'] ?? ''));
-
-            if ($artist === '' || $track === '') {
+            if ($top['album'] === '') {
                 continue;
             }
 
             $out[] = [
-                'artist' => $artist,
-                'track'  => $track,
-                'match'  => (float)($row['match'] ?? 0),
+                'name'  => $top['artist'] !== '' ? $top['artist'] : (string)($row['name'] ?? ''),
+                'album' => $top['album'],
+                'cover' => $top['cover'],
+                'match' => (float)($row['match'] ?? 0),
+                'via'   => (string)($row['name'] ?? ''),
             ];
         }
 
-        $this->writeCache(
-            $cacheKey,
-            $out,
-            !empty($out) ? self::CACHE_TTL_OK : self::CACHE_TTL_EMPTY
-        );
-
-        return $out;
+        return ['ok' => $ok, 'rows' => $out];
     }
 
     /**
-     * Costruisce un ranking di artisti specifico del disco.
+     * Ordine dei candidati per la scoperta (artisti simili fuori archivio).
      *
-     * artist.getSimilar resta la base generale; track.getSimilar può
-     * riordinare i candidati e introdurre artisti che emergono dalle
-     * tracce di questo album ma non dai primi risultati artist-level.
+     * Alcuni artisti risultano simili a buona parte della collezione:
+     * nelle sessioni di ascolto compaiono insieme a quasi tutto. Misura del
+     * 21/11/2026 su 194 liste di simili dell'archivio: blink-182 compariva
+     * fra i primi suggerimenti esterni di System of a Down, Pearl Jam,
+     * Coldplay e Stone Temple Pilots, perché presente in 21 liste e con un
+     * conteggio di ascoltatori ListenBrainz anomalo (44 mila, contro i 300
+     * mila di artisti di pari notorietà), che gonfia l'indice corretto per
+     * popolarità.
      *
-     * @param array<int,array{name:string,match:float}> $similar
-     * @param array<string,array{name:string,score:float,hits:int}> $trackArtistScores
-     * @return array<int,array{name:string,match:float,_album_score:float,_track_hits:int}>
+     * Per questo, quando le liste in cache sono abbastanza (HUB_MIN_LISTS):
+     *   - un candidato presente in più del HUB_MAX_SHARE delle liste
+     *     dell'archivio non viene proposto (non è specifico del disco);
+     *   - gli altri sono ordinati per indice × log((N+1)/(df+1)), dove df è
+     *     il numero di liste in cui compaiono: a parità di somiglianza
+     *     vince l'artista più specifico.
+     * Con poche liste (installazione nuova) resta l'ordine per indice.
+     *
+     * Vale solo per la scoperta: i consigli in collezione non cambiano.
+     *
+     * @param array<string,bool> $skip MBID in archivio e MBID sorgente
      */
-    public function rankSimilarArtistsForAlbum(
-        array $similar,
-        array $trackArtistScores
-    ): array {
-        $pool = [];
-
-        foreach ($similar as $item) {
-            $name = trim((string)($item['name'] ?? ''));
-            if ($name === '') {
-                continue;
+    private function rankExternalCandidates(array $similar, array $skip): array
+    {
+        $rows = [];
+        foreach ($similar as $row) {
+            $mbid = (string)($row['mbid'] ?? '');
+            if ($mbid !== '' && !isset($skip[$mbid])) {
+                $rows[] = $row;
             }
-
-            $norm = $this->normalizeArtistName($name);
-            if ($norm === '') {
-                continue;
-            }
-
-            $pool[$norm] = [
-                'name'  => $name,
-                'match' => max(0.0, min(1.0, (float)($item['match'] ?? 0))),
-            ];
         }
 
-        // Ammette anche artisti emersi SOLO dalle tracce dell'album.
-        foreach ($trackArtistScores as $norm => $row) {
-            $name = trim((string)($row['name'] ?? ''));
-
-            if ($name !== '' && !isset($pool[$norm])) {
-                $pool[$norm] = [
-                    'name'  => $name,
-                    'match' => 0.0,
-                ];
-            }
+        $hub = $this->hubIndex(array_keys($skip));
+        $n   = $hub['n'];
+        if ($n < self::HUB_MIN_LISTS) {
+            return $rows;
         }
 
         $ranked = [];
-
-        foreach ($pool as $norm => $item) {
-            // L'artista generale pesa, ma non monopolizza più il risultato.
-            $score = ((float)$item['match']) * 600.0;
-            $trackHits = 0;
-
-            if (isset($trackArtistScores[$norm])) {
-                $score += min(
-                    850.0,
-                    (float)($trackArtistScores[$norm]['score'] ?? 0)
-                );
-                $trackHits = (int)($trackArtistScores[$norm]['hits'] ?? 0);
+        foreach ($rows as $row) {
+            $df = (int)($hub['df'][$row['mbid']] ?? 0);
+            if ($df / $n > self::HUB_MAX_SHARE) {
+                continue;
             }
-
-            $item['_album_score'] = $score;
-            $item['_track_hits'] = $trackHits;
-            $ranked[] = $item;
+            $row['_ext_score'] = (float)($row['index'] ?? 0) * log(($n + 1) / ($df + 1));
+            $ranked[] = $row;
         }
 
         usort($ranked, function (array $a, array $b): int {
-            $sa = (float)($a['_album_score'] ?? 0);
-            $sb = (float)($b['_album_score'] ?? 0);
-
-            if ($sa === $sb) {
-                return strcmp((string)$a['name'], (string)$b['name']);
-            }
-
-            return ($sa < $sb) ? 1 : -1;
+            return $b['_ext_score'] <=> $a['_ext_score'];
         });
 
         return $ranked;
     }
 
-
     /**
-     * Candidati ALBUM realmente specifici del disco:
-     * track.getSimilar -> track.getInfo -> album reale del brano simile.
-     * tag.getTopAlbums non viene usato qui.
+     * In quante liste di simili dell'archivio compare ogni artista (primi
+     * SIMILAR_PRIMARY di ciascuna lista). Legge solo le liste già in cache,
+     * senza chiamate esterne; il risultato resta in cache un giorno.
      *
-     * @param array<int,string> $trackTitles
-     * @return array<int,array{name:string,album:string,cover:string,score:float,hits:int,track:string}>
+     * @param string[] $archiveMbids
+     * @return array{n:int,df:array<string,int>}
      */
-    public function getTrackBasedAlbumCandidates(
-        string $sourceArtist,
-        array $trackTitles,
-        array $rankedSimilarArtists,
-        int $limit = 30
-    ): array {
-        $sourceArtist=trim($sourceArtist);
-        if ($sourceArtist==='' || empty($trackTitles)) return [];
-        $sampledTracks=$this->sampleSourceTracks($trackTitles,3);
-        if (empty($sampledTracks)) return [];
-
-        $artistBonus=[];
-        foreach ($rankedSimilarArtists as $rank=>$item) {
-            $name=trim((string)($item['name']??''));
-            $norm=$this->normalizeArtistName($name);
-            if ($norm!=='') $artistBonus[$norm]=max(0.0,220.0-($rank*7.0));
-        }
-
-        $sourceNorm=$this->normalizeArtistName($sourceArtist);
-        $trackPool=[];
-        foreach ($sampledTracks as $sourceTrack) {
-            $rows=$this->getSimilarTracks($sourceArtist,$sourceTrack,25);
-            $bestForThisSource=[];
-            foreach ($rows as $rank=>$row) {
-                $artist=trim((string)($row['artist']??''));
-                $track=trim((string)($row['track']??''));
-                if ($artist==='' || $track==='') continue;
-                $artistNorm=$this->normalizeArtistName($artist);
-                if ($artistNorm==='' || $artistNorm===$sourceNorm) continue;
-                $key=$artistNorm.'|'.$this->normalizeArtistName($track);
-                $score=max(20.0,360.0-($rank*12.0));
-                if (!isset($bestForThisSource[$key]) || $score>$bestForThisSource[$key]['score']) {
-                    $bestForThisSource[$key]=['artist'=>$artist,'track'=>$track,'score'=>$score];
-                }
-            }
-            foreach ($bestForThisSource as $key=>$row) {
-                if (!isset($trackPool[$key])) $trackPool[$key]=['artist'=>$row['artist'],'track'=>$row['track'],'score'=>0.0,'hits'=>0];
-                $trackPool[$key]['score']+=(float)$row['score'];
-                $trackPool[$key]['hits']++;
-            }
-        }
-
-        foreach ($trackPool as &$row) {
-            $artistNorm=$this->normalizeArtistName((string)$row['artist']);
-            $row['score'] += $artistBonus[$artistNorm] ?? 0.0;
-            if ($row['hits']>1) $row['score'] += 180.0*($row['hits']-1);
-        }
-        unset($row);
-        $trackCandidates=array_values($trackPool);
-        usort($trackCandidates,function(array $a,array $b):int{
-            $sa=(float)($a['score']??0); $sb=(float)($b['score']??0);
-            if ($sa===$sb) return strcmp((string)$a['artist'].'|'.(string)$a['track'],(string)$b['artist'].'|'.(string)$b['track']);
-            return ($sa<$sb)?1:-1;
-        });
-
-        $toResolve=[]; $perArtist=[];
-        foreach ($trackCandidates as $row) {
-            $artistNorm=$this->normalizeArtistName((string)$row['artist']);
-            if (($perArtist[$artistNorm]??0)>=2) continue;
-            $perArtist[$artistNorm]=($perArtist[$artistNorm]??0)+1;
-            $toResolve[]=$row;
-            if (count($toResolve)>=12) break;
-        }
-
-        $resolved=$this->resolveTrackAlbums($toResolve);
-        $albums=[];
-        foreach ($toResolve as $row) {
-            $trackKey=$this->trackInfoKey((string)$row['artist'],(string)$row['track']);
-            $info=$resolved[$trackKey]??null;
-            if (!is_array($info) || empty($info['album'])) continue;
-            $artist=trim((string)$row['artist']);
-            $albumTitle=trim((string)$info['album']);
-            if ($artist==='' || $albumTitle==='') continue;
-            $albumKey=$this->normalizeArtistName($artist).'|'.$this->normalizeArtistName($albumTitle);
-            if (!isset($albums[$albumKey])) {
-                $albums[$albumKey]=['name'=>$artist,'album'=>$albumTitle,'cover'=>(string)($info['cover']??''),'score'=>0.0,'hits'=>0,'track'=>(string)$row['track']];
-            }
-            $albums[$albumKey]['score']+=(float)$row['score'];
-            $albums[$albumKey]['hits']++;
-            if ($albums[$albumKey]['cover']==='' && !empty($info['cover'])) $albums[$albumKey]['cover']=(string)$info['cover'];
-        }
-        foreach ($albums as &$row) if ($row['hits']>1) $row['score']+=160.0*($row['hits']-1);
-        unset($row);
-        $out=array_values($albums);
-        usort($out,function(array $a,array $b):int{
-            $sa=(float)($a['score']??0); $sb=(float)($b['score']??0);
-            if ($sa===$sb) return strcmp((string)$a['name'].'|'.(string)$a['album'],(string)$b['name'].'|'.(string)$b['album']);
-            return ($sa<$sb)?1:-1;
-        });
-        return array_slice($out,0,max(1,min(60,$limit)));
-    }
-
-    private function trackInfoKey(string $artistName,string $trackTitle):string
+    private function hubIndex(array $archiveMbids): array
     {
-        return 'track-info:'.$this->normalizeArtistName($artistName).'|'.$this->normalizeArtistName($trackTitle);
-    }
-
-    /** @return array<string,array{album:string,cover:string}> */
-    private function resolveTrackAlbums(array $candidates):array
-    {
-        $resolved=[]; $pending=[];
-        foreach ($candidates as $row) {
-            $artist=trim((string)($row['artist']??'')); $track=trim((string)($row['track']??''));
-            if ($artist==='' || $track==='') continue;
-            $key=$this->trackInfoKey($artist,$track);
-            $cached=$this->readCache($key);
-            if ($cached!==null) {
-                $resolved[$key]=['album'=>(string)($cached['album']??''),'cover'=>(string)($cached['cover']??'')];
-            } else $pending[$key]=['artist'=>$artist,'track'=>$track];
-        }
-        if (empty($pending)) return $resolved;
-
-        if (function_exists('curl_multi_init') && function_exists('curl_init')) {
-            $mh=curl_multi_init(); $handles=[];
-            $ua=defined('APP_USER_AGENT')?APP_USER_AGENT:'GrizzlyMusicArchive/1.0';
-            foreach ($pending as $key=>$row) {
-                $url='https://ws.audioscrobbler.com/2.0/?method=track.getinfo'
-                    .'&artist='.rawurlencode($row['artist']).'&track='.rawurlencode($row['track'])
-                    .'&api_key='.rawurlencode(ExternalApiConfig::getLastFmKey()).'&format=json&autocorrect=1';
-                $ch=curl_init($url);
-                curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_FOLLOWLOCATION=>true,CURLOPT_CONNECTTIMEOUT=>3,CURLOPT_TIMEOUT=>6,CURLOPT_USERAGENT=>$ua,CURLOPT_HTTPHEADER=>['Accept: application/json']]);
-                curl_multi_add_handle($mh,$ch); $handles[$key]=$ch;
-            }
-            $active=null;
-            do {
-                $status=curl_multi_exec($mh,$active);
-                if ($active) { $selected=curl_multi_select($mh,1.0); if ($selected===-1) usleep(10000); }
-            } while ($active && $status===CURLM_OK);
-
-            foreach ($handles as $key=>$ch) {
-                $body=curl_multi_getcontent($ch); $code=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE); $err=curl_error($ch);
-                $info=['album'=>'','cover'=>''];
-                if ($body!==false && $err==='' && $code>=200 && $code<300) {
-                    $data=json_decode($body,true);
-                    if (is_array($data) && empty($data['error'])) $info=$this->extractAlbumFromTrackInfo($data);
-                }
-                // Fallback Deezer: se abbiamo l'album ma non la cover, cerchiamola.
-                if ($info['album']!=='' && $info['cover']==='') {
-                    $dz=$this->deezerAlbumCover($pending[$key]['artist'],$info['album']);
-                    if ($dz!=='') $info['cover']=$dz;
-                }
-                $resolved[$key]=$info;
-                $this->writeCache($key,$info,$info['album']!==''?self::CACHE_TTL_OK:self::CACHE_TTL_EMPTY);
-                curl_multi_remove_handle($mh,$ch); curl_close($ch);
-            }
-            curl_multi_close($mh); return $resolved;
-        }
-
-        foreach ($pending as $key=>$row) {
-            $url='https://ws.audioscrobbler.com/2.0/?method=track.getinfo'
-                .'&artist='.rawurlencode($row['artist']).'&track='.rawurlencode($row['track'])
-                .'&api_key='.rawurlencode(ExternalApiConfig::getLastFmKey()).'&format=json&autocorrect=1';
-            $resp=$this->httpGetJson($url); $info=['album'=>'','cover'=>''];
-            if ($resp['ok'] && empty($resp['data']['error'])) $info=$this->extractAlbumFromTrackInfo($resp['data']);
-            // Fallback Deezer: album noto ma cover mancante.
-            if ($info['album']!=='' && $info['cover']==='') {
-                $dz=$this->deezerAlbumCover($row['artist'],$info['album']);
-                if ($dz!=='') $info['cover']=$dz;
-            }
-            $resolved[$key]=$info;
-            $this->writeCache($key,$info,$info['album']!==''?self::CACHE_TTL_OK:self::CACHE_TTL_EMPTY);
-        }
-        return $resolved;
-    }
-
-    /** @return array{album:string,cover:string} */
-    private function extractAlbumFromTrackInfo(array $data):array
-    {
-        $albumTitle=trim((string)($data['track']['album']['title']??'')); $cover='';
-        $images=$data['track']['album']['image']??[];
-        if (is_array($images)) {
-            for ($i=count($images)-1;$i>=0;$i--) {
-                $url=trim((string)($images[$i]['#text']??''));
-                if ($url!=='' && !$this->isLastFmPlaceholderCover($url)) { $cover=$url; break; }
+        $ids = [];
+        foreach ($archiveMbids as $m) {
+            $m = $this->normalizeMbid((string)$m);
+            if ($m !== '') {
+                $ids[$m] = true;
             }
         }
-        return ['album'=>$albumTitle,'cover'=>$cover];
-    }
+        $ids = array_keys($ids);
+        sort($ids);
 
-    /**
-     * Candidati ALBUM ottenuti direttamente dai tag del disco corrente.
-     *
-     * Usa tag.getTopAlbums sui primi due tag e li riordina con il ranking
-     * artistico già reso track-aware. Qui il candidato nasce come album:
-     * non è più sempre "l'album più popolare dell'artista".
-     *
-     * @return array<int,array{name:string,album:string,cover:string,score:float}>
-     */
-    public function getAlbumSpecificCandidates(
-        array $albumTags,
-        array $rankedSimilarArtists,
-        string $sourceArtist,
-        int $limit = 70
-    ): array {
-        $tags = $this->selectUsefulAlbumTagsForAlbums($albumTags, 2);
-
-        if (empty($tags)) {
-            return [];
-        }
-
-        $sourceNorm = $this->normalizeArtistName($sourceArtist);
-
-        $artistBonus = [];
-        foreach ($rankedSimilarArtists as $rank => $item) {
-            $name = trim((string)($item['name'] ?? ''));
-            $norm = $this->normalizeArtistName($name);
-
-            if ($norm !== '') {
-                $artistBonus[$norm] = max(0.0, 500.0 - ($rank * 14.0));
-            }
-        }
-
-        $merged = [];
-
-        foreach ($tags as $tagIndex => $tag) {
-            $tagWeight = $tagIndex === 0 ? 1.0 : 0.78;
-            $rows = $this->getTopAlbumsForTag($tag, 50);
-
-            foreach ($rows as $rank => $row) {
-                $artist = trim((string)($row['name'] ?? ''));
-                $album  = trim((string)($row['album'] ?? ''));
-
-                if ($artist === '' || $album === '') {
-                    continue;
-                }
-
-                $artistNorm = $this->normalizeArtistName($artist);
-
-                // Mai suggerire un altro disco dello stesso artista sorgente:
-                // "Potrebbero piacerti" deve aprire davvero la scoperta.
-                if ($artistNorm === '' || $artistNorm === $sourceNorm) {
-                    continue;
-                }
-
-                $key = $artistNorm . '|' . $this->normalizeArtistName($album);
-
-                $score = (900.0 / (1.0 + ($rank * 0.12))) * $tagWeight;
-                $score += $artistBonus[$artistNorm] ?? 0.0;
-
-                if (!isset($merged[$key])) {
-                    $merged[$key] = [
-                        'name'  => $artist,
-                        'album' => $album,
-                        'cover' => (string)($row['cover'] ?? ''),
-                        'score' => 0.0,
-                        'hits'  => 0,
-                    ];
-                }
-
-                $merged[$key]['score'] += $score;
-                $merged[$key]['hits']++;
-
-                if ($merged[$key]['cover'] === '' && !empty($row['cover'])) {
-                    $merged[$key]['cover'] = (string)$row['cover'];
-                }
-            }
-        }
-
-        foreach ($merged as &$row) {
-            if ($row['hits'] > 1) {
-                $row['score'] += 150.0;
-            }
-        }
-        unset($row);
-
-        $out = array_values($merged);
-
-        usort($out, function (array $a, array $b): int {
-            $sa = (float)($a['score'] ?? 0);
-            $sb = (float)($b['score'] ?? 0);
-
-            if ($sa === $sb) {
-                return strcmp(
-                    (string)$a['name'] . '|' . (string)$a['album'],
-                    (string)$b['name'] . '|' . (string)$b['album']
-                );
-            }
-
-            return ($sa < $sb) ? 1 : -1;
-        });
-
-        return array_slice($out, 0, max(1, min(120, $limit)));
-    }
-
-    /**
-     * Tag realmente utili per tag.getTopAlbums.
-     */
-    private function selectUsefulAlbumTagsForAlbums(array $tags, int $limit = 2): array
-    {
-        $blocked = [
-            'albums i own', 'album i own', 'owned',
-            'seen live', 'favorites', 'favourites',
-            'favorite', 'favourite', 'spotify',
-            'lastfm', 'last.fm', 'italian'
-        ];
-
-        $out = [];
-        $seen = [];
-
-        foreach ($tags as $tag) {
-            $tag = $this->normalizeArtistName((string)$tag);
-
-            if ($tag === '' || isset($seen[$tag]) || in_array($tag, $blocked, true)) {
-                continue;
-            }
-
-            if (preg_match('/^(?:19|20)\d{2}$/', $tag)
-                || preg_match('/^\d{2}s$/', $tag)
-                || preg_match('/^(?:19|20)\d0s$/', $tag)) {
-                continue;
-            }
-
-            $seen[$tag] = true;
-            $out[] = $tag;
-
-            if (count($out) >= $limit) {
-                break;
-            }
-        }
-
-        return $out;
-    }
-
-    /**
-     * @return array<int,array{name:string,album:string,cover:string}>
-     */
-    private function getTopAlbumsForTag(string $tag, int $limit = 50): array
-    {
-        $tag = $this->normalizeArtistName($tag);
-        $limit = max(10, min(100, $limit));
-
-        if ($tag === '' || ExternalApiConfig::getLastFmKey() === '') {
-            return [];
-        }
-
-        $cacheKey = 'tag-albums:' . $tag . ':' . $limit;
-        $cached = $this->readCache($cacheKey);
-
+        $cacheKey = 'lb-df:v1:' . sha1(implode(',', $ids));
+        $cached   = $this->readCache($cacheKey);
         if ($cached !== null) {
-            return $cached;
+            return ['n' => (int)($cached['n'] ?? 0), 'df' => (array)($cached['df'] ?? [])];
         }
 
-        $url = 'https://ws.audioscrobbler.com/2.0/'
-            . '?method=tag.gettopalbums'
-            . '&tag=' . rawurlencode($tag)
-            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
-            . '&format=json'
-            . '&limit=' . $limit;
-
-        $resp = $this->httpGetJson($url);
-
-        if (!$resp['ok'] || !empty($resp['data']['error'])) {
-            return [];
+        $n  = 0;
+        $df = [];
+        foreach ($ids as $m) {
+            $rows = $this->readCache('lb-sim:v1:' . $m);
+            if (empty($rows)) {
+                continue;
+            }
+            $n++;
+            foreach (array_slice($rows, 0, self::SIMILAR_PRIMARY) as $r) {
+                $id = (string)($r['mbid'] ?? '');
+                if ($id !== '') {
+                    $df[$id] = ($df[$id] ?? 0) + 1;
+                }
+            }
         }
 
-        $rows = $resp['data']['albums']['album'] ?? [];
+        $this->writeCache($cacheKey, ['n' => $n, 'df' => $df], 86400);
 
-        if (isset($rows['name'])) {
-            $rows = [$rows];
+        return ['n' => $n, 'df' => $df];
+    }
+
+    /**
+     * Release-group più ascoltato di tipo Album per un artista.
+     *
+     * ListenBrainz elenca anche i release-group in cui l'artista compare
+     * solo come ospite: compilation di etichetta, DJ mix firmati da altri,
+     * "Various Artists". Si accettano soltanto quelli accreditati
+     * all'artista richiesto (MBID nel credito, oppure, se la risposta non
+     * riporta gli MBID, lo stesso nome).
+     *
+     * @return array{ok:bool,artist:string,album:string,cover:string}
+     */
+    private function topStudioAlbum(string $artistMbid, string $artistName, string $token): array
+    {
+        $none     = ['ok' => true, 'artist' => '', 'album' => '', 'cover' => ''];
+        $cacheKey = 'lb-top:v2:' . $artistMbid;
+        $cached   = $this->readCache($cacheKey);
+        if ($cached !== null) {
+            return ['ok' => true] + $cached + $none;
         }
 
-        $out = [];
+        if (!$this->hasTime(3.0)) {
+            return ['ok' => false] + $none;
+        }
 
-        foreach ((array)$rows as $row) {
-            $album = trim((string)($row['name'] ?? ''));
-            $artist = trim((string)($row['artist']['name'] ?? ''));
+        $resp = $this->httpJson(
+            'https://api.listenbrainz.org/1/popularity/top-release-groups-for-artist/' . rawurlencode($artistMbid),
+            null,
+            ['Authorization: Token ' . $token]
+        );
+        if (!$resp['ok']) {
+            return ['ok' => false] + $none;
+        }
 
-            if ($album === '' || $artist === '') {
+        $pick = ['artist' => '', 'album' => '', 'cover' => ''];
+        foreach ((array)$resp['data'] as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $rg   = (array)($item['release_group'] ?? []);
+            $name = trim((string)($rg['name'] ?? ''));
+            // Il tipo indicato è solo quello primario: i live risultano
+            // "Album". Il filtro sul titolo toglie i casi evidenti, la
+            // conferma MusicBrainz quelli restanti.
+            if ($name === '' || (string)($rg['type'] ?? '') !== 'Album') {
+                continue;
+            }
+            if ($this->isObviouslyNonStudioAlbumTitle($name)) {
+                continue;
+            }
+            if (!$this->creditedTo($item, $artistMbid, $artistName)) {
                 continue;
             }
 
-            $cover = '';
-            $images = $row['image'] ?? [];
-
-            if (is_array($images)) {
-                for ($i = count($images) - 1; $i >= 0; $i--) {
-                    $url = trim((string)($images[$i]['#text'] ?? ''));
-
-                    if ($url !== '' && !$this->isLastFmPlaceholderCover($url)) {
-                        $cover = $url;
-                        break;
-                    }
-                }
+            $cover    = '';
+            $caaId    = (string)($rg['caa_id'] ?? '');
+            $caaRelId = $this->normalizeMbid((string)($rg['caa_release_mbid'] ?? ''));
+            if ($caaId !== '' && $caaRelId !== '') {
+                $cover = 'https://coverartarchive.org/release/' . $caaRelId . '/' . rawurlencode($caaId) . '-250.jpg';
             }
 
-            $out[] = [
-                'name'  => $artist,
-                'album' => $album,
-                'cover' => $cover,
+            $artistName = '';
+            if (isset($item['artist']) && is_array($item['artist'])) {
+                $artistName = (string)($item['artist']['artist_credit_name'] ?? ($item['artist']['name'] ?? ''));
+            } elseif (isset($item['artist_name'])) {
+                $artistName = (string)$item['artist_name'];
+            }
+
+            $pick = [
+                'artist' => trim($artistName),
+                'album'  => $name,
+                'cover'  => $cover,
             ];
+            break;
         }
 
-        $this->writeCache(
-            $cacheKey,
-            $out,
-            !empty($out) ? self::CACHE_TTL_OK : self::CACHE_TTL_EMPTY
-        );
+        $this->writeCache($cacheKey, $pick, $pick['album'] !== '' ? self::CACHE_TTL_OK : self::CACHE_TTL_EMPTY);
 
-        return $out;
+        return ['ok' => true] + $pick;
     }
 
+    /**
+     * Vero se il release-group della risposta ListenBrainz è accreditato
+     * all'artista richiesto. Legge gli MBID del credito nelle forme note
+     * (artist.artist_credit_mbids, artist.artists[].artist_mbid,
+     * artist_mbids); se la risposta non ne riporta, confronta il nome.
+     */
+    private function creditedTo(array $item, string $artistMbid, string $artistName): bool
+    {
+        $artist = isset($item['artist']) && is_array($item['artist']) ? $item['artist'] : [];
+
+        $mbids = [];
+        foreach ((array)($artist['artist_credit_mbids'] ?? []) as $m) {
+            $mbids[] = $this->normalizeMbid((string)$m);
+        }
+        foreach ((array)($artist['artists'] ?? []) as $a) {
+            if (is_array($a)) {
+                $mbids[] = $this->normalizeMbid((string)($a['artist_mbid'] ?? ''));
+            }
+        }
+        foreach ((array)($item['artist_mbids'] ?? []) as $m) {
+            $mbids[] = $this->normalizeMbid((string)$m);
+        }
+        $mbids = array_values(array_filter($mbids));
+
+        if (!empty($mbids)) {
+            return in_array($artistMbid, $mbids, true);
+        }
+
+        $credit = (string)($artist['artist_credit_name'] ?? ($artist['name'] ?? ($item['artist_name'] ?? '')));
+        return $credit !== ''
+            && $this->normalizeArtistName($credit) === $this->normalizeArtistName($artistName);
+    }
+
+    /** Token ListenBrainz configurato (Impostazioni o config), oppure ''. */
+    private function listenBrainzToken(): string
+    {
+        if (ExternalApiConfig::isSupported('listenbrainz')) {
+            return ExternalApiConfig::get('listenbrainz');
+        }
+        return (defined('LISTENBRAINZ_TOKEN') && is_string(LISTENBRAINZ_TOKEN)) ? trim(LISTENBRAINZ_TOKEN) : '';
+    }
+
+    // ============================================================
+    // ALBUM IN STUDIO — conferma MusicBrainz (invariata nella logica)
+    // ============================================================
 
     /**
      * Prima barriera contro release chiaramente non-studio.
@@ -1077,11 +1063,19 @@ class AlbumRecommendationService
             }
 
             $isStudio = $this->musicBrainzIsStudioAlbum($artist, $title);
+
+            // MusicBrainz non ha risposto: nessun verdetto in cache, la voce
+            // torna in coda e verrà riprovata. Prima un errore veniva salvato
+            // come "non è un album in studio" per 7 giorni.
+            if ($isStudio === null) {
+                $this->scheduleStudioConfirmations([$item]);
+                continue;
+            }
+
             $this->writeCache($cacheKey, ['studio' => $isStudio], self::CACHE_TTL_OK);
             $done++;
-
-            // Rate-limit MusicBrainz: ~1 richiesta/secondo per IP.
-            usleep(1100000);
+            // Il rate limit di MusicBrainz (1 richiesta al secondo) è
+            // applicato da musicBrainzJson().
         }
 
         return $done;
@@ -1090,9 +1084,10 @@ class AlbumRecommendationService
     /**
      * Interroga MusicBrainz per stabilire se (artista, titolo) è uno studio
      * album puro (primary-type Album, nessun secondary-type). Una sola
-     * chiamata. true = confermato studio; false = non trovato o non studio.
+     * chiamata. true = confermato studio; false = non trovato o non studio;
+     * null = MusicBrainz non ha risposto (nessun verdetto).
      */
-    private function musicBrainzIsStudioAlbum(string $artist, string $title): bool
+    private function musicBrainzIsStudioAlbum(string $artist, string $title): ?bool
     {
         $artistEsc = str_replace(['\\', '"'], ['\\\\', '\\"'], $artist);
         $titleEsc  = str_replace(['\\', '"'], ['\\\\', '\\"'], $title);
@@ -1104,7 +1099,7 @@ class AlbumRecommendationService
 
         $resp = $this->httpGetJson($url);
         if (!$resp['ok'] || !empty($resp['data']['error'])) {
-            return false;
+            return null;
         }
 
         $titleNorm  = $this->normalizeArtistName($this->normalizeStudioAlbumLookupTitle($title));
@@ -1218,170 +1213,10 @@ class AlbumRecommendationService
         return $out;
     }
 
-    /**
-     * Suggerimenti di SCOPERTA: artisti simili che NON sono in archivio.
-     * Per ognuno recupera un album rappresentativo (il piu' ascoltato su
-     * Last.fm) con la sua cover. Usato per riempire il blocco "consigliati"
-     * quando l'incrocio con la collezione locale non basta — tipico di una
-     * collezione di nicchia con poche sovrapposizioni interne.
-     *
-     * $similar        lista gia' ottenuta da getSimilarArtists() (per non
-     *                 richiamare Last.fm una seconda volta).
-     * $excludeNames   nomi (grezzi) da saltare: gli artisti gia' mostrati
-     *                 dalla sezione "in archivio". Confronto normalizzato.
-     * $sourceArtist   artista dell'album corrente: entra nella chiave cache
-     *                 così album di artisti diversi non la condividono.
-     * $sourceAlbum    titolo dell'album corrente: rende la cache specifica
-     *                 per disco (Il Vile ≠ Catartica).
-     * $limit          quanti suggerimenti esterni al massimo (ognuno costa
-     *                 una chiamata Last.fm getTopAlbums, quindi si tiene basso).
-     *
-     * @param array<int,array{name:string,match:float}> $similar
-     * @param array<int,string> $excludeNames
-     * @return array<int,array{name:string,album:string,cover:string,match:float}>
-     */
-    public function getExternalSuggestions(
-        array $similar,
-        array $excludeNames,
-        string $sourceArtist = '',
-        string $sourceAlbum = '',
-        int $limit = 5
-    ): array {
-        if (empty($similar) || ExternalApiConfig::getLastFmKey() === '') {
-            return [];
-        }
 
-        $limit = max(1, min(8, $limit));
-
-        // Insieme dei nomi da escludere (normalizzati) per confronto O(1).
-        $skip = [];
-        foreach ($excludeNames as $n) {
-            $norm = $this->normalizeArtistName((string) $n);
-            if ($norm !== '') {
-                $skip[$norm] = true;
-            }
-        }
-
-        // Chiave cache basata su ARTISTA + ALBUM sorgente (oltre a esclusi
-        // e limite): così album diversi non condividono mai la cache, e
-        // nemmeno sorgenti diverse con condizioni casualmente simili. Se
-        // artista/album non sono passati si ripiega sul primo simile, ma è
-        // un fallback: il chiamante dovrebbe sempre passarli.
-        $keySource = $this->normalizeArtistName($sourceArtist) !== ''
-            ? $this->normalizeArtistName($sourceArtist) . '|' . $this->normalizeArtistName($sourceAlbum)
-            : $this->normalizeArtistName((string) ($similar[0]['name'] ?? ''));
-
-        $cacheKey = 'ext:v2:' . $keySource
-            . ':' . substr(sha1(implode('|', array_keys($skip))), 0, 8)
-            . ':' . $limit;
-
-        $cached = $this->readCache($cacheKey);
-        if ($cached !== null) {
-            return $cached;
-        }
-
-        $out = [];
-        foreach ($similar as $item) {
-            if (count($out) >= $limit) {
-                break;
-            }
-            $name = trim((string) ($item['name'] ?? ''));
-            if ($name === '') {
-                continue;
-            }
-            if (isset($skip[$this->normalizeArtistName($name)])) {
-                continue; // gia' in archivio: mostrato dall'altra sezione
-            }
-
-            $top = $this->lastFmTopAlbum($name);
-
-            if (trim((string)$top['album']) === '') {
-                continue;
-            }
-
-            $out[] = [
-                'name'  => $name,
-                'album' => $top['album'],
-                'cover' => $top['cover'],
-                'match' => (float) ($item['match'] ?? 0),
-            ];
-        }
-
-        // Cache anche il risultato vuoto (TTL breve) per non ritentare N
-        // getTopAlbums a ogni pageview quando non c'e' nulla da mostrare.
-        $this->writeCache(
-            $cacheKey,
-            $out,
-            !empty($out) ? self::CACHE_TTL_OK : self::CACHE_TTL_EMPTY
-        );
-
-        return $out;
-    }
-
-    /**
-     * Album piu' ascoltato di un artista su Last.fm + cover. La cover
-     * Last.fm e' spesso una placeholder (stella grigia): quando manca o
-     * e' quella nota si tenta Deezer (match esatto artista+titolo).
-     *
-     * @return array{album:string,cover:string}
-     */
-    private function lastFmTopAlbum(string $artistName): array
-    {
-        $out = ['album' => '', 'cover' => ''];
-
-        if (ExternalApiConfig::getLastFmKey() === '') {
-            return $out;
-        }
-
-        $url = 'https://ws.audioscrobbler.com/2.0/'
-            . '?method=artist.gettopalbums'
-            . '&artist=' . rawurlencode($artistName)
-            . '&api_key=' . rawurlencode(ExternalApiConfig::getLastFmKey())
-            . '&format=json&autocorrect=1&limit=1';
-
-        $resp = $this->httpGetJson($url);
-        if (!$resp['ok'] || !empty($resp['data']['error'])) {
-            return $out;
-        }
-
-        $album = $resp['data']['topalbums']['album'][0] ?? null;
-        if (!is_array($album)) {
-            return $out;
-        }
-
-        $out['album'] = trim((string) ($album['name'] ?? ''));
-
-        // Cover Last.fm: array di taglie, l'ultima e' la piu' grande.
-        $images = $album['image'] ?? [];
-        if (is_array($images)) {
-            for ($i = count($images) - 1; $i >= 0; $i--) {
-                $u = trim((string) ($images[$i]['#text'] ?? ''));
-                if ($u !== '' && !$this->isLastFmPlaceholderCover($u)) {
-                    $out['cover'] = $u;
-                    break;
-                }
-            }
-        }
-
-        // Fallback Deezer se Last.fm non ha dato una cover utile.
-        if ($out['cover'] === '' && $out['album'] !== '') {
-            $dz = $this->deezerAlbumCover($artistName, $out['album']);
-            if ($dz !== '') {
-                $out['cover'] = $dz;
-            }
-        }
-
-        return $out;
-    }
-
-    /**
-     * Vero se l'URL e' la nota cover placeholder di Last.fm (stella grigia
-     * "no image"), riconoscibile dall'md5 ricorrente nel path.
-     */
-    private function isLastFmPlaceholderCover(string $url): bool
-    {
-        return strpos($url, '2a96cbd8b46e442fc41c2b86b821562f') !== false;
-    }
+    // ============================================================
+    // COVER, CACHE, UTILITÀ
+    // ============================================================
 
     /**
      * Cerca su Deezer la cover di un album con match ESATTO (normalizzato)
@@ -1494,66 +1329,138 @@ class AlbumRecommendationService
         return trim((string)$name);
     }
 
+
+    private function normalizeMbid(string $mbid): string
+    {
+        $mbid = strtolower(trim($mbid));
+        return preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $mbid) ? $mbid : '';
+    }
+
     /**
-     * @return array{ok:bool,data:array}
+     * GET verso MusicBrainz con throttle di 1 richiesta al secondo nel
+     * processo e un nuovo tentativo sui 503 (MusicBrainz li restituisce
+     * spesso sotto carico).
+     *
+     * @return array{ok:bool,data:array,status:int}
      */
-    private function httpGetJson(string $url): array
+    private function musicBrainzJson(string $url): array
+    {
+        $resp = ['ok' => false, 'data' => [], 'status' => 0];
+
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
+            $elapsedUs = (int)((microtime(true) - self::$mbLastAt) * 1000000);
+            if ($elapsedUs < self::MB_THROTTLE_US) {
+                usleep(self::MB_THROTTLE_US - $elapsedUs);
+            }
+            self::$mbLastAt = microtime(true);
+
+            $resp = $this->httpJson($url);
+            $transient = !$resp['ok'] && ($resp['status'] === 0 || $resp['status'] === 429 || $resp['status'] >= 500);
+            if (!$transient || $attempt === 2 || !$this->hasTime(3.0)) {
+                break;
+            }
+        }
+
+        return $resp;
+    }
+
+    /**
+     * GET (oppure POST JSON se $postJson non è null) con risposta JSON.
+     *
+     * ok=false per errori di rete, status diverso da 2xx, corpo non JSON o
+     * oggetto {"error": ...}. status riporta il codice HTTP (0 = nessuna
+     * risposta). Il timeout totale non supera il budget residuo.
+     *
+     * @param string[] $headers intestazioni aggiuntive
+     * @return array{ok:bool,data:array,status:int}
+     */
+    private function httpJson(string $url, ?array $postJson = null, array $headers = []): array
     {
         $ua = defined('APP_USER_AGENT')
             ? APP_USER_AGENT
-            : 'GrizzlyMusicArchive/1.0';
+            : 'GrizzlyMusicArchive/1.0 ( https://github.com/recycledesign9/grizzly-music-archive )';
 
-        // cURL preferito: più robusto sul tuo stack MAMP/PHP 7.4.
+        $timeout = 8.0;
+        $left    = $this->remaining();
+        if ($left !== null) {
+            $timeout = max(1.0, min($timeout, $left));
+        }
+
+        $headers[] = 'Accept: application/json';
+        $body      = null;
+        if ($postJson !== null) {
+            $body      = json_encode($postJson);
+            $headers[] = 'Content-Type: application/json';
+        }
+
+        $raw    = false;
+        $status = 0;
+
         if (function_exists('curl_init')) {
             $ch = curl_init($url);
-
-            curl_setopt_array($ch, [
+            $opts = [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_FOLLOWLOCATION => true,
                 CURLOPT_CONNECTTIMEOUT => 3,
-                CURLOPT_TIMEOUT => 6,
-                CURLOPT_USERAGENT => $ua,
-                CURLOPT_HTTPHEADER => ['Accept: application/json'],
-            ]);
-
-            $body = curl_exec($ch);
-            $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $err  = curl_error($ch);
-
+                CURLOPT_TIMEOUT        => (int)ceil($timeout),
+                CURLOPT_USERAGENT      => $ua,
+                CURLOPT_HTTPHEADER     => $headers,
+            ];
+            if ($body !== null) {
+                $opts[CURLOPT_POST]       = true;
+                $opts[CURLOPT_POSTFIELDS] = $body;
+            }
+            curl_setopt_array($ch, $opts);
+            $raw    = curl_exec($ch);
+            $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if (curl_error($ch) !== '') {
+                $raw = false;
+            }
             curl_close($ch);
-
-            if ($body === false || $err !== '' || $code < 200 || $code >= 300) {
-                return ['ok' => false, 'data' => []];
-            }
-
-            $decoded = json_decode($body, true);
-
-            if (!is_array($decoded)) {
-                return ['ok' => false, 'data' => []];
-            }
-
-            return ['ok' => true, 'data' => $decoded];
-        }
-
-        // Fallback se cURL non è disponibile.
-        $context = stream_context_create([
-            'http' => [
-                'header' => "User-Agent: {$ua}\r\nAccept: application/json\r\n",
-                'timeout' => 6,
+        } else {
+            $headers[] = 'User-Agent: ' . $ua;
+            $http = [
+                'method'        => $body !== null ? 'POST' : 'GET',
+                'header'        => implode("\r\n", $headers) . "\r\n",
+                'timeout'       => $timeout,
                 'ignore_errors' => true,
-            ],
-        ]);
-
-        $body = @file_get_contents($url, false, $context);
-
-        if ($body === false) {
-            return ['ok' => false, 'data' => []];
+            ];
+            if ($body !== null) {
+                $http['content'] = $body;
+            }
+            $raw = @file_get_contents($url, false, stream_context_create(['http' => $http]));
+            if (isset($http_response_header) && is_array($http_response_header)) {
+                foreach ($http_response_header as $h) {
+                    if (preg_match('~^HTTP/\S+\s+(\d{3})~', $h, $m)) {
+                        $status = (int)$m[1];
+                    }
+                }
+            }
         }
 
-        $decoded = json_decode($body, true);
+        if ($raw === false || $status < 200 || $status >= 300) {
+            return ['ok' => false, 'data' => [], 'status' => $status];
+        }
 
-        return is_array($decoded)
-            ? ['ok' => true, 'data' => $decoded]
-            : ['ok' => false, 'data' => []];
+        $decoded = json_decode((string)$raw, true);
+        if (!is_array($decoded) || isset($decoded['error'])) {
+            return ['ok' => false, 'data' => [], 'status' => $status];
+        }
+
+        return ['ok' => true, 'data' => $decoded, 'status' => $status];
+    }
+
+    /**
+     * Compatibilità con i metodi conservati (conferma studio, cover Deezer),
+     * che usano la forma {ok, data}.
+     *
+     * @return array{ok:bool,data:array,status:int}
+     */
+    private function httpGetJson(string $url): array
+    {
+        if (strpos($url, 'https://musicbrainz.org/') === 0) {
+            return $this->musicBrainzJson($url);
+        }
+        return $this->httpJson($url);
     }
 }

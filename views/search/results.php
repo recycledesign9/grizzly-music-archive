@@ -31,35 +31,42 @@ function srArtistImage(array $ar): string {
     return '';
 }
 
-// Filtri avanzati attivi: su mobile apre il pannello collassato
-// e alimenta il contatore sul toggle.
-$advCount = count(array_filter([
-  $filters['format_id'] ?? '',
-  $filters['genre_id'] ?? '',
-  $filters['label_id'] ?? '',
-  $filters['year'] ?? '',
-]));
+// Durata di una traccia in m:ss; stringa vuota se non nota.
+function srDuration($seconds): string {
+    $seconds = (int)$seconds;
+    if ($seconds <= 0) return '';
+    return floor($seconds / 60) . ':' . str_pad((string)($seconds % 60), 2, '0', STR_PAD_LEFT);
+}
+
+$tracks      = $tracks ?? [];
+$tracksTotal = $tracksTotal ?? count($tracks);
+
+// Prima di una ricerca la pagina è vuota: il campo sta al centro ed è
+// l'elemento principale. Con dei risultati torna in alto, sopra l'elenco.
+$isHero = empty($didSearch);
 ?>
 
-<!-- Header -->
-<div class="d-flex justify-content-between align-items-start mb-4">
+<!-- Header: con una ricerca in corso mostra il termine cercato e il
+     riepilogo; a pagina vuota resta solo "Indietro" (il titolo è nel
+     blocco centrale). -->
+<div class="d-flex justify-content-between align-items-start mb-3">
   <div>
-    <h4 class="mb-1">
-      <i class="bi bi-search opacity-40 me-2"></i>Risultati per:
-      <?php if (!empty($q)): ?>
-        <span class="text-warning">"<?= htmlspecialchars($q) ?>"</span>
+    <?php if (!$isHero): ?>
+      <h4 class="mb-1">
+        <i class="bi bi-search me-2"></i>Risultati per
+        <span class="text-warning">“<?= htmlspecialchars($q) ?>”</span>
+      </h4>
+      <?php if (!empty($albums) || !empty($artists) || !empty($tracks)): ?>
+        <p class="text-muted small mb-0">
+          <?php
+            $parts = [];
+            if (!empty($artists)) $parts[] = count($artists) . ' ' . (count($artists) === 1 ? 'artista' : 'artisti');
+            if (!empty($albums))  $parts[] = count($albums) . ' album';
+            if (!empty($tracks))  $parts[] = $tracksTotal . ' ' . ($tracksTotal === 1 ? 'traccia' : 'tracce');
+            echo implode(' · ', $parts) . ' · ordinati per rilevanza';
+          ?>
+        </p>
       <?php endif; ?>
-    </h4>
-    <?php if (!empty($albums) || !empty($artists)): ?>
-      <p class="text-muted small mb-0">
-        <?php
-          $parts = [];
-          if (!empty($artists)) $parts[] = count($artists) . ' ' . (count($artists) === 1 ? 'artista' : 'artisti');
-          if (!empty($albums))  $parts[] = count($albums) . ' album';
-          echo implode(' · ', $parts);
-          if (!empty($hasValidText)) echo ' · ordinati per rilevanza';
-        ?>
-      </p>
     <?php endif; ?>
   </div>
   <a href="<?= BASE_URL ?>/index.php" class="btn btn-sm btn-outline-secondary ms-3 flex-shrink-0"
@@ -68,107 +75,74 @@ $advCount = count(array_filter([
   </a>
 </div>
 
-<!-- Form di ricerca: sempre visibile, con i filtri avanzati
-     dell'archivio. Submit GET classico (stesso pattern dei filtri
-     di list.php), quindi compatibile con la navigazione SPA. -->
-<form method="get" action="<?= BASE_URL ?>/index.php"
-  class="card card-body mb-4 shadow-sm p-3 filters-form<?= $advCount > 0 ? ' filters-open' : '' ?>">
+<?php if ($isHero): ?>
+<div class="grz-search-hero">
+  <h1 class="grz-search-hero__title">Cerca nell'archivio</h1>
+<?php endif; ?>
+
+<!-- Form di ricerca: un solo campo, sempre visibile, che cerca tra
+     artisti, album e tracce (suggerimenti di search-suggest.js). I
+     filtri per formato, genere, etichetta e anno stanno nell'Archivio.
+     Submit GET classico, quindi compatibile con la navigazione SPA. -->
+<form method="get" action="<?= BASE_URL ?>/index.php" role="search"
+  class="grz-filterbar grz-filterbar--solo<?= $isHero ? ' grz-filterbar--hero' : '' ?>">
   <input type="hidden" name="route" value="search/index">
 
-  <div class="row g-2 align-items-end">
-    <div class="col-12 col-lg-4">
-      <label class="form-label fw-semibold small mb-1">Artista o titolo</label>
-      <!-- Niente minlength: la validazione nativa del browser
-           bloccherebbe il submit con il suo tooltip, impedendo al
-           banner in stile app (renderizzato dal server) di comparire.
-           La regola dei 2 caratteri resta applicata lato server. -->
-      <input type="search" name="q" class="form-control"
-        placeholder="Cerca artista o titolo…" autofocus
-        value="<?= htmlspecialchars($q ?? '') ?>">
-    </div>
-
-    <div class="col-6 col-lg-2 adv-filter">
-      <label class="form-label small text-muted mb-1">Formato</label>
-      <select name="format_id" class="form-select">
-        <option value="">Tutti</option>
-        <?php foreach ($formats as $f): ?>
-          <option value="<?= (int)$f['id'] ?>" <?= ($filters['format_id'] ?? 0) == $f['id'] ? 'selected' : '' ?>>
-            <?= htmlspecialchars($f['name']) ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-    </div>
-
-    <div class="col-6 col-lg-2 adv-filter">
-      <label class="form-label small text-muted mb-1">Genere</label>
-      <select name="genre_id" class="form-select">
-        <option value="">Tutti</option>
-        <?php foreach ($genres as $g): ?>
-          <option value="<?= (int)$g['id'] ?>" <?= ($filters['genre_id'] ?? 0) == $g['id'] ? 'selected' : '' ?>>
-            <?= htmlspecialchars($g['name']) ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-    </div>
-
-    <div class="col-6 col-lg-2 adv-filter">
-      <label class="form-label small text-muted mb-1">Etichetta</label>
-      <select name="label_id" class="form-select">
-        <option value="">Tutte</option>
-        <?php foreach ($labels as $l): ?>
-          <option value="<?= (int)$l['id'] ?>" <?= ($filters['label_id'] ?? 0) == $l['id'] ? 'selected' : '' ?>>
-            <?= htmlspecialchars($l['name']) ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-    </div>
-
-    <div class="col-6 col-lg-1 adv-filter">
-      <label class="form-label small text-muted mb-1">Anno</label>
-      <input type="number" name="year" class="form-control"
-        placeholder="Anno" min="1900" max="<?= date('Y') ?>"
-        value="<?= !empty($filters['year']) ? (int)$filters['year'] : '' ?>">
-    </div>
-
-    <div class="col-6 d-md-none">
-      <button type="button"
-        class="btn btn-outline-secondary w-100 btn-adv-toggle"
-        onclick="this.closest('form').classList.toggle('filters-open')">
-        <i class="bi bi-sliders me-1"></i>Filtri<?= $advCount > 0 ? ' · ' . $advCount : '' ?>
-      </button>
-    </div>
-
-    <div class="col-6 col-lg-1 d-flex gap-1">
-      <button type="submit" class="btn btn-warning flex-grow-1" title="Cerca">
-        <i class="bi bi-search"></i>
-      </button>
-      <a href="<?= BASE_URL ?>/index.php?route=search/index"
-        class="btn btn-outline-secondary" title="Azzera">
-        <i class="bi bi-x-circle"></i>
-      </a>
-    </div>
+  <div class="grz-filterbar__search" data-suggest>
+    <i class="bi bi-search grz-filterbar__icon" aria-hidden="true"></i>
+    <!-- Niente minlength: la validazione nativa del browser
+         bloccherebbe il submit con il suo tooltip, impedendo al
+         banner in stile app (renderizzato dal server) di comparire.
+         La regola dei 2 caratteri resta applicata lato server. -->
+    <input type="search" name="q" class="grz-filterbar__input"
+      placeholder="Artista, album o traccia…" aria-label="Artista, album o traccia" autofocus
+      autocomplete="off" data-suggest-input
+      value="<?= htmlspecialchars($q ?? '') ?>">
+    <button type="submit" class="grz-filterbar__submit" title="Cerca">
+      Cerca
+    </button>
   </div>
 </form>
 
 <?php if (!empty($textQueryTooShort)): ?>
   <div class="alert alert-warning">
-    <i class="bi bi-exclamation-triangle me-2"></i>Inserisci almeno 2 caratteri per la ricerca testuale<?= !empty($didSearch) ? ' — risultati filtrati ignorando il testo.' : '.' ?>
+    <i class="bi bi-exclamation-triangle me-2"></i>Inserisci almeno 2 caratteri per cercare.
   </div>
 <?php endif; ?>
 
-<?php if (empty($didSearch)): ?>
+<?php if (!empty($prefixFallback)): ?>
+  <!-- Nessun nome o titolo contiene il termine come parola intera:
+       i risultati sono quelli che iniziano con il testo cercato. -->
+  <p class="grz-search-note">
+    <i class="bi bi-info-circle" aria-hidden="true"></i>
+    Nessun nome o titolo contiene la parola “<?= htmlspecialchars($q) ?>”: sono mostrati quelli che iniziano così.
+  </p>
+<?php endif; ?>
 
-  <div class="text-center py-5 text-muted">
-    <i class="bi bi-search display-4 d-block mb-3 opacity-25"></i>
-    <p>Cerca per artista o titolo, oppure usa i filtri per esplorare l'archivio.</p>
-  </div>
+<?php if ($isHero): ?>
 
-<?php elseif (empty($albums) && empty($artists)): ?>
+  <?php if (!empty($archiveCounts)): ?>
+    <p class="grz-search-hero__counts">
+      <?= number_format((int)$archiveCounts['artists'], 0, ',', '.') ?> artisti ·
+      <?= number_format((int)$archiveCounts['albums'], 0, ',', '.') ?> album ·
+      <?= number_format((int)$archiveCounts['tracks'], 0, ',', '.') ?> tracce
+    </p>
+  <?php endif; ?>
+  <p class="grz-search-hero__hint">
+    Scrivi un artista, un album o una traccia: i suggerimenti compaiono mentre scrivi.
+    Per sfogliare i dischi per formato, genere, etichetta o anno usa i filtri
+    dell'<a href="<?= BASE_URL ?>/index.php?route=albums/list">Archivio</a>.
+  </p>
+</div><!-- /.grz-search-hero -->
 
-  <div class="text-center py-5 text-muted">
-    <i class="bi bi-inbox display-4 d-block mb-3 opacity-25"></i>
-    <p class="mb-1">Nessun risultato<?= $q !== '' ? ' per <strong>"' . htmlspecialchars($q) . '"</strong>' : '' ?>.</p>
-    <p class="small">Prova con un termine diverso o allarga i filtri.</p>
+<?php elseif (empty($albums) && empty($artists) && empty($tracks)): ?>
+
+  <div class="grz-search-empty">
+    <i class="bi bi-inbox grz-search-empty__icon" aria-hidden="true"></i>
+    <p class="grz-search-empty__title">Nessun risultato<?= $q !== '' ? ' per “' . htmlspecialchars($q) . '”' : '' ?></p>
+    <p class="grz-search-empty__text">
+      Controlla come è scritto il nome oppure prova con una parola sola.
+    </p>
   </div>
 
 <?php else: ?>
@@ -200,7 +174,7 @@ $advCount = count(array_filter([
 
   <!-- ALBUM -->
   <?php if (!empty($albums)): ?>
-  <div>
+  <div class="sr-albums-wrap">
     <div class="sr-label">
       <i class="bi bi-collection-fill"></i>Album
       <span class="badge bg-secondary fw-normal ms-1"><?= count($albums) ?></span>
@@ -310,6 +284,47 @@ $advCount = count(array_filter([
         </tbody>
       </table>
 
+    <?php endif; ?>
+  </div>
+  <?php endif; ?>
+
+  <!-- TRACCE: la riga apre la scheda del disco che contiene il brano. -->
+  <?php if (!empty($tracks)): ?>
+  <div class="sr-tracks-wrap">
+    <div class="sr-label">
+      <i class="bi bi-music-note-list"></i>Tracce
+      <span class="badge bg-secondary fw-normal ms-1"><?= (int)$tracksTotal ?></span>
+    </div>
+
+    <div class="sr-tracks">
+      <?php foreach ($tracks as $t):
+        $tDuration = srDuration($t['duration_sec'] ?? 0);
+        $tHasAudio = !empty($t['has_audio']);
+      ?>
+        <a href="<?= BASE_URL ?>/index.php?route=albums/detail/<?= (int)$t['album_id'] ?>" class="sr-track-row">
+          <img src="<?= srCover($t) ?>" alt="" class="sr-track-cover" loading="lazy"
+               onerror="this.onerror=null;this.src='<?= BASE_URL ?>/public/img/placeholder.png'">
+          <span class="sr-track-text">
+            <span class="sr-track-title"><?= htmlspecialchars($t['title']) ?></span>
+            <span class="sr-track-sub">
+              <?= htmlspecialchars($t['artist_name']) ?> · <?= htmlspecialchars($t['album_title']) ?>
+            </span>
+          </span>
+          <span class="sr-track-audio" title="<?= $tHasAudio ? 'File audio presente' : 'Nessun file audio' ?>">
+            <i class="bi <?= $tHasAudio ? 'bi-music-note-beamed grz-track-audio' : 'bi-music-note grz-track-noaudio' ?>" aria-hidden="true"></i>
+            <span class="visually-hidden"><?= $tHasAudio ? 'File audio presente' : 'Nessun file audio' ?></span>
+          </span>
+          <span class="sr-track-duration"><?= $tDuration !== '' ? $tDuration : '—' ?></span>
+          <i class="bi bi-chevron-right sr-artist-arrow" aria-hidden="true"></i>
+        </a>
+      <?php endforeach; ?>
+    </div>
+
+    <?php if ($tracksTotal > count($tracks)): ?>
+      <p class="sr-tracks-more">
+        Mostrate le prime <?= count($tracks) ?> tracce di <?= (int)$tracksTotal ?>.
+        Aggiungi il nome dell'artista o dell'album per restringere.
+      </p>
     <?php endif; ?>
   </div>
   <?php endif; ?>

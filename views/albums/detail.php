@@ -1030,7 +1030,7 @@ if ($audioFmtLabel !== '') {
 
 <script>
   /* ----------------------------------------------------------------
-     Album recommendations — Last.fm + archivio locale
+     Consigli — ListenBrainz e MusicBrainz + archivio locale
   ---------------------------------------------------------------- */
   (function() {
     var block = document.getElementById('albumRecommendations');
@@ -1078,8 +1078,10 @@ if ($audioFmtLabel !== '') {
 
           var emptyMsg = document.createElement('div');
           emptyMsg.className = 'small text-muted fst-italic py-1';
-          emptyMsg.textContent = (data && data.recommendations_status === 'lastfm_not_configured')
-            ? 'Nessun album affine trovato nell’archivio. Per ampliare i suggerimenti configura una chiave Last.fm nel file .env.'
+          // sources_unavailable: le fonti esterne non hanno risposto e il
+          // risultato non è stato salvato, la prossima apertura riprova.
+          emptyMsg.textContent = (data && data.recommendations_status === 'sources_unavailable')
+            ? 'Fonti dei consigli non raggiungibili in questo momento: riprova più tardi.'
             : 'Nessun suggerimento sufficientemente coerente trovato per questo album.';
 
           list.appendChild(emptyMsg);
@@ -1227,7 +1229,7 @@ if ($audioFmtLabel !== '') {
       .catch(function() {
         if (timer) clearTimeout(timer);
 
-        // Suggerimento accessorio: se rete/Last.fm falliscono,
+        // Suggerimento accessorio: se la rete o le fonti falliscono,
         // non mostrare errori invasivi nella scheda.
         block.style.display = 'none';
       });

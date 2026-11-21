@@ -5282,7 +5282,7 @@ a.badge-format:hover {
   outline-offset: -2px;
 }
 
-/* Barra di ordinamento (solo vista griglia) */
+/* Barra di ordinamento (lista e griglia) */
 .grz-archive-sortbar {
   display: flex;
   flex-wrap: wrap;
@@ -10047,4 +10047,543 @@ html[data-bs-theme="light"] .grz-cover__empty .grz-vinyl {
   font-family: var(--grz-font-data, ui-monospace, monospace);
   font-size: 0.75rem;
   color: var(--bs-secondary-color);
+}
+
+/* ============================================================
+   Barra filtri e ricerca — Archivio (views/albums/list.php) e
+   Cerca (views/search/results.php)
+
+   Una riga di controlli alti 48px appoggiati direttamente sul fondo
+   pagina, senza la card che li racchiudeva: campo di ricerca con
+   icona e pulsante interno, filtri con l'etichetta dentro il
+   controllo. Un filtro impostato si colora d'ambra (.is-set), così
+   si vede subito che cosa sta restringendo l'elenco.
+
+   I bordi usano --grz-field-border (3:1, vedi grizzly-tokens.css).
+   Il collasso su mobile resta quello di .filters-form / .adv-filter
+   definito più sopra.
+   ============================================================ */
+.grz-filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 1.5rem;
+}
+
+/* ── Campo di ricerca ── */
+.grz-filterbar__search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 320px;
+  min-width: 0;
+  height: 48px;
+  padding: 0 6px 0 14px;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--grz-field-border, var(--bs-border-color));
+  border-radius: 12px;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.grz-filterbar__search:focus-within {
+  border-color: var(--grz-accent-ink, var(--bs-warning));
+  box-shadow: 0 0 0 3px var(--grz-accent-soft, rgba(245, 180, 0, 0.14));
+}
+.grz-filterbar__icon {
+  flex-shrink: 0;
+  font-size: 1rem;
+  color: var(--bs-secondary-color);
+}
+.grz-filterbar__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--bs-body-color);
+  font: inherit;
+  font-size: 1rem;
+}
+.grz-filterbar__input::placeholder {
+  color: var(--bs-secondary-color);
+  opacity: 1;
+}
+/* Il focus è disegnato sul contenitore (:focus-within) */
+.grz-filterbar__input:focus,
+.grz-filterbar__input:focus-visible {
+  outline: none;
+}
+.grz-filterbar__submit {
+  flex-shrink: 0;
+  height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--grz-accent, #f5b400);
+  color: var(--grz-on-accent, #1a1300);
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition: background-color 0.15s ease;
+}
+.grz-filterbar__submit:hover {
+  background: var(--grz-accent-hover, #e0a500);
+}
+.grz-filterbar__submit:active {
+  background: var(--grz-accent-active, #cc9600);
+}
+
+/* ── Filtri: etichetta piccola in alto, valore sotto ── */
+.grz-filter {
+  position: relative;
+  flex: 1 1 150px;
+  min-width: 0;
+  height: 48px;
+  margin: 0;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--grz-field-border, var(--bs-border-color));
+  border-radius: 12px;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background-color 0.15s ease;
+}
+.grz-filter--year {
+  flex: 0 0 104px;
+}
+.grz-filter:focus-within {
+  border-color: var(--grz-accent-ink, var(--bs-warning));
+  box-shadow: 0 0 0 3px var(--grz-accent-soft, rgba(245, 180, 0, 0.14));
+}
+.grz-filter__label {
+  position: absolute;
+  top: 8px;
+  left: 14px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color);
+  pointer-events: none;
+}
+/* Il controllo occupa tutto il riquadro: si apre cliccando ovunque */
+.grz-filter__control {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 21px 34px 5px 14px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: var(--bs-body-color);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 500;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+}
+.grz-filter__control:focus,
+.grz-filter__control:focus-visible {
+  outline: none;
+}
+.grz-filter__control option {
+  background: var(--bs-body-bg);
+  color: var(--bs-body-color);
+}
+.grz-filter--year .grz-filter__control {
+  padding-right: 10px;
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  cursor: text;
+}
+.grz-filter--year .grz-filter__control::placeholder {
+  font-family: var(--grz-font-ui, inherit);
+  color: var(--bs-secondary-color);
+  opacity: 1;
+}
+.grz-filter__chevron {
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  transform: translateY(-50%);
+  font-size: 0.72rem;
+  color: var(--bs-secondary-color);
+  pointer-events: none;
+}
+/* Filtro impostato */
+.grz-filter.is-set {
+  border-color: var(--grz-accent-ink, var(--bs-warning));
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.14));
+}
+.grz-filter.is-set .grz-filter__label,
+.grz-filter.is-set .grz-filter__chevron {
+  color: var(--grz-accent-ink, var(--bs-warning));
+}
+
+/* ── "Filtri" (solo mobile) e "Azzera" ── */
+.grz-filterbar__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  height: 44px;
+  padding: 0 16px;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--grz-field-border, var(--bs-border-color));
+  border-radius: 12px;
+  color: var(--bs-body-color);
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+.grz-filterbar__reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: 44px;
+  padding: 0 8px;
+  border-radius: 8px;
+  color: var(--bs-secondary-color);
+  font-size: 0.875rem;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+.grz-filterbar__reset:hover {
+  color: var(--bs-body-color);
+}
+.grz-filterbar__reset i {
+  font-size: 0.75rem;
+}
+
+@media (max-width: 767.98px) {
+  .grz-filterbar__search {
+    flex-basis: 100%;
+  }
+  .grz-filter,
+  .grz-filter--year {
+    flex: 1 1 calc(50% - 5px);
+  }
+}
+
+/* ── Suggerimenti mentre si scrive (search-suggest.js) ── */
+.grz-suggest__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: -1px;
+  right: -1px;
+  z-index: 1010;
+  max-height: min(70vh, 600px);
+  padding: 6px;
+  overflow-y: auto;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color);
+  border-radius: 12px;
+  box-shadow: var(--grz-shadow-hover, 0 8px 28px rgba(0, 0, 0, 0.15));
+}
+.grz-suggest__panel[hidden] {
+  display: none;
+}
+.grz-suggest__group {
+  padding: 8px 10px 4px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color);
+}
+.grz-suggest__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: var(--bs-body-color);
+  text-decoration: none;
+}
+.grz-suggest__item:hover,
+.grz-suggest__item.is-active {
+  background: var(--grz-accent-soft, rgba(245, 180, 0, 0.14));
+  color: var(--bs-body-color);
+}
+.grz-suggest__thumb {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--bs-secondary-bg);
+}
+.grz-suggest__thumb--round {
+  border-radius: 50%;
+}
+.grz-suggest__thumb--empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bs-secondary-color);
+  font-size: 1rem;
+}
+.grz-suggest__text {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.grz-suggest__title,
+.grz-suggest__sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.grz-suggest__title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.grz-suggest__sub {
+  font-size: 0.8rem;
+  line-height: 1.3;
+  color: var(--bs-secondary-color);
+}
+.grz-suggest__meta {
+  flex-shrink: 0;
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--bs-secondary-color);
+}
+.grz-suggest__empty {
+  padding: 10px;
+  font-size: 0.875rem;
+  color: var(--bs-secondary-color);
+}
+.grz-suggest__all {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px;
+  border: 0;
+  border-top: 1px solid var(--bs-border-color);
+  border-radius: 0 0 8px 8px;
+  /* Resta visibile in fondo quando l'elenco scorre */
+  position: sticky;
+  bottom: -6px;
+  background: var(--bs-body-bg);
+  color: var(--grz-accent-ink, var(--bs-warning));
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-align: left;
+}
+.grz-suggest__all span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.grz-suggest__all:hover,
+.grz-suggest__all.is-active {
+  background:
+    linear-gradient(var(--grz-accent-soft, rgba(245, 180, 0, 0.14)), var(--grz-accent-soft, rgba(245, 180, 0, 0.14))),
+    var(--bs-body-bg);
+}
+
+/* ── Pagina Cerca: campo unico e risultati per traccia ── */
+.grz-filterbar--solo {
+  max-width: 46rem;
+}
+.sr-albums-wrap {
+  margin-bottom: 2.5rem;
+}
+.sr-tracks {
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--grz-radius, 10px);
+  background: var(--bs-body-bg);
+  overflow: hidden;
+}
+.sr-track-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--bs-border-color);
+  color: var(--bs-body-color);
+  text-decoration: none;
+  transition: background-color 0.12s ease;
+}
+.sr-track-row:last-child {
+  border-bottom: 0;
+}
+.sr-track-row:hover {
+  background: var(--bs-tertiary-bg);
+  color: var(--bs-body-color);
+}
+.sr-track-row:hover .sr-artist-arrow {
+  opacity: 1;
+}
+.sr-track-cover {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--bs-secondary-bg);
+}
+.sr-track-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sr-track-title,
+.sr-track-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sr-track-title {
+  font-weight: 600;
+  line-height: 1.3;
+}
+.sr-track-sub {
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--bs-secondary-color);
+}
+.sr-track-audio {
+  flex-shrink: 0;
+  font-size: 0.9rem;
+}
+.sr-track-duration {
+  flex-shrink: 0;
+  min-width: 3.2em;
+  text-align: right;
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--bs-secondary-color);
+}
+.sr-tracks-more {
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+  color: var(--bs-secondary-color);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sr-track-row {
+    transition: none;
+  }
+}
+
+/* ── Pagina Cerca vuota: campo al centro, elemento principale ──
+   Prima di una ricerca non c'è altro da leggere: titolo, campo più
+   grande e una riga con la dimensione dell'archivio, in colonna al
+   centro. Con dei risultati il campo torna in alto (.grz-filterbar--solo). */
+.grz-search-hero {
+  max-width: 42rem;
+  margin: clamp(1.5rem, 11vh, 7rem) auto 0;
+  text-align: center;
+}
+.grz-search-hero__title {
+  margin: 0 0 1.5rem;
+  font-size: clamp(1.9rem, 4.2vw, 2.75rem);
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--bs-emphasis-color);
+}
+.grz-filterbar--hero {
+  max-width: none;
+  margin-bottom: 1.1rem;
+}
+.grz-filterbar--hero .grz-filterbar__search {
+  height: 58px;
+  padding: 0 8px 0 18px;
+  border-radius: 16px;
+}
+.grz-filterbar--hero .grz-filterbar__icon {
+  font-size: 1.15rem;
+}
+.grz-filterbar--hero .grz-filterbar__input {
+  font-size: 1.1rem;
+}
+.grz-filterbar--hero .grz-filterbar__submit {
+  height: 42px;
+  padding: 0 20px;
+  border-radius: 10px;
+  font-size: 0.95rem;
+}
+/* Il pannello dei suggerimenti non eredita il testo centrato */
+.grz-search-hero .grz-suggest__panel,
+.grz-search-hero .alert {
+  text-align: left;
+}
+.grz-search-hero__counts {
+  margin: 0 0 0.9rem;
+  font-family: var(--grz-font-data, ui-monospace, monospace);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--bs-secondary-color);
+}
+.grz-search-hero__hint {
+  max-width: 34rem;
+  margin: 0 auto;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--bs-secondary-color);
+}
+
+/* ── Pagina Cerca: nota e stati vuoti ── */
+.grz-search-note {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: -0.5rem 0 1.5rem;
+  font-size: 0.875rem;
+  color: var(--bs-secondary-color);
+}
+.grz-search-empty {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 3.5rem 1rem;
+  text-align: center;
+}
+.grz-search-empty__icon {
+  display: block;
+  margin-bottom: 1rem;
+  font-size: 2.5rem;
+  line-height: 1;
+  color: var(--bs-secondary-color);
+  opacity: 0.45;
+}
+.grz-search-empty__title {
+  margin-bottom: 0.4rem;
+  font-family: var(--grz-font-title, inherit);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--bs-body-color);
+}
+.grz-search-empty__text {
+  margin-bottom: 0;
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: var(--bs-secondary-color);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grz-filterbar__search,
+  .grz-filterbar__submit,
+  .grz-filter,
+  .grz-filterbar__reset {
+    transition: none;
+  }
 }

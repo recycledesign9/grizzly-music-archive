@@ -10,6 +10,8 @@ $advCount = count(array_filter([
   $filters['label_id'] ?? '',
   $filters['year'] ?? '',
 ]));
+// "Azzera" compare solo quando c'è qualcosa da azzerare.
+$hasActiveFilters = $advCount > 0 || ($filters['q'] ?? '') !== '';
 
 // Vista corrente ('list' | 'grid'), risolta dal controller.
 $view = ($view ?? 'list') === 'grid' ? 'grid' : 'list';
@@ -31,15 +33,10 @@ $viewUrl = function (string $v) use ($listParams, $pagination, $view): string {
     unset($params['per_page']);
     $params['page'] = 1;
   }
-  // La lista non ha una colonna "Data di aggiunta": tornando alla lista
-  // da quell'ordinamento si usa l'ordinamento predefinito per titolo.
-  if ($v === 'list' && $params['order'] === 'a.created_at') {
-    $params['order'] = 'a.title';
-    $params['dir']   = 'ASC';
-  }
   return BASE_URL . '/index.php?' . http_build_query($params);
 };
-// Link di ordinamento: stessa regola delle intestazioni della lista
+// Link di ordinamento della barra "Ordina per", comune a lista e
+// griglia: stessa regola delle intestazioni della lista
 // (clic sulla colonna attiva inverte la direzione, si riparte da pagina 1).
 // La data di aggiunta parte dal più recente (DESC); le altre colonne
 // partono da ASC come prima.
@@ -84,9 +81,13 @@ $sortUrl = function (string $col) use ($listParams, $order, $dir): string {
   </div>
 </div>
 
-<!-- Filtri -->
-<form method="get" action="<?= BASE_URL ?>/index.php"
-  class="card card-body mb-4 shadow-sm p-3 filters-form<?= $advCount > 0 ? ' filters-open' : '' ?>">
+<!-- Filtri: ricerca con suggerimenti (search-suggest.js) e filtri a
+     etichetta interna. I select applicano il filtro alla scelta, con lo
+     stesso invio del selettore "per pagina"; testo e anno si confermano
+     con Invio o con il pulsante. Su mobile i filtri avanzati restano
+     collassati dietro "Filtri" (classi .adv-filter / .filters-open). -->
+<form method="get" action="<?= BASE_URL ?>/index.php" role="search"
+  class="grz-filterbar filters-form<?= $advCount > 0 ? ' filters-open' : '' ?>">
   <input type="hidden" name="route" value="albums/list">
   <input type="hidden" name="page" value="1">
   <input type="hidden" name="per_page" value="<?= $pagination['per_page'] ?>">
@@ -94,79 +95,112 @@ $sortUrl = function (string $col) use ($listParams, $order, $dir): string {
   <input type="hidden" name="dir" value="<?= $dir ?>">
   <input type="hidden" name="view" value="<?= $view ?>">
 
-  <div class="row g-2 align-items-end">
-    <div class="col-12 col-md-3">
-      <input type="search" name="q" class="form-control form-control-sm"
-        placeholder="Cerca titolo o artista…"
-        value="<?= htmlspecialchars($filters['q']) ?>">
-    </div>
-
-    <div class="col-6 col-md-2 adv-filter">
-      <select name="format_id" class="form-select form-select-sm">
-        <option value="">Tutti i formati</option>
-        <?php foreach ($formats as $f): ?>
-          <option value="<?= $f['id'] ?>" <?= $filters['format_id'] == $f['id'] ? 'selected' : '' ?>>
-            <?= htmlspecialchars($f['name']) ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-    </div>
-
-    <div class="col-6 col-md-2 adv-filter">
-      <select name="genre_id" class="form-select form-select-sm">
-        <option value="">Tutti i generi</option>
-        <?php foreach ($genres as $g): ?>
-          <option value="<?= $g['id'] ?>" <?= $filters['genre_id'] == $g['id'] ? 'selected' : '' ?>>
-            <?= htmlspecialchars($g['name']) ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-    </div>
-
-    <div class="col-6 col-md-2 adv-filter">
-      <select name="label_id" class="form-select form-select-sm">
-        <option value="">Tutte le etichette</option>
-        <?php foreach ($labels as $l): ?>
-          <option value="<?= $l['id'] ?>" <?= $filters['label_id'] == $l['id'] ? 'selected' : '' ?>>
-            <?= htmlspecialchars($l['name']) ?>
-          </option>
-        <?php endforeach; ?>
-      </select>
-    </div>
-
-    <div class="col-6 col-md-1 adv-filter">
-      <input type="number" name="year" class="form-control form-control-sm"
-        placeholder="Anno" min="1900" max="<?= date('Y') ?>"
-        value="<?= $filters['year'] ?: '' ?>">
-    </div>
-
-    <div class="col-4 d-md-none">
-      <button type="button"
-        class="btn btn-sm btn-outline-secondary w-100 btn-adv-toggle"
-        onclick="this.closest('form').classList.toggle('filters-open')">
-        <i class="bi bi-sliders me-1"></i>Filtri<?= $advCount > 0 ? ' · ' . $advCount : '' ?>
-      </button>
-    </div>
-
-    <div class="col-4 col-md-1">
-      <button type="submit" class="btn btn-sm btn-primary w-100">
-        <i class="bi bi-funnel-fill"></i>
-      </button>
-    </div>
-
-    <div class="col-4 col-md-1">
-      <a href="<?= BASE_URL ?>/index.php?route=albums/list"
-        class="btn btn-sm btn-outline-secondary w-100">
-        <i class="bi bi-x-circle"></i>
-      </a>
-    </div>
+  <div class="grz-filterbar__search" data-suggest>
+    <i class="bi bi-search grz-filterbar__icon" aria-hidden="true"></i>
+    <input type="search" name="q" class="grz-filterbar__input"
+      placeholder="Cerca titolo o artista…" aria-label="Cerca titolo o artista"
+      autocomplete="off" data-suggest-input
+      value="<?= htmlspecialchars($filters['q']) ?>">
+    <button type="submit" class="grz-filterbar__submit" title="Applica i filtri">
+      Filtra
+    </button>
   </div>
+
+  <label class="grz-filter adv-filter<?= !empty($filters['format_id']) ? ' is-set' : '' ?>">
+    <span class="grz-filter__label">Formato</span>
+    <select name="format_id" class="grz-filter__control"
+      onchange="this.form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))">
+      <option value="">Tutti</option>
+      <?php foreach ($formats as $f): ?>
+        <option value="<?= $f['id'] ?>" <?= $filters['format_id'] == $f['id'] ? 'selected' : '' ?>>
+          <?= htmlspecialchars($f['name']) ?>
+        </option>
+      <?php endforeach; ?>
+    </select>
+    <i class="bi bi-chevron-down grz-filter__chevron" aria-hidden="true"></i>
+  </label>
+
+  <label class="grz-filter adv-filter<?= !empty($filters['genre_id']) ? ' is-set' : '' ?>">
+    <span class="grz-filter__label">Genere</span>
+    <select name="genre_id" class="grz-filter__control"
+      onchange="this.form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))">
+      <option value="">Tutti</option>
+      <?php foreach ($genres as $g): ?>
+        <option value="<?= $g['id'] ?>" <?= $filters['genre_id'] == $g['id'] ? 'selected' : '' ?>>
+          <?= htmlspecialchars($g['name']) ?>
+        </option>
+      <?php endforeach; ?>
+    </select>
+    <i class="bi bi-chevron-down grz-filter__chevron" aria-hidden="true"></i>
+  </label>
+
+  <label class="grz-filter adv-filter<?= !empty($filters['label_id']) ? ' is-set' : '' ?>">
+    <span class="grz-filter__label">Etichetta</span>
+    <select name="label_id" class="grz-filter__control"
+      onchange="this.form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))">
+      <option value="">Tutte</option>
+      <?php foreach ($labels as $l): ?>
+        <option value="<?= $l['id'] ?>" <?= $filters['label_id'] == $l['id'] ? 'selected' : '' ?>>
+          <?= htmlspecialchars($l['name']) ?>
+        </option>
+      <?php endforeach; ?>
+    </select>
+    <i class="bi bi-chevron-down grz-filter__chevron" aria-hidden="true"></i>
+  </label>
+
+  <label class="grz-filter grz-filter--year adv-filter<?= !empty($filters['year']) ? ' is-set' : '' ?>">
+    <span class="grz-filter__label">Anno</span>
+    <input type="number" name="year" class="grz-filter__control"
+      placeholder="Tutti" min="1900" max="<?= date('Y') ?>"
+      value="<?= $filters['year'] ?: '' ?>">
+  </label>
+
+  <button type="button"
+    class="grz-filterbar__toggle btn-adv-toggle d-md-none"
+    onclick="this.closest('form').classList.toggle('filters-open')">
+    <i class="bi bi-sliders" aria-hidden="true"></i>Filtri<?= $advCount > 0 ? ' · ' . $advCount : '' ?>
+  </button>
+
+  <?php if ($hasActiveFilters): ?>
+    <a href="<?= BASE_URL ?>/index.php?route=albums/list" class="grz-filterbar__reset">
+      <i class="bi bi-x-lg" aria-hidden="true"></i>Azzera
+    </a>
+  <?php endif; ?>
 </form>
 
 <!-- Tabella -->
 <?php if (empty($albums)): ?>
   <div class="alert alert-info">Nessun disco trovato.</div>
 <?php else: ?>
+
+  <!-- Barra "Ordina per": comune a lista e griglia. In lista si
+       affianca alle intestazioni cliccabili (che non hanno una colonna
+       per la data di aggiunta) e rende l'ordinamento disponibile anche
+       nelle card mobile. -->
+  <?php
+  $sortOptions = [
+    'a.title' => 'Titolo',
+    'ar.name' => 'Artista',
+    'a.year'  => 'Anno',
+    'a.created_at' => 'Data di aggiunta',
+  ];
+  ?>
+  <nav class="grz-archive-sortbar" aria-label="Ordinamento">
+    <span class="grz-archive-sortbar__label">Ordina per</span>
+    <?php foreach ($sortOptions as $col => $label):
+      $isActive = $order === $col;
+    ?>
+      <a href="<?= htmlspecialchars($sortUrl($col)) ?>"
+        class="grz-archive-sortbar__link<?= $isActive ? ' is-active' : '' ?>"
+        <?= $isActive ? 'aria-current="true"' : '' ?>>
+        <?= $label ?>
+        <?php if ($isActive): ?>
+          <i class="bi <?= $dir === 'ASC' ? 'bi-arrow-up' : 'bi-arrow-down' ?>" aria-hidden="true"></i>
+          <span class="visually-hidden"><?= $dir === 'ASC' ? '(crescente)' : '(decrescente)' ?></span>
+        <?php endif; ?>
+      </a>
+    <?php endforeach; ?>
+  </nav>
 
   <?php if ($view === 'list'): ?>
 
@@ -356,34 +390,8 @@ $sortUrl = function (string $col) use ($listParams, $order, $dir): string {
   <?php else: ?>
 
   <!-- Vista griglia: stessi album, stessa paginazione e stessi filtri
-       della lista; cambia solo la resa. Senza intestazioni di colonna,
-       l'ordinamento passa dalla barra qui sotto, che usa gli stessi
-       link delle intestazioni della lista. -->
-  <?php
-  $sortOptions = [
-    'a.title' => 'Titolo',
-    'ar.name' => 'Artista',
-    'a.year'  => 'Anno',
-    'a.created_at' => 'Data di aggiunta',
-  ];
-  ?>
-  <nav class="grz-archive-sortbar" aria-label="Ordinamento">
-    <span class="grz-archive-sortbar__label">Ordina per</span>
-    <?php foreach ($sortOptions as $col => $label):
-      $isActive = $order === $col;
-    ?>
-      <a href="<?= htmlspecialchars($sortUrl($col)) ?>"
-        class="grz-archive-sortbar__link<?= $isActive ? ' is-active' : '' ?>"
-        <?= $isActive ? 'aria-current="true"' : '' ?>>
-        <?= $label ?>
-        <?php if ($isActive): ?>
-          <i class="bi <?= $dir === 'ASC' ? 'bi-arrow-up' : 'bi-arrow-down' ?>" aria-hidden="true"></i>
-          <span class="visually-hidden"><?= $dir === 'ASC' ? '(crescente)' : '(decrescente)' ?></span>
-        <?php endif; ?>
-      </a>
-    <?php endforeach; ?>
-  </nav>
-
+       della lista; cambia solo la resa. L'ordinamento passa dalla
+       barra "Ordina per" sopra, comune alle due viste. -->
   <!-- Il contenitore misura la larghezza disponibile (anche con la coda
        di riproduzione aperta): le colonne sono 2, 3, 4, 6, 8 o 12,
        divisori di 24, 48 e 96, così le righe sono sempre piene. -->

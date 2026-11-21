@@ -215,14 +215,12 @@ class AlbumController
   // si usa l'ultimo ricordato. Il valore del cookie è confrontato con
   // la stessa whitelist dei parametri GET.
   //
-  // a.created_at ("Data di aggiunta") esiste solo nella griglia: in
-  // lista si ripiega su titolo crescente, come il cambio di vista in
-  // list.php, senza sovrascrivere il cookie, così tornando alla
-  // griglia si ritrova l'ordinamento per data.
+  // a.created_at ("Data di aggiunta") vale in entrambe le viste: la
+  // barra "Ordina per" di list.php è la stessa per lista e griglia.
   // ----------------------------------------------------------
   private function resolveArchiveSort(string $view): array
   {
-    // a.created_at: "Data di aggiunta", esposto solo nella vista griglia.
+    // a.created_at: "Data di aggiunta".
     $allowedOrder = ['a.title', 'ar.name', 'a.year', 'a.created_at'];
     $default      = ['a.title', 'ASC'];
     $cookie       = 'grz_archive_sort';
@@ -250,10 +248,6 @@ class AlbumController
       } else {
         [$order, $dir] = $default;
       }
-    }
-
-    if ($view !== 'grid' && $order === 'a.created_at') {
-      return $default;
     }
 
     return [$order, $dir];
@@ -1035,7 +1029,7 @@ class AlbumController
 
       // Rilascia il lock di sessione DOPO la verifica CSRF (che legge
       // $_SESSION) e PRIMA delle chiamate esterne lente (MusicBrainz,
-      // Last.fm): senza questa riga l'endpoint bloccherebbe ogni altra
+      // Discogs): senza questa riga l'endpoint bloccherebbe ogni altra
       // richiesta dell'app finché il fetch non è concluso.
       // Convenzione di progetto per tutti gli endpoint con I/O esterno.
       if (session_status() === PHP_SESSION_ACTIVE) {
@@ -2604,8 +2598,17 @@ class AlbumController
   // ----------------------------------------------------------
   // GET /albums/api-recommendations/{id}
   //
-  // Last.fm artist.getSimilar -> artisti affini
-  // -> incrocio con gli album già presenti in Grizzly.
+  // Consigli della scheda disco (e della dashboard, che ne usa i primi):
+  //   - "recommendations": album GIÀ in archivio, a livelli (vedi
+  //     Album::getRecommendations): artisti simili ListenBrainz, stesso
+  //     genere, generi MusicBrainz del disco, simili oltre i primi 30;
+  //   - "suggestions": album fuori archivio degli artisti simili, solo se
+  //     è configurato un token ListenBrainz (facoltativo).
+  //
+  // Nessuna credenziale è obbligatoria. Il risultato completo va in cache
+  // solo quando tutte le fonti hanno risposto: con un errore o con il
+  // budget di tempo esaurito si mostra quello che c'è e la visita
+  // successiva riprova.
   // ----------------------------------------------------------
   private function apiRecommendations(?int $id): void
   {
@@ -2631,22 +2634,13 @@ class AlbumController
         exit;
       }
 
-      // CACHE DI PRIMO LIVELLO: il payload completo dei consigli per questo
-      // album. Le sotto-cache (track.getSimilar, track.getInfo, ecc.) non
-      // bastano — l'orchestrazione fa comunque 5-7s a ogni richiesta, che
-      // superano il timeout JS e fanno "sparire/ricaricare" il box. Qui
-      // serviamo l'intero risultato già montato: 2a visita = millisecondi.
-      // Il debug bypassa la cache (deve sempre rieseguire per diagnosticare).
       $debugMode = (isset($_GET['debug']) && $_GET['debug'] === '1');
 
-      // La cache completa resta utile per non rifare l'orchestrazione lenta,
-      // ma NON può vivere indipendentemente dall'archivio locale: contiene
-      // ID/URL Grizzly e la distinzione "in collezione" / "scoperta".
-      // La firma cambia quando vengono aggiunti, eliminati, reimportati o
-      // modificati album rilevanti, oppure quando cambia la tracklist sorgente.
-      // Le sotto-cache Last.fm/MusicBrainz restano intatte.
+      // La cache completa non può vivere indipendentemente dall'archivio:
+      // contiene ID/URL Grizzly e la distinzione "in collezione" /
+      // "scoperta". La firma cambia quando cambiano gli album rilevanti.
       $recContextSignature = $this->recommendationContextSignature((int)$album['id']);
-      $recCacheKey = 'recs:v1:' . (int)$id;
+      $recCacheKey = 'recs:v3:' . (int)$id;
 
       if (!$debugMode) {
         $cachedRecs = $this->getRecCache($recCacheKey, $recContextSignature);
@@ -2660,53 +2654,35 @@ class AlbumController
 
       $service = new AlbumRecommendationService();
 
-      $similarArtists = $service->getSimilarArtists(
-        (string)($album['artist_name'] ?? '')
-      );
+      // La scheda interrompe la richiesta dopo 15 secondi: le chiamate
+      // esterne devono chiudersi prima, lasciando margine alla risposta.
+      $service->startBudget(11.0);
 
-      // Tag specifici del disco corrente.
-      $albumTags = $service->getAlbumTags(
-        (string)($album['artist_name'] ?? ''),
-        (string)($album['title'] ?? '')
-      );
+      $artist = $this->artistModel->getById((int)$album['artist_id']) ?: [];
+      $localTitles = array_column($this->artistModel->getAlbums((int)$album['artist_id']), 'title');
 
-      // Il genere catalogato in Grizzly è un segnale locale affidabile:
-      // lo mettiamo davanti ai tag Last.fm senza duplicarlo.
-      if (!empty($album['genre_name'])) {
-        array_unshift($albumTags, (string)$album['genre_name']);
-      }
-      $albumTags = array_values(array_unique(array_filter(array_map('trim', $albumTags))));
+      // Release-group del disco: generi MusicBrainz e artisti accreditati.
+      $rgInfo = $service->getReleaseGroupInfo((string)($album['mb_release_group'] ?? ''));
 
-      // Segnale realmente album-specifico: due tracce del disco corrente.
-      $sourceTracks = $this->trackModel->getByAlbum((int)$album['id']);
-      $sourceTrackTitles = [];
-
-      foreach ($sourceTracks as $sourceTrack) {
-        $trackTitle = trim((string)($sourceTrack['title'] ?? ''));
-        if ($trackTitle !== '') {
-          $sourceTrackTitles[] = $trackTitle;
-        }
+      // Identità MusicBrainz dell'artista, anche quando non è ancora stata
+      // risolta dalla pagina artista.
+      $identity = $service->resolveArtistIdentity($artist, $localTitles, $rgInfo);
+      if ($identity['save_mbid'] !== '' && !empty($artist['id'])) {
+        // Non sovrascrive mai un MBID esistente e non assegna un MBID già
+        // usato da un altro artista (vincolo uq_mb_artist_id).
+        $this->artistModel->attachMbidIfEmpty((int)$artist['id'], $identity['save_mbid']);
       }
 
-      $trackArtistScores = $service->getTrackBasedArtistScores(
-        (string)($album['artist_name'] ?? ''),
-        $sourceTrackTitles,
-        3
-      );
-
-      $rankedSimilarArtists = $service->rankSimilarArtistsForAlbum(
-        $similarArtists,
-        $trackArtistScores
-      );
+      $similar = $service->getSimilarArtists($identity['mbids']);
 
       $items = $this->albumModel->getRecommendations(
-        $rankedSimilarArtists,
+        $similar['rows'],
         (int)$album['id'],
         (int)$album['artist_id'],
         !empty($album['genre_id']) ? (int)$album['genre_id'] : null,
         !empty($album['year']) ? (int)$album['year'] : null,
         4,
-        $albumTags
+        $rgInfo['genres']
       );
 
       $payload = [];
@@ -2732,93 +2708,85 @@ class AlbumController
         ];
       }
 
-      // ---- Sezione SCOPERTA: simili esterni (non in archivio). ----
-      // Riempie il blocco quando la collezione ha poche o zero
-      // sovrapposizioni interne (caso tipico dei generi di nicchia:
-      // es. un solo album "Garage Rock" in tutto l'archivio). Riusa i
-      // simili gia' scaricati sopra: nessuna seconda chiamata getsimilar.
+      // ---- Sezione SCOPERTA: album di simili fuori archivio ----
+      // Si saltano gli artisti già in archivio (mostrati sopra o comunque
+      // posseduti) e l'artista del disco.
       $suggestions = [];
+      $externalOk  = true;
 
-      // Nomi gia' mostrati dalla sezione "in archivio": vanno esclusi
-      // dalla scoperta per non duplicare lo stesso artista.
+      $skipMbids = $identity['mbids'];
+      foreach (Database::getInstance()->query(
+        "SELECT DISTINCT ar.mb_artist_id FROM artists ar
+         JOIN albums a ON a.artist_id = ar.id
+         WHERE ar.mb_artist_id IS NOT NULL AND ar.mb_artist_id <> ''"
+      )->fetchAll(PDO::FETCH_COLUMN) as $m) {
+        $skipMbids[] = (string)$m;
+      }
+
       $ownNames = [];
       foreach ($payload as $p) {
         $ownNames[] = (string)$p['artist_name'];
       }
 
+      $external = $service->getExternalSuggestions($similar['rows'], $skipMbids, 5);
+      $externalOk = $external['ok'];
 
-      // Sorgente primaria: album reali dei brani simili alle tracce del disco.
-      $albumCandidates = $service->getTrackBasedAlbumCandidates(
-        (string)($album['artist_name'] ?? ''),
-        $sourceTrackTitles,
-        $rankedSimilarArtists,
-        30
-      );
-
-      $ownedAlbums = $this->albumModel->getOwnedAlbumPairs();
-      $external = $service->filterExternalAlbumCandidates($albumCandidates,$ownedAlbums,5,$ownNames);
-
-      // Fallback solo se i dati track-level non bastano.
-      if (count($external) < 5) {
-        $skipNames=$ownNames;
-        foreach ($external as $row) $skipNames[]=(string)($row['name']??'');
-        $fallbackExternal=$service->getExternalSuggestions(
-          $rankedSimilarArtists,$skipNames,(string)($album['artist_name']??''),(string)($album['title']??''),5
+      if (!empty($external['rows'])) {
+        $filtered = $service->filterExternalAlbumCandidates(
+          $external['rows'],
+          $this->albumModel->getOwnedAlbumPairs(),
+          5,
+          $ownNames
         );
-        $fallbackExternal=$service->filterExternalAlbumCandidates(
-          $fallbackExternal,$ownedAlbums,5-count($external),$skipNames
-        );
-        foreach ($fallbackExternal as $row) $external[]=$row;
+        foreach ($filtered as $ex) {
+          $suggestions[] = [
+            'name'  => (string)$ex['name'],
+            'album' => (string)$ex['album'],
+            'cover' => (string)$ex['cover'], // puo' essere '' → placeholder lato JS
+          ];
+        }
       }
 
-      foreach ($external as $ex) {
-        $suggestions[] = [
-          'name'  => (string)$ex['name'],
-          'album' => (string)$ex['album'],
-          'cover' => (string)$ex['cover'], // puo' essere '' → placeholder lato JS
-        ];
-      }
+      // Tutte le fonti hanno risposto e il budget non è stato superato:
+      // solo in questo caso il risultato è definitivo.
+      $complete = $rgInfo['ok']
+        && $identity['ok']
+        && $similar['ok']
+        && $externalOk
+        && !$service->budgetExceeded();
 
-      // Diagnostica opzionale: non cambia la risposta normale.
-      // Aggiungi &debug=1 all'endpoint per vedere quali segnali hanno
-      // differenziato questo album dagli altri dello stesso artista.
       $debugPayload = null;
-      if (isset($_GET['debug']) && $_GET['debug'] === '1') {
+      if ($debugMode) {
         $debugPayload = [
-          'album_tags' => $albumTags,
-          'source_tracks' => $sourceTrackTitles,
-          'track_artist_scores' => array_slice($trackArtistScores, 0, 12, true),
-          'ranked_similar_artists' => array_slice($rankedSimilarArtists, 0, 12),
-          'album_candidates' => array_slice($albumCandidates, 0, 12),
-          'album_candidate_source' => 'track.getSimilar -> track.getInfo',
-          'external_album_policy' => 'studio only: MusicBrainz primary-type Album, no secondary-types',
+          'identity'        => $identity,
+          'release_group'   => $rgInfo,
+          'similar_ok'      => $similar['ok'],
+          'similar_top'     => array_slice($similar['rows'], 0, 15),
+          'similar_total'   => count($similar['rows']),
+          'external'        => $external,
+          'budget_exceeded' => $service->budgetExceeded(),
+          'complete'        => $complete,
         ];
       }
 
-      // Stato esplicito solo per distinguere i risultati vuoti.
-      // La logica di ranking NON cambia: Album::getRecommendations() resta
-      // restrittiva e continua a usare il fallback locale solo sullo stesso genere.
       $recommendationsStatus = 'ok';
       if (empty($payload) && empty($suggestions)) {
-        $recommendationsStatus = (!defined('LASTFM_API_KEY') || trim((string)LASTFM_API_KEY) === '')
-          ? 'lastfm_not_configured'
-          : 'no_coherent_results';
+        $recommendationsStatus = $complete ? 'no_coherent_results' : 'sources_unavailable';
       }
 
       $responsePayload = array_filter([
         'recommendations'        => $payload,
         'suggestions'            => $suggestions,
         'recommendations_status' => $recommendationsStatus,
+        'complete'               => $complete,
         'debug'                  => $debugPayload,
       ], function ($value, $key) {
         return $key !== 'debug' || $value !== null;
       }, ARRAY_FILTER_USE_BOTH);
 
-      // Cacha il risultato montato per 30 giorni, ma SOLO se non è in debug
-      // e se c'è davvero qualcosa da mostrare: non congeliamo un vuoto
-      // (buco transitorio di Last.fm → al prossimo giro riprova). Il campo
-      // debug non viene mai cachato.
-      if (!$debugMode && (!empty($payload) || !empty($suggestions))) {
+      // In cache per 30 giorni solo un risultato completo e non vuoto. Un
+      // risultato parziale si mostra ma non si conserva.
+      if (!$debugMode && $complete && (!empty($payload) || !empty($suggestions))) {
         $toCache = $responsePayload;
         unset($toCache['debug']);
         $this->setRecCache(
@@ -2859,7 +2827,7 @@ class AlbumController
    *
    * Non entra nelle cache delle API esterne: serve solo a stabilire se il
    * payload completo dell'endpoint è ancora coerente con l'archivio Grizzly.
-   * La query è locale e piccola rispetto alle chiamate Last.fm/MusicBrainz.
+   * La query è locale e piccola rispetto alle chiamate ListenBrainz/MusicBrainz.
    */
   private function recommendationContextSignature(int $sourceAlbumId): string
   {

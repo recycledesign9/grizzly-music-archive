@@ -52,9 +52,7 @@ class Album
       $params[':label_id'] = (int)$filters['label_id'];
     }
     if (!empty($filters['q'])) {
-      $where[] = '(a.title LIKE :q_title OR ar.name LIKE :q_artist)';
-      $params[':q_title']  = '%' . $filters['q'] . '%';
-      $params[':q_artist'] = '%' . $filters['q'] . '%';
+      $this->applyTextFilter($where, $params, (string)$filters['q']);
     }
 
     $sql = "
@@ -121,6 +119,42 @@ class Album
     return $rows;
   }
 
+  // ----------------------------------------------------------
+  // Filtro testuale dell'Archivio (titolo o artista), condiviso da
+  // getAll() e countAll() perché elenco e conteggio restino allineati.
+  //
+  // Oltre al confronto diretto, il testo viene confrontato anche con
+  // titolo e artista privati di punti, barre, trattini e apostrofi:
+  // "rem" trova "R.E.M.", "acdc" trova "AC/DC". Gli spazi restano,
+  // così il confronto non scavalca il confine tra due parole.
+  //
+  // Parametri tutti distinti per evitare HY093: PDO con prepare nativi
+  // non gestisce lo stesso named param usato più volte.
+  // ----------------------------------------------------------
+  private function applyTextFilter(array &$where, array &$params, string $q): void
+  {
+    $conditions = ['a.title LIKE :q_title', 'ar.name LIKE :q_artist'];
+    $params[':q_title']  = '%' . $q . '%';
+    $params[':q_artist'] = '%' . $q . '%';
+
+    $compact = str_replace(['.', '/', '-', "'", '’'], '', $q);
+    $compact = trim((string)preg_replace('/\s+/u', ' ', $compact));
+
+    if ($compact !== '') {
+      $conditions[] = $this->compactSql('a.title') . ' LIKE :q_title_compact';
+      $conditions[] = $this->compactSql('ar.name') . ' LIKE :q_artist_compact';
+      $params[':q_title_compact']  = '%' . $compact . '%';
+      $params[':q_artist_compact'] = '%' . $compact . '%';
+    }
+
+    $where[] = '(' . implode(' OR ', $conditions) . ')';
+  }
+
+  private function compactSql(string $column): string
+  {
+    return "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE($column, '.', ''), '/', ''), '-', ''), '''', ''), '’', '')";
+  }
+
   //metodo countAll
 
   public function countAll(array $filters = []): int
@@ -151,11 +185,7 @@ class Album
       $params[':label_id'] = (int)$filters['label_id'];
     }
     if (!empty($filters['q'])) {
-      // Due parametri distinti per evitare HY093:
-      // PDO con execute() non gestisce lo stesso named param usato più volte
-      $where[] = '(a.title LIKE :q_title OR ar.name LIKE :q_artist)';
-      $params[':q_title']  = '%' . $filters['q'] . '%';
-      $params[':q_artist'] = '%' . $filters['q'] . '%';
+      $this->applyTextFilter($where, $params, (string)$filters['q']);
     }
 
     $sql = "
@@ -736,16 +766,30 @@ class Album
   // ----------------------------------------------------------
   // RACCOMANDAZIONI ALBUM
   //
-  // Cerca SOLO album già presenti nell'archivio Grizzly.
-  // Ranking:
-  //   1. affinità Last.fm
-  //   2. stesso genere
-  //   3. vicinanza temporale
+  // Cerca SOLO album già presenti nell'archivio Grizzly, al massimo uno
+  // per artista, e riempie i posti a livelli successivi. Un livello entra
+  // solo se quelli precedenti non bastano:
   //
-  // Al massimo un album per artista.
-  // Se i match Last.fm locali non bastano, completa con album
-  // dello stesso genere.
+  //   1. artisti simili (ListenBrainz), i primi SIMILAR_PRIMARY;
+  //   2. stesso genere Grizzly del disco;
+  //   3. album il cui genere Grizzly compare tra i generi MusicBrainz
+  //      del disco;
+  //   4. artisti simili oltre i primi SIMILAR_PRIMARY.
+  //
+  // Nei livelli dei simili l'ordine combina somiglianza, genere e anno;
+  // nei livelli per genere conta la vicinanza d'anno.
+  //
+  // Misura sull'archivio del 19/11/2026: con i livelli 1-3 il 95% dei
+  // dischi riceve 4 consigli, il livello 4 ne completa altri 5. I livelli
+  // scartati (generi MusicBrainz dell'artista, simili di secondo grado)
+  // portavano consigli fuori tema o troppe chiamate.
+  //
+  // $similarArtists: righe di AlbumRecommendationService::getSimilarArtists()
+  //   [mbid, name, match 0..1, rank], già ordinate.
+  // $mbGenres: generi MusicBrainz del release-group del disco.
   // ----------------------------------------------------------
+  private const SIMILAR_PRIMARY = 30;
+
   public function getRecommendations(
     array $similarArtists,
     int $excludeAlbumId,
@@ -753,227 +797,248 @@ class Album
     ?int $genreId,
     ?int $year,
     int $limit = 4,
-    array $albumTags = []
+    array $mbGenres = []
   ): array {
     $limit = max(1, min(8, $limit));
 
-    // Tag dell'album corrente (Last.fm, già normalizzati minuscoli) come
-    // set per confronto O(1): danno il bonus "coerenza col disco" che
-    // rende i consigli album-aware, non solo artist-aware.
-    $tagSet = [];
-    foreach ($albumTags as $t) {
-      $t = trim((string) $t);
-      if ($t !== '') {
-        $tagSet[mb_strtolower($t, 'UTF-8')] = true;
+    $genreSet = [];
+    foreach ($mbGenres as $g) {
+      $g = $this->normalizeArtistForRecommendation((string)$g);
+      if ($g !== '') {
+        $genreSet[$g] = true;
       }
     }
 
-    $similarity = [];
-    $artistScores = [];
-    $queryNames = [];
-
+    // Album dei simili presenti in archivio: per MBID e, per gli artisti
+    // in archivio senza MBID, per nome.
+    $byMbid = [];
+    $byName = [];
     foreach ($similarArtists as $item) {
-      $name = trim((string)($item['name'] ?? ''));
-      if ($name === '') continue;
-
-      $norm = $this->normalizeArtistForRecommendation($name);
-      if ($norm === '') continue;
-
-      $match = max(0.0, min(1.0, (float)($item['match'] ?? 0)));
-      $albumScore = isset($item['_album_score'])
-        ? max(0.0, (float)$item['_album_score'])
-        : ($match * 1000.0);
-
-      if (!isset($artistScores[$norm]) || $albumScore > $artistScores[$norm]) {
-        $similarity[$norm] = $match;
-        $artistScores[$norm] = $albumScore;
-        $queryNames[$norm] = $name;
+      $mbid = strtolower(trim((string)($item['mbid'] ?? '')));
+      $name = $this->normalizeArtistForRecommendation((string)($item['name'] ?? ''));
+      $info = [
+        'match' => max(0.0, min(1.0, (float)($item['match'] ?? 0))),
+        'rank'  => (int)($item['rank'] ?? 0),
+      ];
+      if ($mbid !== '' && !isset($byMbid[$mbid])) {
+        $byMbid[$mbid] = $info;
+      }
+      if ($name !== '' && !isset($byName[$name])) {
+        $byName[$name] = $info;
       }
     }
 
-    $candidates = [];
+    $primary   = [];
+    $secondary = [];
 
-    if (!empty($queryNames)) {
-      $placeholders = [];
+    if (!empty($byMbid) || !empty($byName)) {
       $params = [
         ':exclude_album'  => $excludeAlbumId,
         ':exclude_artist' => $excludeArtistId,
       ];
+      $or = [];
 
-      $i = 0;
-      foreach (array_values($queryNames) as $name) {
-        $ph = ':artist_' . $i++;
-        $placeholders[] = $ph;
-        $params[$ph] = $name;
+      if (!empty($byMbid)) {
+        $ph = [];
+        $i  = 0;
+        foreach (array_keys($byMbid) as $m) {
+          $k = ':m' . $i++;
+          $ph[] = $k;
+          $params[$k] = $m;
+        }
+        $or[] = 'ar.mb_artist_id IN (' . implode(',', $ph) . ')';
+      }
+      if (!empty($byName)) {
+        $ph = [];
+        $i  = 0;
+        foreach (array_keys($byName) as $n) {
+          $k = ':n' . $i++;
+          $ph[] = $k;
+          $params[$k] = $n;
+        }
+        $or[] = "((ar.mb_artist_id IS NULL OR ar.mb_artist_id = '') AND LOWER(TRIM(ar.name)) IN (" . implode(',', $ph) . '))';
       }
 
-      $sql = "
-        SELECT
-          a.id,
-          a.title,
-          a.year,
-          a.cover_local,
-          a.cover_url,
-          a.genre_id,
-          a.created_at,
-          ar.id AS artist_id,
-          ar.name AS artist_name,
-          g.name AS genre_name
-        FROM albums a
-        JOIN artists ar ON ar.id = a.artist_id
-        LEFT JOIN genres g ON g.id = a.genre_id
+      $stmt = $this->db->prepare($this->recommendationSelect() . "
         WHERE a.id <> :exclude_album
           AND a.artist_id <> :exclude_artist
-          AND ar.name IN (" . implode(',', $placeholders) . ")
-      ";
-
-      $stmt = $this->db->prepare($sql);
-
+          AND (" . implode(' OR ', $or) . ")
+      ");
       foreach ($params as $key => $value) {
-        $stmt->bindValue(
-          $key,
-          $value,
-          is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR
-        );
+        $stmt->bindValue($key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
       }
-
       $stmt->execute();
 
       foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-        $norm = $this->normalizeArtistForRecommendation((string)$row['artist_name']);
-        $match = $similarity[$norm] ?? 0.0;
-
-        if ($match <= 0.0 && !isset($artistScores[$norm])) {
+        $mbid = strtolower(trim((string)($row['artist_mbid'] ?? '')));
+        $info = ($mbid !== '' && isset($byMbid[$mbid]))
+          ? $byMbid[$mbid]
+          : ($byName[$this->normalizeArtistForRecommendation((string)$row['artist_name'])] ?? null);
+        if ($info === null) {
           continue;
         }
 
-        // Gli artisti emersi solo da track.getSimilar hanno match=0 ma
-        // mantengono il loro _album_score specifico del disco.
-        $score = $artistScores[$norm] ?? ($match * 1000.0);
-
+        $score = $info['match'] * 1000.0;
         if ($genreId && (int)$row['genre_id'] === $genreId) {
           $score += 80.0;
         }
-
-        // Bonus ALBUM-AWARE: il genere del candidato compare tra i tag
-        // dell'album corrente? (es. album corrente taggato "noise rock",
-        // candidato di genere "Noise Rock" → +90). È questo che fa variare
-        // i consigli tra Il Vile e Che cosa vedi pur partendo dagli stessi
-        // artisti simili. Confronto sul NOME genere normalizzato.
-        if (!empty($tagSet) && !empty($row['genre_name'])) {
-          $gname = mb_strtolower(trim((string)$row['genre_name']), 'UTF-8');
-          if ($gname !== '' && isset($tagSet[$gname])) {
-            $score += 90.0;
-          }
+        if (!empty($genreSet) && isset($genreSet[$this->normalizeArtistForRecommendation((string)$row['genre_name'])])) {
+          $score += 90.0;
         }
-
-        if ($year && !empty($row['year'])) {
-          $diff = abs((int)$row['year'] - $year);
-
-          if ($diff <= 1)       $score += 60.0;
-          elseif ($diff <= 3)  $score += 45.0;
-          elseif ($diff <= 5)  $score += 30.0;
-          elseif ($diff <= 10) $score += 15.0;
-        }
+        $score += $this->yearBonus($year, $row['year'] ?? null);
 
         $row['_score'] = $score;
-        $row['_basis'] = 'lastfm';
-        $candidates[] = $row;
+        if ($info['rank'] < self::SIMILAR_PRIMARY) {
+          $row['_basis'] = 'similar';
+          $primary[] = $row;
+        } else {
+          $row['_basis'] = 'similar_more';
+          $secondary[] = $row;
+        }
       }
     }
 
-    usort($candidates, function (array $a, array $b): int {
-      if ($a['_score'] === $b['_score']) {
-        return strcmp((string)$a['title'], (string)$b['title']);
-      }
-      return ($a['_score'] < $b['_score']) ? 1 : -1;
-    });
-
-    $selected = [];
+    $selected    = [];
     $usedArtists = [];
 
-    foreach ($candidates as $row) {
-      $artistId = (int)$row['artist_id'];
+    // 1. simili principali
+    $this->fillRecommendations($selected, $usedArtists, $primary, $limit);
 
-      if (isset($usedArtists[$artistId])) continue;
-
-      $usedArtists[$artistId] = true;
-      $selected[] = $row;
-
-      if (count($selected) >= $limit) break;
-    }
-
-    // Fallback locale per completare la lista.
+    // 2. stesso genere Grizzly
     if (count($selected) < $limit && $genreId) {
-      $stmt = $this->db->prepare("
-        SELECT
-          a.id,
-          a.title,
-          a.year,
-          a.cover_local,
-          a.cover_url,
-          a.genre_id,
-          a.created_at,
-          ar.id AS artist_id,
-          ar.name AS artist_name
-        FROM albums a
-        JOIN artists ar ON ar.id = a.artist_id
+      $stmt = $this->db->prepare($this->recommendationSelect() . "
         WHERE a.genre_id = :genre_id
           AND a.id <> :exclude_album
           AND a.artist_id <> :exclude_artist
-        ORDER BY a.created_at DESC, a.id DESC
       ");
-
       $stmt->execute([
         ':genre_id'       => $genreId,
         ':exclude_album'  => $excludeAlbumId,
         ':exclude_artist' => $excludeArtistId,
       ]);
-
-      $fallback = [];
-
+      $rows = [];
       foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-        $artistId = (int)$row['artist_id'];
-
-        if (isset($usedArtists[$artistId])) continue;
-
-        $score = 0.0;
-
-        if ($year && !empty($row['year'])) {
-          $diff = abs((int)$row['year'] - $year);
-          $score = max(0.0, 100.0 - min(100, $diff * 5));
-        }
-
-        $row['_score'] = $score;
+        $row['_score'] = $this->yearProximity($year, $row['year'] ?? null);
         $row['_basis'] = 'genre';
-        $fallback[] = $row;
+        $rows[] = $row;
       }
+      $this->fillRecommendations($selected, $usedArtists, $rows, $limit);
+    }
 
-      usort($fallback, function (array $a, array $b): int {
-        if ($a['_score'] === $b['_score']) {
-          return strcmp((string)$a['title'], (string)$b['title']);
-        }
-        return ($a['_score'] < $b['_score']) ? 1 : -1;
-      });
-
-      foreach ($fallback as $row) {
-        $artistId = (int)$row['artist_id'];
-
-        if (isset($usedArtists[$artistId])) continue;
-
-        $usedArtists[$artistId] = true;
-        $selected[] = $row;
-
-        if (count($selected) >= $limit) break;
+    // 3. generi MusicBrainz del disco
+    if (count($selected) < $limit && !empty($genreSet)) {
+      $params = [
+        ':exclude_album'  => $excludeAlbumId,
+        ':exclude_artist' => $excludeArtistId,
+      ];
+      $ph = [];
+      $i  = 0;
+      foreach (array_keys($genreSet) as $g) {
+        $k = ':g' . $i++;
+        $ph[] = $k;
+        $params[$k] = $g;
       }
+      $stmt = $this->db->prepare($this->recommendationSelect() . "
+        WHERE LOWER(TRIM(g.name)) IN (" . implode(',', $ph) . ")
+          AND a.id <> :exclude_album
+          AND a.artist_id <> :exclude_artist
+      ");
+      $stmt->execute($params);
+      $rows = [];
+      foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $row['_score'] = $this->yearProximity($year, $row['year'] ?? null);
+        $row['_basis'] = 'mb_genre';
+        $rows[] = $row;
+      }
+      $this->fillRecommendations($selected, $usedArtists, $rows, $limit);
+    }
+
+    // 4. simili oltre i primi
+    if (count($selected) < $limit) {
+      $this->fillRecommendations($selected, $usedArtists, $secondary, $limit);
     }
 
     foreach ($selected as &$row) {
-      unset($row['_score']);
+      unset($row['_score'], $row['artist_mbid']);
     }
     unset($row);
 
     return $selected;
+  }
+
+  /** SELECT comune ai livelli dei consigli. */
+  private function recommendationSelect(): string
+  {
+    return "
+      SELECT
+        a.id,
+        a.title,
+        a.year,
+        a.cover_local,
+        a.cover_url,
+        a.genre_id,
+        a.created_at,
+        ar.id AS artist_id,
+        ar.name AS artist_name,
+        ar.mb_artist_id AS artist_mbid,
+        g.name AS genre_name
+      FROM albums a
+      JOIN artists ar ON ar.id = a.artist_id
+      LEFT JOIN genres g ON g.id = a.genre_id
+    ";
+  }
+
+  /**
+   * Aggiunge a $selected i candidati di un livello, dal punteggio più alto,
+   * un solo album per artista e fino a $limit elementi in totale.
+   */
+  private function fillRecommendations(array &$selected, array &$usedArtists, array $rows, int $limit): void
+  {
+    usort($rows, function (array $a, array $b): int {
+      if ($a['_score'] == $b['_score']) {
+        return strcmp((string)$a['title'], (string)$b['title']);
+      }
+      return ($a['_score'] < $b['_score']) ? 1 : -1;
+    });
+
+    foreach ($rows as $row) {
+      if (count($selected) >= $limit) {
+        return;
+      }
+      $artistId = (int)$row['artist_id'];
+      if (isset($usedArtists[$artistId])) {
+        continue;
+      }
+      $usedArtists[$artistId] = true;
+      $selected[] = $row;
+    }
+  }
+
+  /**
+   * Punteggio dei livelli per genere: stesso calcolo del vecchio ripiego
+   * (100 meno 5 punti per anno di distanza).
+   */
+  private function yearProximity(?int $year, $candidateYear): float
+  {
+    if (!$year || empty($candidateYear)) {
+      return 0.0;
+    }
+    $diff = abs((int)$candidateYear - $year);
+    return max(0.0, 100.0 - min(100, $diff * 5));
+  }
+
+  /** Bonus di vicinanza d'anno per i simili (0-60). */
+  private function yearBonus(?int $year, $candidateYear): float
+  {
+    if (!$year || empty($candidateYear)) {
+      return 0.0;
+    }
+    $diff = abs((int)$candidateYear - $year);
+    if ($diff <= 1) return 60.0;
+    if ($diff <= 3) return 45.0;
+    if ($diff <= 5) return 30.0;
+    if ($diff <= 10) return 15.0;
+    return 0.0;
   }
 
   private function normalizeArtistForRecommendation(string $name): string

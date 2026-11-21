@@ -78,6 +78,7 @@ if (!function_exists('asset_v')) {
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script src="<?= asset_v('/public/js/app.js') ?>"></script>
+<script src="<?= asset_v('/public/js/search-suggest.js') ?>"></script>
 <script src="<?= asset_v('/public/js/youtube-player.js') ?>"></script>
 <script src="<?= asset_v('/public/js/playlist-player.js') ?>"></script>
 <script src="<?= asset_v('/public/js/queue-panel.js') ?>"></script>

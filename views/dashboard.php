@@ -225,8 +225,8 @@ require BASE_PATH . '/views/layout/header.php';
 
 <?php if ($latest): ?>
 <!-- 3. SE TI PIACE: dischi della collezione affini all'ultimo arrivo.
-     Stesso motore dei suggerimenti della scheda disco (Last.fm per gli
-     artisti simili, altrimenti solo stesso genere). Caricamento asincrono
+     Stesso motore dei suggerimenti della scheda disco (artisti simili da
+     ListenBrainz, poi stesso genere e generi MusicBrainz). Caricamento asincrono
      con la cache dell'endpoint; se non c'è nessun disco coerente la
      sezione resta nascosta. -->
 <section class="grz-band grz-likes" id="dash-likes" hidden

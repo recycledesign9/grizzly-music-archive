@@ -11,7 +11,11 @@
  *
  * Le credenziali salvate dalla UI diventano disponibili senza riavviare
  * Apache/Docker. Il fallback mantiene compatibili le installazioni che
- * continuano a usare LASTFM_API_KEY, DISCOGS_TOKEN e YOUTUBE_API_KEY.
+ * usano DISCOGS_TOKEN, YOUTUBE_API_KEY e LISTENBRAINZ_TOKEN.
+ *
+ * Tutte le credenziali sono facoltative: senza nessuna chiave l'app
+ * funziona con MusicBrainz, ListenBrainz (artisti simili), Wikipedia,
+ * Wikidata, Cover Art Archive e Deezer.
  *
  * Compatibile PHP 7.4.
  */
@@ -20,18 +24,13 @@ require_once dirname(__DIR__, 2) . '/config/database.php';
 
 class ExternalApiConfig
 {
-    public const SERVICE_LASTFM  = 'lastfm';
     public const SERVICE_DISCOGS = 'discogs';
     public const SERVICE_YOUTUBE = 'youtube';
+    public const SERVICE_LISTENBRAINZ = 'listenbrainz';
 
     private const CACHE_TTL_SECONDS = 5;
 
     private const SERVICES = [
-        self::SERVICE_LASTFM => [
-            'setting_key' => 'api_lastfm_key',
-            'constant'    => 'LASTFM_API_KEY',
-            'label'       => 'Last.fm API key',
-        ],
         self::SERVICE_DISCOGS => [
             'setting_key' => 'api_discogs_token',
             'constant'    => 'DISCOGS_TOKEN',
@@ -41,6 +40,13 @@ class ExternalApiConfig
             'setting_key' => 'api_youtube_key',
             'constant'    => 'YOUTUBE_API_KEY',
             'label'       => 'YouTube Data API key',
+        ],
+        // Facoltativo: serve solo ai suggerimenti di album fuori archivio.
+        // Artisti simili e popolarità ListenBrainz funzionano senza token.
+        self::SERVICE_LISTENBRAINZ => [
+            'setting_key' => 'api_listenbrainz_token',
+            'constant'    => 'LISTENBRAINZ_TOKEN',
+            'label'       => 'ListenBrainz user token',
         ],
     ];
 
@@ -55,11 +61,6 @@ class ExternalApiConfig
         return isset(self::SERVICES[strtolower(trim($service))]);
     }
 
-    public static function getLastFmKey(): string
-    {
-        return self::get(self::SERVICE_LASTFM);
-    }
-
     public static function getDiscogsToken(): string
     {
         return self::get(self::SERVICE_DISCOGS);
@@ -68,6 +69,11 @@ class ExternalApiConfig
     public static function getYouTubeKey(): string
     {
         return self::get(self::SERVICE_YOUTUBE);
+    }
+
+    public static function getListenBrainzToken(): string
+    {
+        return self::get(self::SERVICE_LISTENBRAINZ);
     }
 
     public static function get(string $service): string
@@ -132,9 +138,9 @@ class ExternalApiConfig
     public static function getStatusAll(): array
     {
         return [
-            self::SERVICE_LASTFM  => self::getStatus(self::SERVICE_LASTFM),
-            self::SERVICE_DISCOGS => self::getStatus(self::SERVICE_DISCOGS),
-            self::SERVICE_YOUTUBE => self::getStatus(self::SERVICE_YOUTUBE),
+            self::SERVICE_LISTENBRAINZ => self::getStatus(self::SERVICE_LISTENBRAINZ),
+            self::SERVICE_DISCOGS      => self::getStatus(self::SERVICE_DISCOGS),
+            self::SERVICE_YOUTUBE      => self::getStatus(self::SERVICE_YOUTUBE),
         ];
     }
 
@@ -173,7 +179,7 @@ class ExternalApiConfig
     }
 
     /**
-     * Carica in una sola query i tre override dal DB.
+     * Carica in una sola query gli override dal DB.
      * La piccola TTL evita query ripetute nei servizi che effettuano più
      * chiamate esterne nella stessa elaborazione, ma mantiene gli aggiornamenti
      * dalla UI visibili anche ai processi long-running senza restart.
