@@ -25,6 +25,8 @@
  *
  * In every mode the worker holds storage/media-scan-worker.lock for its whole
  * life, so only one worker per installation can run, whoever started it.
+ * Semantic decisions are delegated to AlbumScanDecisionService; the worker
+ * remains the scheduler/executor orchestrator.
  */
 
 if (PHP_SAPI !== 'cli') {
@@ -352,6 +354,129 @@ function normalizedConfiguredPath(string $path): string
 }
 
 /**
+ * Deduce il formato AUTOMATICO dello scanner dalla posizione della cartella.
+ *
+ * Contratto:
+ *   .../CD/...            => CD
+ *   .../Vinile/...        => Vinile
+ *   .../Musicassetta/...  => Musicassetta/Tape
+ *   .../Digital/...       => Digital
+ *   qualunque altro path  => Digital
+ *
+ * Questo e soltanto il candidato automatico dello scanner.
+ * Album::syncScannerFormat() resta l'autorita finale e NON sovrascrive
+ * un formato scelto manualmente dall'utente.
+ */
+function scannerRelocationFormatId(
+    PDO $db,
+    string $albumDir,
+    string $importDir
+): int {
+    $albumDir = str_replace('\\', '/', $albumDir);
+    $importDir = rtrim(str_replace('\\', '/', $importDir), '/');
+
+    $normalize = static function (string $value): string {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+        return function_exists('mb_strtolower')
+            ? mb_strtolower($value, 'UTF-8')
+            : strtolower($value);
+    };
+
+    $formatMap = [];
+    $rows = $db->query('SELECT id, name FROM formats')->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($rows as $row) {
+        $name = $normalize((string)($row['name'] ?? ''));
+        $id = (int)($row['id'] ?? 0);
+        if ($name !== '' && $id > 0) {
+            $formatMap[$name] = $id;
+        }
+    }
+
+    if (empty($formatMap)) {
+        throw new RuntimeException('Tabella formats vuota: formato relocation non determinabile.');
+    }
+
+    $aliases = [
+        'vinile' => 'vinile',
+        'vinili' => 'vinile',
+        'vinyl' => 'vinile',
+        'lp' => 'vinile',
+        '12"' => 'vinile',
+        '7"' => 'vinile',
+        '45 giri' => 'vinile',
+        '33 giri' => 'vinile',
+        'cd' => 'cd',
+        'cds' => 'cd',
+        'compact disc' => 'cd',
+        'musicassetta' => 'musicassetta',
+        'musicassette' => 'musicassetta',
+        'cassetta' => 'musicassetta',
+        'cassette' => 'musicassetta',
+        'mc' => 'musicassetta',
+        'k7' => 'musicassetta',
+        'tape' => 'tape',
+        'tapes' => 'tape',
+        'digital' => 'digital',
+        'digitale' => 'digital',
+        'flac' => 'digital',
+        'web' => 'digital',
+        'mp3' => 'digital',
+        'lossless' => 'digital',
+    ];
+
+    if (
+        $albumDir !== ''
+        && $importDir !== ''
+        && (
+            $albumDir === $importDir
+            || strpos($albumDir . '/', $importDir . '/') === 0
+        )
+    ) {
+        $dir = dirname($albumDir);
+
+        while (
+            $dir !== ''
+            && $dir !== '.'
+            && $dir !== $importDir
+            && strpos($dir . '/', $importDir . '/') === 0
+        ) {
+            $name = $normalize(basename($dir));
+            $canonical = $aliases[$name] ?? null;
+
+            if ($canonical === null && isset($formatMap[$name])) {
+                $canonical = $name;
+            }
+
+            if ($canonical === 'musicassetta' || $canonical === 'tape') {
+                if (isset($formatMap['musicassetta'])) {
+                    return (int)$formatMap['musicassetta'];
+                }
+                if (isset($formatMap['tape'])) {
+                    return (int)$formatMap['tape'];
+                }
+            } elseif ($canonical !== null && isset($formatMap[$canonical])) {
+                return (int)$formatMap[$canonical];
+            }
+
+            $parent = dirname($dir);
+            if ($parent === $dir) {
+                break;
+            }
+            $dir = $parent;
+        }
+    }
+
+    if (isset($formatMap['digital'])) {
+        return (int)$formatMap['digital'];
+    }
+
+    throw new RuntimeException('Formato Digital non presente nella tabella formats.');
+}
+
+/**
  * Convert a host path stored in Settings to the path visible by the worker.
  *
  * MAMP:
@@ -565,110 +690,13 @@ function cleanupOrphanIgnoredMediaSources(PDO $db, string $configuredRoot): int
 }
 
 /**
- * Sposta una path runtime da una watched root a un'altra mantenendo il relativo.
- */
-function rebaseWorkerPath(string $path, string $oldRoot, string $newRoot): string
-{
-    // Preserve whitespace in discovered candidate paths. Only slash
-    // normalization/trailing slash removal is allowed here.
-    $path = rtrim(str_replace('\\', '/', $path), '/');
-    $oldRoot = rtrim(str_replace('\\', '/', $oldRoot), '/');
-    $newRoot = rtrim(str_replace('\\', '/', $newRoot), '/');
-
-    if ($path === '' || $oldRoot === '' || $newRoot === '') {
-        return '';
-    }
-    if ($path !== $oldRoot && strpos($path, $oldRoot . '/') !== 0) {
-        return '';
-    }
-
-    return $newRoot . substr($path, strlen($oldRoot));
-}
-
-/**
- * Migra lo state del worker dopo un root rebind verificato.
+ * Worker state: cache/telemetry only.
  *
- * Gli album gia' importati restano no-op, ma la signature viene ricalcolata
- * sulla nuova posizione. Stati non conclusi tornano pending e dovranno passare
- * nuovamente dalla stability/readiness window.
+ * A cached terminal result may be used as an optimization only when BOTH the
+ * candidate filesystem signature and the scanner-relevant database revision
+ * are unchanged. If either side changes, canonical classification is rebuilt
+ * from filesystem + database.
  */
-function migrateWorkerStateRoot(
-    array $state,
-    string $oldRuntimeRoot,
-    string $newRuntimeRoot,
-    string $newConfiguredRoot
-): array {
-    $now = time();
-    $out = [
-        'configured_path' => $newConfiguredRoot,
-        'albums' => [],
-    ];
-
-    $albums = isset($state['albums']) && is_array($state['albums'])
-        ? $state['albums']
-        : [];
-
-    foreach ($albums as $oldKey => $entry) {
-        if (!is_array($entry)) {
-            continue;
-        }
-
-        $newKey = rebaseWorkerPath(
-            (string)$oldKey,
-            $oldRuntimeRoot,
-            $newRuntimeRoot
-        );
-        if ($newKey === '' || !is_dir($newKey) || !is_readable($newKey)) {
-            continue;
-        }
-
-        $newSignature = albumSnapshot($newKey);
-        if ($newSignature === '') {
-            continue;
-        }
-
-        $oldSignature = trim((string)($entry['signature'] ?? ''));
-        $oldImported = trim((string)($entry['imported_signature'] ?? ''));
-        $oldBootstrap = trim((string)($entry['readiness_bootstrap_signature'] ?? ''));
-
-        $wasImported = $oldSignature !== ''
-            && $oldImported !== ''
-            && hash_equals($oldSignature, $oldImported);
-        $wasBootstrap = $oldSignature !== ''
-            && $oldBootstrap !== ''
-            && hash_equals($oldSignature, $oldBootstrap);
-
-        $entry['signature'] = $newSignature;
-        $entry['deferred_sources'] = [];
-
-        if ($wasImported) {
-            $entry['imported_signature'] = $newSignature;
-            $entry['last_result'] = 'ok';
-            if ($wasBootstrap) {
-                $entry['readiness_bootstrap_signature'] = $newSignature;
-                $entry['readiness_stable'] = true;
-            } else {
-                unset($entry['readiness_bootstrap_signature']);
-            }
-        } else {
-            $entry['imported_signature'] = null;
-            $entry['last_result'] = 'pending';
-            $entry['stable_since'] = $now;
-            $entry['last_scan'] = null;
-            unset(
-                $entry['readiness_bootstrap_signature'],
-                $entry['readiness_stable'],
-                $entry['readiness_status'],
-                $entry['candidate_signature'],
-                $entry['gate_key']
-            );
-        }
-
-        $out['albums'][$newKey] = $entry;
-    }
-
-    return $out;
-}
 
 function loadWorkerState(string $file): array
 {
@@ -700,6 +728,250 @@ function saveWorkerState(string $file, array $state): void
         @unlink($tmp);
     }
 }
+
+/**
+ * Fingerprint read-only dei dati relazionali che possono cambiare la
+ * classificazione scanner. Viene calcolato una sola volta per ciclo, non per
+ * album. Lo state puo' quindi saltare un candidato invariato soltanto se anche
+ * questo fingerprint coincide con quello del ciclo precedente.
+ *
+ * Il fingerprint include soltanto le colonne che partecipano alle decisioni
+ * scanner; cache editoriali (bio, cover, YouTube) non lo invalidano.
+ */
+function scannerSemanticDbRevision(PDO $db): string
+{
+    // Solo colonne che possono cambiare ownership, identity, readiness o
+    // copertura audio. Bio, cover e cache YouTube non devono invalidare lo
+    // scanner e provocare una full classification inutile.
+    $queries = [
+        'artists' => "
+            SELECT id, name, mb_artist_id
+            FROM artists
+            ORDER BY id ASC
+        ",
+        'albums' => "
+            SELECT id, artist_id, title, year, mbid, mb_release_group, needs_review
+            FROM albums
+            ORDER BY id ASC
+        ",
+        'tracks' => "
+            SELECT id, album_id, position, title, duration_sec
+            FROM tracks
+            ORDER BY id ASC
+        ",
+        'audio_files' => "
+            SELECT id, album_id, track_id, filename, original_name, filesize,
+                   source_hash, source_path, source_mtime, storage_type
+            FROM audio_files
+            ORDER BY id ASC
+        ",
+    ];
+
+    try {
+        $ctx = hash_init('sha256');
+
+        foreach ($queries as $table => $sql) {
+            $stmt = $db->query($sql);
+            if (!$stmt) {
+                return '';
+            }
+
+            hash_update($ctx, "TABLE\0" . $table . "\n");
+
+            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                if (!is_array($row)) {
+                    continue;
+                }
+
+                foreach ($row as $column => $value) {
+                    hash_update($ctx, (string)$column . "=");
+                    if ($value === null) {
+                        hash_update($ctx, "<NULL>");
+                    } else {
+                        // bin2hex preserva anche VARBINARY/source_path e byte non UTF-8.
+                        hash_update($ctx, bin2hex((string)$value));
+                    }
+                    hash_update($ctx, "\0");
+                }
+
+                hash_update($ctx, "\n");
+            }
+        }
+
+        return hash_final($ctx);
+    } catch (Throwable $e) {
+        // Fingerprint non disponibile => fast-path disabilitato, fail-closed.
+        return '';
+    }
+}
+
+
+/**
+ * Fingerprint semantico del solo album target di un DEFERRED.
+ *
+ * Un defer di relocation/reconcile dipende esclusivamente da:
+ * - identita' dell'album target;
+ * - sua tracklist;
+ * - sue associazioni audio correnti.
+ *
+ * Non deve essere invalidato da modifiche a album estranei. Se il target cambia
+ * (audio managed aggiunto, source_path modificato, tracklist/identita' cambiata)
+ * il fingerprint cambia e il worker torna alla classificazione canonica.
+ */
+function scannerAlbumSemanticRevision(PDO $db, int $albumId): string
+{
+    if ($albumId <= 0) {
+        return '';
+    }
+
+    $queries = [
+        'album' => [
+            'sql' => "
+                SELECT a.id, a.artist_id, ar.name AS artist_name,
+                       ar.mb_artist_id, a.title, a.year, a.mbid,
+                       a.mb_release_group, a.needs_review
+                FROM albums a
+                JOIN artists ar ON ar.id = a.artist_id
+                WHERE a.id = :album_id
+                LIMIT 1
+            ",
+            'required' => true,
+        ],
+        'tracks' => [
+            'sql' => "
+                SELECT id, album_id, position, title, duration_sec
+                FROM tracks
+                WHERE album_id = :album_id
+                ORDER BY id ASC
+            ",
+            'required' => false,
+        ],
+        'audio_files' => [
+            'sql' => "
+                SELECT id, album_id, track_id, filename, original_name, filesize,
+                       source_hash, source_path, source_mtime, storage_type
+                FROM audio_files
+                WHERE album_id = :album_id
+                ORDER BY id ASC
+            ",
+            'required' => false,
+        ],
+    ];
+
+    try {
+        $ctx = hash_init('sha256');
+
+        foreach ($queries as $section => $spec) {
+            $stmt = $db->prepare((string)$spec['sql']);
+            if (!$stmt) {
+                return '';
+            }
+
+            $stmt->execute([':album_id' => $albumId]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            if (!is_array($rows)) {
+                return '';
+            }
+            if (!empty($spec['required']) && count($rows) !== 1) {
+                return '';
+            }
+
+            hash_update($ctx, "SECTION\0" . $section . "\n");
+
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+
+                foreach ($row as $column => $value) {
+                    hash_update($ctx, (string)$column . '=');
+                    if ($value === null) {
+                        hash_update($ctx, '<NULL>');
+                    } else {
+                        hash_update($ctx, bin2hex((string)$value));
+                    }
+                    hash_update($ctx, "\0");
+                }
+
+                hash_update($ctx, "\n");
+            }
+        }
+
+        return hash_final($ctx);
+    } catch (Throwable $e) {
+        // Fingerprint non disponibile => nessun fast-path DEFERRED.
+        return '';
+    }
+}
+
+/**
+ * Safe no-op cache contract for the dominant OWNED_EXACT/SAME case.
+ *
+ * Worker state is never semantic authority. A cached SAME may only avoid a
+ * canonical reclassification when all of the following are true:
+ * - the current candidate filesystem signature is unchanged;
+ * - no scanner write has already changed the DB during this cycle;
+ * - the cycle-wide semantic DB fingerprint is unchanged from the previous
+ *   completed healthy cycle;
+ * - the cached canonical decision was itself computed against exactly that
+ *   same semantic DB fingerprint;
+ * - the cached decision is the terminal OWNED_EXACT result and its last
+ *   processing outcome was successful.
+ *
+ * Old state entries do not contain canonical_db_revision and therefore fail
+ * closed: they are classified once before they can become cacheable.
+ */
+function workerCanReuseCanonicalSame(
+    array $previous,
+    bool $signatureChanged,
+    string $cycleDbRevision,
+    bool $dbRevisionUnchanged,
+    bool $cycleDbMutated
+): bool {
+    if (
+        $cycleDbMutated
+        || $signatureChanged
+        || !$dbRevisionUnchanged
+        || $cycleDbRevision === ''
+    ) {
+        return false;
+    }
+
+    $decisionDbRevision = trim((string)(
+        $previous['canonical_db_revision'] ?? ''
+    ));
+
+    if (
+        $decisionDbRevision === ''
+        || !hash_equals($cycleDbRevision, $decisionDbRevision)
+    ) {
+        return false;
+    }
+
+    if (
+        strtoupper((string)($previous['canonical_class'] ?? '')) !== 'SAME'
+        || (int)($previous['canonical_album_id'] ?? 0) <= 0
+        || (($previous['last_result'] ?? '') !== 'ok')
+    ) {
+        return false;
+    }
+
+    // Only terminal SAME decisions whose authority is entirely local and
+    // deterministic under unchanged filesystem + unchanged semantic DB may
+    // bypass AlbumScanDecisionService. NEW/CHANGED/PENDING/REVIEW/DEFERRED
+    // are deliberately excluded.
+    return in_array(
+        (string)($previous['canonical_reason'] ?? ''),
+        [
+            'external-source-set-identical',
+            'managed-album-complete',
+            'mixed-album-complete',
+        ],
+        true
+    );
+}
+
 
 /**
  * Lightweight album-directory signature.
@@ -887,6 +1159,365 @@ function candidateSnapshot(string $albumDir, array $parts): string
     return sha1(implode("\n", $rows));
 }
 
+/**
+ * Canonical scanner classification.
+ *
+ * Semantic input:
+ *   - current filesystem candidate
+ *   - current relational database
+ *
+ * Historical worker/readiness state is deliberately NOT an input.
+ *
+ * @return array<string,mixed>
+ */
+function classifyScanCandidate(
+    PDO $db,
+    AlbumReadinessService $evidenceService,
+    AlbumIdentityResolver $identityResolver,
+    AlbumAudioCoverageService $audioCoverageService,
+    ExternalSourceOwnershipService $ownershipService,
+    MediaRootRelocationService $rootRelocationService,
+    string $importRoot,
+    string $albumKey,
+    array $candidateParts
+): array {
+    // Canonical active ownership is resolved before Readiness and Identity.
+    // OWNED_EXACT / CONFLICT / INVALID are semantic terminal states.
+    // UNAVAILABLE is observational only: the worker must WAIT without changing
+    // canonical state. OWNED_PARTIAL is resolved
+    // here from authoritative managed coverage first, then as MOVED/CHANGED.
+    // Only UNOWNED may continue to Readiness/Identity.
+    $ownership = $ownershipService->inspectCandidate(
+        $importRoot,
+        $albumKey
+    );
+
+    $ownershipState = strtoupper(trim((string)($ownership['state'] ?? '')));
+
+    switch ($ownershipState) {
+        case ExternalSourceOwnershipService::OWNED_EXACT:
+            return [
+                'classification' => 'SAME',
+                'album_id' => (int)($ownership['album_id'] ?? 0),
+                'reason' => 'external-source-set-identical',
+                'identity_decision' => 'NOT_RUN',
+                'ownership_state' => $ownershipState,
+            ];
+
+        case ExternalSourceOwnershipService::OWNED_PARTIAL:
+            $ownedAlbumId = (int)($ownership['album_id'] ?? 0);
+
+            if ($ownedAlbumId <= 0) {
+                return [
+                    'classification' => 'AMBIGUOUS',
+                    'album_id' => null,
+                    'reason' => 'ownership-partial-without-album-id',
+                    'identity_decision' => 'NOT_RUN',
+                    'ownership_state' => $ownershipState,
+                ];
+            }
+
+            // OWNED_PARTIAL means active external ownership is known, but the
+            // candidate is not an exact external-source set. Before treating it
+            // as relocation/change, preserve the v7 managed-authority contract:
+            // a mixed managed+external album whose tracks are all already covered
+            // is SAME, and a missing managed file is AMBIGUOUS. Identity remains
+            // deliberately NOT_RUN because ownership already established album_id.
+            $coverage = $audioCoverageService->inspectCandidateCoverage(
+                $ownedAlbumId,
+                $albumKey
+            );
+
+            $managedRows = (int)($coverage['managed_rows'] ?? 0);
+            $managedMissing = (int)($coverage['managed_missing_tracks'] ?? 0);
+            $albumTrackCount = (int)($coverage['track_count'] ?? 0);
+            $candidateAudioCount = (int)($ownership['audio_files'] ?? 0);
+
+            if ($managedRows > 0 && $managedMissing > 0) {
+                return [
+                    'classification' => 'AMBIGUOUS',
+                    'album_id' => $ownedAlbumId,
+                    'reason' => 'managed-audio-missing',
+                    'identity_decision' => 'NOT_RUN',
+                    'ownership_state' => $ownershipState,
+                ];
+            }
+
+            if (
+                $managedRows > 0
+                && $albumTrackCount > 0
+                && $candidateAudioCount === $albumTrackCount
+                && !empty($coverage['complete'])
+            ) {
+                return [
+                    'classification' => 'SAME',
+                    'album_id' => $ownedAlbumId,
+                    'reason' => 'mixed-album-complete',
+                    'identity_decision' => 'NOT_RUN',
+                    'ownership_state' => $ownershipState,
+                ];
+            }
+
+            // If managed coverage did not settle the candidate, a verified
+            // content relocation is MOVED; otherwise fail closed as CHANGED.
+            $relocation = $rootRelocationService->verifyCandidateRelocation(
+                $importRoot,
+                $albumKey,
+                $ownedAlbumId
+            );
+
+            if (!empty($relocation['verified'])) {
+                return [
+                    'classification' => 'MOVED',
+                    'album_id' => $ownedAlbumId,
+                    'reason' => 'verified-relocation-by-hash',
+                    'identity_decision' => 'NOT_RUN',
+                    'ownership_state' => $ownershipState,
+                ];
+            }
+
+            return [
+                'classification' => 'CHANGED',
+                'album_id' => $ownedAlbumId,
+                'reason' => 'external-source-owned-partial:' . (string)($ownership['reason'] ?? '')
+                    . ';relocation-unverified:' . (string)($relocation['reason'] ?? 'unknown'),
+                'identity_decision' => 'NOT_RUN',
+                'ownership_state' => $ownershipState,
+            ];
+
+        case ExternalSourceOwnershipService::UNAVAILABLE:
+            return [
+                'classification' => 'UNAVAILABLE',
+                'album_id' => isset($ownership['album_id'])
+                    && $ownership['album_id'] !== null
+                        ? (int)$ownership['album_id']
+                        : null,
+                'reason' => 'ownership-unavailable:'
+                    . (string)($ownership['reason'] ?? 'filesystem-unavailable'),
+                'identity_decision' => 'NOT_RUN',
+                'ownership_state' => $ownershipState,
+            ];
+
+        case ExternalSourceOwnershipService::CONFLICT:
+        case ExternalSourceOwnershipService::INVALID:
+            return [
+                'classification' => 'AMBIGUOUS',
+                'album_id' => null,
+                'reason' => 'ownership-' . strtolower($ownershipState)
+                    . ':' . (string)($ownership['reason'] ?? ''),
+                'identity_decision' => 'NOT_RUN',
+                'ownership_state' => $ownershipState,
+            ];
+
+        case ExternalSourceOwnershipService::UNOWNED:
+            break;
+
+        default:
+            return [
+                'classification' => 'AMBIGUOUS',
+                'album_id' => null,
+                'reason' => 'ownership-contract-invalid',
+                'identity_decision' => 'NOT_RUN',
+                'ownership_state' => $ownershipState,
+            ];
+    }
+
+    // Build candidate evidence without persistent readiness state and without
+    // network access. This is classification, not temporal readiness.
+    $candidate = $evidenceService->analyzeCandidate(
+        $importRoot,
+        $albumKey,
+        $candidateParts,
+        0,
+        true
+    );
+
+    $identity = $identityResolver->resolveCandidate(
+        $candidate,
+        $importRoot
+    );
+
+    $identityDecision = strtoupper(trim((string)(
+        $identity['decision'] ?? ''
+    )));
+
+    if ($identityDecision === AlbumIdentityResolver::NEW_RELEASE) {
+        return [
+            'classification' => 'NEW',
+            'album_id' => null,
+            'reason' => 'identity-new-release',
+            'identity_decision' => $identityDecision,
+        ];
+    }
+
+    if (
+        $identityDecision === AlbumIdentityResolver::AMBIGUOUS
+        || $identityDecision === AlbumIdentityResolver::CONFLICT
+    ) {
+        return [
+            'classification' => 'AMBIGUOUS',
+            'album_id' => null,
+            'reason' => 'identity-' . strtolower($identityDecision),
+            'identity_decision' => $identityDecision,
+        ];
+    }
+
+    if ($identityDecision !== AlbumIdentityResolver::EXACT_EXISTING) {
+        return [
+            'classification' => 'AMBIGUOUS',
+            'album_id' => null,
+            'reason' => 'identity-unresolved',
+            'identity_decision' => $identityDecision,
+        ];
+    }
+
+    $albumId = (int)($identity['album_id'] ?? 0);
+    if ($albumId <= 0) {
+        return [
+            'classification' => 'AMBIGUOUS',
+            'album_id' => null,
+            'reason' => 'identity-existing-without-album-id',
+            'identity_decision' => $identityDecision,
+        ];
+    }
+
+    // Album-level DB facts. This also handles albums whose playable audio is
+    // fully managed and therefore intentionally has no external source_path.
+    $stats = $db->prepare("
+        SELECT
+            (SELECT COUNT(*)
+             FROM tracks
+             WHERE album_id = :tracks_album_id) AS track_count,
+            SUM(CASE WHEN storage_type = 'managed' THEN 1 ELSE 0 END) AS managed_audio,
+            SUM(CASE WHEN storage_type = 'external' THEN 1 ELSE 0 END) AS external_audio
+        FROM audio_files
+        WHERE album_id = :audio_album_id
+    ");
+    $stats->execute([
+        ':tracks_album_id' => $albumId,
+        ':audio_album_id' => $albumId,
+    ]);
+    $row = $stats->fetch(PDO::FETCH_ASSOC);
+    $row = is_array($row) ? $row : [];
+
+    $trackCount = (int)($row['track_count'] ?? 0);
+    $managedAudio = (int)($row['managed_audio'] ?? 0);
+    $externalAudio = (int)($row['external_audio'] ?? 0);
+    $candidateTrackCount = (int)($identity['candidate_track_count'] ?? 0);
+
+    // Quando esiste almeno un audio managed, la decisione SAME e' basata
+    // sulla copertura per track, non sul tipo di storage dell'intero album.
+    // Questo rende stabile anche il caso mixed managed+external.
+    if (
+        $trackCount > 0
+        && $candidateTrackCount === $trackCount
+        && $managedAudio > 0
+    ) {
+        $coverage = $audioCoverageService->inspectCandidateCoverage(
+            $albumId,
+            $albumKey
+        );
+
+        if ((int)($coverage['managed_missing_tracks'] ?? 0) > 0) {
+            return [
+                'classification' => 'AMBIGUOUS',
+                'album_id' => $albumId,
+                'reason' => 'managed-audio-missing',
+                'identity_decision' => $identityDecision,
+            ];
+        }
+
+        if (!empty($coverage['complete'])) {
+            return [
+                'classification' => 'SAME',
+                'album_id' => $albumId,
+                'reason' => $externalAudio > 0
+                    ? 'mixed-album-complete'
+                    : 'managed-album-complete',
+                'identity_decision' => $identityDecision,
+            ];
+        }
+
+        // Nessun managed risulta fisicamente mancante: le track non coperte
+        // possono essere completate/reconciliate dalla normale pipeline CHANGED.
+    }
+
+    if ($externalAudio <= 0) {
+        return [
+            'classification' => 'CHANGED',
+            'album_id' => $albumId,
+            'reason' => 'existing-album-new-source',
+            'identity_decision' => $identityDecision,
+        ];
+    }
+
+    // Existing external album but current candidate did not match its persisted
+    // source set. Distinguish a true move from a second/live source.
+    $pathsStmt = $db->prepare("
+        SELECT source_path
+        FROM audio_files
+        WHERE album_id = :album_id
+          AND storage_type = 'external'
+          AND source_path IS NOT NULL
+          AND source_path <> ''
+        ORDER BY id ASC
+    ");
+    $pathsStmt->execute([':album_id' => $albumId]);
+
+    $liveOldSources = 0;
+    $knownOldSources = 0;
+
+    foreach ($pathsStmt->fetchAll(PDO::FETCH_COLUMN) as $oldPath) {
+        $oldPath = normalizedConfiguredPath((string)$oldPath);
+        if ($oldPath === '') {
+            continue;
+        }
+
+        $knownOldSources++;
+
+        $runtimeOldPath = runtimeScanPath($oldPath);
+        if (
+            $runtimeOldPath !== ''
+            && is_file($runtimeOldPath)
+            && is_readable($runtimeOldPath)
+        ) {
+            $liveOldSources++;
+        }
+    }
+
+    if ($knownOldSources > 0 && $liveOldSources === 0) {
+        $relocation = $rootRelocationService->verifyCandidateRelocation(
+            $importRoot,
+            $albumKey,
+            $albumId
+        );
+
+        if (!empty($relocation['verified'])) {
+            return [
+                'classification' => 'MOVED',
+                'album_id' => $albumId,
+                'reason' => 'verified-relocation-by-hash',
+                'identity_decision' => $identityDecision,
+            ];
+        }
+
+        return [
+            'classification' => 'CHANGED',
+            'album_id' => $albumId,
+            'reason' => 'relocation-unverified:'
+                . (string)($relocation['reason'] ?? 'unknown'),
+            'identity_decision' => $identityDecision,
+        ];
+    }
+
+    return [
+        'classification' => 'CHANGED',
+        'album_id' => $albumId,
+        'reason' => 'existing-album-source-differs',
+        'identity_decision' => $identityDecision,
+    ];
+}
+
 // One worker per Grizzly installation, regardless of which folder is selected.
 $tmpDir    = rtrim(sys_get_temp_dir(), '/');
 $stateFile = $tmpDir . '/grizzly-media-import-state.json';
@@ -950,14 +1581,26 @@ $service = new MediaImportService();
 $exclusionService = new MediaScanExclusionService($db);
 $rootRelocationService = new MediaRootRelocationService($db);
 
-// Canonical production gate state. It is deliberately separate from the
-// historical worker snapshot and from shadow/diagnostic readiness state.
+// Persistent candidate observation. AlbumReadinessService owns evidence and
+// temporal readiness; the repository is persisted by the worker at cycle end.
 $readinessStateFile = $root . '/storage/media-scan-readiness-state.json';
 $readinessStateRepository = new AlbumReadinessStateRepository($readinessStateFile);
 $readinessService = new AlbumReadinessService($db, $root);
 $readinessService->setStateRepository($readinessStateRepository);
 
-$scanGate = new AlbumScanGate($db, $root);
+// Single authoritative semantic pipeline. The worker orchestrates the result;
+// it no longer performs a second Readiness/Identity pass on actionable albums.
+$decisionService = new AlbumScanDecisionService(
+    $db,
+    $readinessService,
+    null,
+    null,
+    null,
+    $rootRelocationService,
+    null,
+    $root
+);
+
 $importExecutor = new AlbumImportExecutor($db, $root);
 
 $state   = loadWorkerState($stateFile);
@@ -1085,7 +1728,7 @@ while (true) {
         // NON azzerare lo state a ogni riavvio del worker.
         // Lo state persistito è valido finché media_scan_path non cambia davvero.
         // In precedenza $lastActiveConfiguredPath partiva da null e questo blocco
-        // cancellava tutte le imported_signature al primo ciclo di OGNI restart,
+        // azzerava la cache del worker al primo ciclo di OGNI restart,
         // provocando una scansione completa dell'intera libreria.
         $stateConfiguredPath = normalizedConfiguredPath(
             isset($state['configured_path']) ? (string)$state['configured_path'] : ''
@@ -1150,8 +1793,8 @@ while (true) {
                 }
 
                 // Una nuova root puo' avere una struttura completamente diversa.
-                // Non migrare imported_signature per path relativo: potrebbe
-                // marcare come gia' importato contenuto differente. Ripartiamo
+                // Non migrare cache per path relativo: potrebbe associare stato storico
+                // a contenuto differente. Ripartiamo
                 // dalla discovery completa; il DB e l'identity resolver
                 // ricostruiscono l'idempotenza in modo autorevole.
                 $state = [
@@ -1297,9 +1940,32 @@ while (true) {
     // mounted while one or more subdirectories temporarily stop responding.
     // A partial list must never be interpreted as authoritative absence.
     try {
-        // Una sola discovery autorevole per ciclo: key e parts devono provenire
-        // dalla stessa osservazione del filesystem.
-        $albumCandidates = $service->discoverAlbumCandidates($realImport, true);
+        // Una sola osservazione filesystem autorevole per ciclo: candidate key,
+        // parts e signature provengono dalla stessa traversata. L'API mantiene
+        // un fallback esplicito per i rari casi non riproducibili senza il
+        // candidateSnapshot storico.
+        $discoveryObservation = $service->discoverAlbumCandidatesWithSignatures(
+            $realImport,
+            true
+        );
+
+        if (
+            !isset($discoveryObservation['candidates'])
+            || !is_array($discoveryObservation['candidates'])
+            || !isset($discoveryObservation['signatures'])
+            || !is_array($discoveryObservation['signatures'])
+            || !isset($discoveryObservation['signature_fallback'])
+            || !is_array($discoveryObservation['signature_fallback'])
+        ) {
+            throw new RuntimeException(
+                'Discovery single-pass returned an invalid observation payload.'
+            );
+        }
+
+        $albumCandidates = $discoveryObservation['candidates'];
+        $albumSignatures = $discoveryObservation['signatures'];
+        $albumSignatureFallback =
+            $discoveryObservation['signature_fallback'];
     } catch (Throwable $e) {
         workerLog(
             '[WAIT] Discovery filesystem non affidabile: ' . $e->getMessage()
@@ -1329,6 +1995,17 @@ while (true) {
 
     $stillAlive = [];
     $cycleFilesystemHealthy = true;
+
+    // Una sola fotografia semantica del DB per ciclo. Il fast-path e' ammesso
+    // soltanto se coincide con quella salvata al termine del ciclo precedente.
+    $cycleDbRevision = scannerSemanticDbRevision($db);
+    $previousDbRevision = isset($state['semantic_db_revision'])
+        ? (string)$state['semantic_db_revision']
+        : '';
+    $dbRevisionUnchanged = $cycleDbRevision !== ''
+        && $previousDbRevision !== ''
+        && hash_equals($previousDbRevision, $cycleDbRevision);
+    $cycleDbMutated = false;
 
     // Candidati ancora nella finestra di stabilità del worker (nuovi,
     // modificati o non ancora stabili). Un ciclo completo senza candidati
@@ -1369,7 +2046,18 @@ while (true) {
             );
         }
 
-        $signature = candidateSnapshot($albumKey, $candidateParts);
+        if (
+            array_key_exists($albumKey, $albumSignatures)
+            && is_string($albumSignatures[$albumKey])
+            && !isset($albumSignatureFallback[$albumKey])
+        ) {
+            $signature = (string)$albumSignatures[$albumKey];
+        } else {
+            // Compatibility fallback only: the normal path receives its
+            // signature from the same filesystem observation as discovery.
+            $signature = candidateSnapshot($albumKey, $candidateParts);
+        }
+
         if ($signature === '') {
             $cycleFilesystemHealthy = false;
             workerLog(
@@ -1384,159 +2072,340 @@ while (true) {
             : [];
 
         $signatureChanged = !isset($previous['signature'])
-            || $previous['signature'] !== $signature;
+            || !hash_equals((string)$previous['signature'], $signature);
 
-        $stableSince = isset($previous['stable_since'])
-            ? (int)$previous['stable_since']
-            : $now;
-        $stableFor = max(0, $now - $stableSince);
+        // IMPORTANT:
+        // Worker state remains cache/telemetry, never semantic authority.
+        // A historical SAME can only be reused through the guarded predicate
+        // below, which also binds the decision to the DB revision that produced
+        // it. Without that binding a reverse relocation could revive stale state.
 
-        $alreadyDone = isset($previous['imported_signature'])
-            && $previous['imported_signature'] === $signature;
-
-        // Worker state is only a cache. After a verified root relocation,
-        // manual state cleanup or tmp-state loss, recover idempotency directly
-        // from DB source_path evidence. This check is read-only. If every current
-        // scanner-selected audio is already indexed and unchanged, rebuild the
-        // imported signatures and skip Readiness/Identity/Executor completely.
-        if (!$alreadyDone) {
-            try {
-                $indexedCandidate = $rootRelocationService->inspectIndexedCandidate(
-                    $realImport,
-                    $albumKey
-                );
-            } catch (Throwable $e) {
-                $indexedCandidate = [
-                    'fully_indexed' => false,
-                    'reason' => 'inspection-error:' . $e->getMessage(),
-                ];
-            }
-
-            if (!empty($indexedCandidate['fully_indexed'])) {
-                $state['albums'][$albumKey] = array_merge($previous, [
-                    'signature' => $signature,
-                    'stable_since' => isset($previous['stable_since'])
-                        ? (int)$previous['stable_since']
-                        : $now,
-                    'imported_signature' => $signature,
-                    'readiness_bootstrap_signature' => $signature,
-                    'readiness_stable' => true,
-                    'last_result' => 'ok',
-                    'last_scan' => $now,
-                    'deferred_sources' => [],
-                ]);
-
-                if (($previous['last_result'] ?? '') !== 'ok'
-                    || (($previous['imported_signature'] ?? '') !== $signature)) {
-                    workerLog(
-                        '[STATE] ' . $albumLabel
-                        . ' | gia indicizzato album_id='
-                        . (int)($indexedCandidate['album_id'] ?? 0)
-                        . ' | audio='
-                        . (int)($indexedCandidate['audio_files'] ?? 0)
-                    );
-                }
-
-                continue;
-            }
-        }
-
-        // Un album già importato e invariato resta un no-op SOLO dopo che il
-        // nuovo Readiness repository ha osservato e stabilizzato questa stessa
-        // worker signature. Questo permette il bootstrap del nuovo state sulle
-        // librerie già completamente importate senza rieseguire il gate.
-        $readinessBootstrapDone = isset($previous['readiness_bootstrap_signature'])
-            && hash_equals(
-                (string)$previous['readiness_bootstrap_signature'],
-                $signature
-            );
-
-        if (
-            $alreadyDone
-            && $readinessBootstrapDone
-        ) {
+        // Safe SAME fast-path. Unlike the older shortcut, the cached decision
+        // is bound to the exact semantic DB revision against which it was
+        // calculated. A reverse relocation or any other semantic DB change
+        // therefore invalidates the cache before ownership/classification can
+        // be skipped. Worker state remains an optimization only (I09/I20).
+        if (workerCanReuseCanonicalSame(
+            $previous,
+            $signatureChanged,
+            $cycleDbRevision,
+            $dbRevisionUnchanged,
+            $cycleDbMutated
+        )) {
+            $state['albums'][$albumKey]['last_scan'] = $now;
             continue;
         }
 
-        // Preserva il lifecycle relocation esistente. Finché tutte le vecchie
-        // sorgenti external sono ancora vive non serve rieseguire Readiness,
-        // Identity o l'Executor.
+        // Un RECONCILE gia' deferito non va rieseguito a ogni polling. DEFERRED
+        // significa che il target possiede ancora vecchie sorgenti external vive:
+        // la transizione utile e' locale al candidato/album target, non globale.
+        //
+        // Quindi il fast-path dipende da:
+        // - signature filesystem del candidato invariata;
+        // - revisione semantica del SOLO album target invariata;
+        // - nessun audio managed comparso sul target;
+        // - tutte le vecchie sorgenti che causarono il DEFER ancora vive.
+        //
+        // Modifiche ad album estranei NON devono risvegliare questo DEFER.
         if (
             !$signatureChanged
             && (($previous['last_result'] ?? '') === 'deferred')
+            && strtoupper((string)($previous['canonical_class'] ?? '')) === 'CHANGED'
+            && (int)($previous['canonical_album_id'] ?? 0) > 0
         ) {
+            $targetAlbumId = (int)$previous['canonical_album_id'];
             $waiting = isset($previous['deferred_sources'])
                 && is_array($previous['deferred_sources'])
                     ? $previous['deferred_sources']
                     : [];
+            $storedTargetRevision = trim((string)(
+                $previous['deferred_target_revision'] ?? ''
+            ));
+            $currentTargetRevision = $storedTargetRevision !== ''
+                ? scannerAlbumSemanticRevision($db, $targetAlbumId)
+                : '';
+            $targetRevisionUnchanged = $storedTargetRevision !== ''
+                && $currentTargetRevision !== ''
+                && hash_equals($storedTargetRevision, $currentTargetRevision);
 
-            if (!empty($waiting)) {
-                $allStillLive = true;
+            if (!empty($waiting) && $targetRevisionUnchanged) {
+                $managedCount = 1;
+                try {
+                    $managedStmt = $db->prepare(
+                        "SELECT COUNT(*) FROM audio_files "
+                        . "WHERE album_id = :album_id AND storage_type = 'managed'"
+                    );
+                    $managedStmt->execute([
+                        ':album_id' => $targetAlbumId,
+                    ]);
+                    $managedCount = (int)$managedStmt->fetchColumn();
+                } catch (Throwable $e) {
+                    $managedCount = 1;
+                }
 
-                foreach ($waiting as $waitPath) {
-                    $waitPath = normalizedConfiguredPath((string)$waitPath);
-                    $runtimeWait = $waitPath !== ''
-                        ? runtimeScanPath($waitPath)
-                        : '';
+                if ($managedCount === 0) {
+                    $allStillLive = true;
 
-                    if (
-                        $runtimeWait === ''
-                        || !is_file($runtimeWait)
-                        || !is_readable($runtimeWait)
-                    ) {
-                        $allStillLive = false;
-                        break;
+                    foreach ($waiting as $waitPath) {
+                        $waitPath = normalizedConfiguredPath((string)$waitPath);
+                        $runtimeWait = $waitPath !== ''
+                            ? runtimeScanPath($waitPath)
+                            : '';
+
+                        if (
+                            $runtimeWait === ''
+                            || !is_file($runtimeWait)
+                            || !is_readable($runtimeWait)
+                        ) {
+                            $allStillLive = false;
+                            break;
+                        }
+                    }
+
+                    if ($allStillLive) {
+                        $state['albums'][$albumKey]['last_scan'] = $now;
+                        continue;
                     }
                 }
-
-                if ($allStillLive) {
-                    continue;
-                }
-
-                workerLog(
-                    "[RECONCILE] Sorgente precedente non piu' raggiungibile: "
-                    . $albumLabel
-                );
             }
         }
 
-        // Le parts arrivano dalla STESSA discovery che ha prodotto albumKey.
-        // Non rifare discovery sul singolo candidato: un rename/move tra due
-        // osservazioni produrrebbe un falso errore di grouping. analyzeCandidate()
-        // resta strict e fallisce chiuso se una part non e' piu' leggibile.
+        // Se uno dei due input semantici e' cambiato, ricostruiamo sempre la
+        // decisione canonica attraverso l'unica pipeline autorevole. Lo state
+        // accelera soltanto il no-op e non partecipa alla semantica.
         try {
-            $readinessParts = is_array($candidateParts)
-                ? $candidateParts
-                : [];
-
-            if (empty($readinessParts)) {
-                throw new RuntimeException(
-                    'Candidate parts assenti per: ' . $albumKey
-                );
-            }
-
-            // Questa osservazione avviene anche mentre la vecchia stability
-            // window non è ancora trascorsa. Così la persistent signature
-            // parte dal primo ciclo utile e non raddoppia artificialmente
-            // media_scan_stable_seconds.
-            $readinessCandidate = $readinessService->analyzeCandidate(
+            $canonical = $decisionService->evaluate(
                 $realImport,
                 $albumKey,
-                $readinessParts,
-                $stable,
-                true
+                is_array($candidateParts) ? $candidateParts : [],
+                $stable
             );
         } catch (Throwable $e) {
-            $state['albums'][$albumKey]['last_result'] = 'error';
-            $state['albums'][$albumKey]['last_scan'] = $now;
-            $cycleFilesystemHealthy = false;
+            $state['albums'][$albumKey] = array_merge($previous, [
+                'signature' => $signature,
+                'last_result' => 'error',
+                'last_scan' => $now,
+            ]);
+            $cycleRescanHadError = true;
 
             workerLog(
                 '[ERROR] ' . $albumLabel
-                . ' | readiness: ' . $e->getMessage()
-                . ' | cleanup-state=deferred'
+                . ' | classification: ' . $e->getMessage()
+            );
+            continue;
+        }
+
+        $canonicalClass = strtoupper(trim((string)(
+            $canonical['classification'] ?? 'AMBIGUOUS'
+        )));
+        $canonicalAlbumId = isset($canonical['album_id'])
+            && $canonical['album_id'] !== null
+                ? (int)$canonical['album_id']
+                : null;
+        $canonicalReason = trim((string)(
+            $canonical['reason'] ?? ''
+        ));
+
+        // A removable/network filesystem can remain mounted while directory
+        // entries or files are temporarily unavailable (for example during an
+        // SMB/Wi-Fi reconnect). This is not a semantic album decision. Preserve
+        // the previous canonical state, mark this cycle unhealthy and retry only
+        // after the filesystem becomes observable again.
+        if ($canonicalClass === 'UNAVAILABLE') {
+            $cycleFilesystemHealthy = false;
+            $state['albums'][$albumKey] = array_merge($previous, [
+                'last_scan' => $now,
+            ]);
+
+            workerLog(
+                '[WAIT] ' . $albumLabel
+                . ' | filesystem non affidabile: ' . $canonicalReason
             );
             break;
+        }
+
+        $canonicalKey = implode('|', [
+            $canonicalClass,
+            $canonicalAlbumId !== null ? (string)$canonicalAlbumId : '',
+            $canonicalReason,
+        ]);
+        $previousCanonicalKey = (string)($previous['canonical_key'] ?? '');
+
+        // Persistiamo il risultato solo come cache verificabile. Al prossimo
+        // ciclo sara' riusato esclusivamente se FS + DB sono identici.
+        // Bind the cached canonical decision to the semantic DB snapshot used
+        // to calculate it. If this cycle already mutated the DB, the revision
+        // captured at cycle start is stale and must NOT authorize a future skip.
+        $canonicalDbRevisionForState = (!$cycleDbMutated && $cycleDbRevision !== '')
+            ? $cycleDbRevision
+            : '';
+
+        $previous = array_merge($previous, [
+            'signature' => $signature,
+            'canonical_class' => $canonicalClass,
+            'canonical_album_id' => $canonicalAlbumId,
+            'canonical_reason' => $canonicalReason,
+            'canonical_key' => $canonicalKey,
+            'canonical_db_revision' => $canonicalDbRevisionForState,
+        ]);
+        $state['albums'][$albumKey] = $previous;
+
+        // Non inondare il log con la stessa classificazione a ogni polling.
+        if ($previousCanonicalKey !== $canonicalKey) {
+            workerLog(
+                '[CLASSIFY] ' . $albumLabel
+                . ' | class=' . $canonicalClass
+                . ($canonicalAlbumId !== null
+                    ? ' album_id=' . $canonicalAlbumId
+                    : '')
+                . ($canonicalReason !== ''
+                    ? ' reason=' . $canonicalReason
+                    : '')
+            );
+        }
+
+        if ($canonicalClass === 'SAME') {
+            $state['albums'][$albumKey] = array_merge($previous, [
+                'last_result' => 'ok',
+                'last_scan' => $now,
+                'deferred_sources' => [],
+                'deferred_target_revision' => null,
+            ]);
+            continue;
+        }
+
+        if ($canonicalClass === 'AMBIGUOUS') {
+            $state['albums'][$albumKey] = array_merge($previous, [
+                'signature' => $signature,
+                'last_result' => 'review',
+                'last_scan' => $now,
+                'deferred_sources' => [],
+                'deferred_target_revision' => null,
+            ]);
+
+            if ($previousCanonicalKey !== $canonicalKey) {
+                workerLog(
+                    '[REVIEW] ' . $albumLabel
+                    . ' | canonical='
+                    . ($canonicalReason !== '' ? $canonicalReason : 'ambiguous')
+                );
+            }
+            continue;
+        }
+
+        if ($canonicalClass === 'MOVED') {
+            if ($canonicalAlbumId === null || $canonicalAlbumId <= 0) {
+                $state['albums'][$albumKey] = array_merge($previous, [
+                    'signature' => $signature,
+                    'last_result' => 'error',
+                    'last_scan' => $now,
+                ]);
+                $cycleRescanHadError = true;
+                workerLog(
+                    '[ERROR] ' . $albumLabel
+                    . ' | MOVED senza album_id valido'
+                );
+                continue;
+            }
+
+            try {
+                $relocationFormatId = scannerRelocationFormatId(
+                    $db,
+                    $albumKey,
+                    $realImport
+                );
+
+                $relocationResult = $rootRelocationService
+                    ->applyCandidateRelocation(
+                        $realImport,
+                        $albumKey,
+                        $canonicalAlbumId
+                    );
+
+                // MOVED riallinea il SOLO formato automatico dello scanner.
+                // Se esiste un formato manuale, Album::syncScannerFormat()
+                // non lo modifica: la scelta dell'utente resta autorevole,
+                // anche quando il path ricadrebbe nel fallback Digital.
+                if ($relocationFormatId !== null && $relocationFormatId > 0) {
+                    $albumModel = new Album();
+                    $albumModel->syncScannerFormat(
+                        $canonicalAlbumId,
+                        $relocationFormatId
+                    );
+                }
+            } catch (Throwable $e) {
+                $state['albums'][$albumKey] = array_merge($previous, [
+                    'signature' => $signature,
+                    'last_result' => 'error',
+                    'last_scan' => $now,
+                ]);
+                $cycleRescanHadError = true;
+                workerLog(
+                    '[ERROR] ' . $albumLabel
+                    . ' | relocation: ' . $e->getMessage()
+                );
+                continue;
+            }
+
+            $state['albums'][$albumKey] = array_merge($previous, [
+                'signature' => $signature,
+                'last_result' => 'ok',
+                'last_scan' => $now,
+                'deferred_sources' => [],
+                'deferred_target_revision' => null,
+            ]);
+            $cycleDbMutated = true;
+
+            workerLog(
+                '[MOVED] ' . $albumLabel
+                . ' | reconciled='
+                . (int)($relocationResult['updated_files'] ?? 0)
+            );
+            continue;
+        }
+
+        if (!in_array(
+            $canonicalClass,
+            ['NEW', 'CHANGED'],
+            true
+        )) {
+            $state['albums'][$albumKey] = array_merge($previous, [
+                'signature' => $signature,
+                'last_result' => 'error',
+                'last_scan' => $now,
+            ]);
+            $cycleRescanHadError = true;
+
+            workerLog(
+                '[ERROR] ' . $albumLabel
+                . ' | classificazione sconosciuta=' . $canonicalClass
+            );
+            continue;
+        }
+
+        // NEW/CHANGED hanno già attraversato la pipeline lineare una sola
+        // volta. Riutilizziamo ESATTAMENTE il candidate snapshot e il gate
+        // prodotti da AlbumScanDecisionService: nessuna seconda Readiness e
+        // nessuna seconda Identity nel worker.
+        $readinessCandidate = isset($canonical['candidate'])
+            && is_array($canonical['candidate'])
+                ? $canonical['candidate']
+                : null;
+        $gateResult = isset($canonical['gate_result'])
+            && is_array($canonical['gate_result'])
+                ? $canonical['gate_result']
+                : null;
+
+        if ($readinessCandidate === null || $gateResult === null) {
+            $state['albums'][$albumKey]['last_result'] = 'error';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+            $cycleRescanHadError = true;
+
+            workerLog(
+                '[ERROR] ' . $albumLabel
+                . ' | decision pipeline incompleta per ' . $canonicalClass
+            );
+            continue;
         }
 
         $readinessStatus = strtoupper(
@@ -1545,109 +2414,6 @@ while (true) {
         $candidateSignature = trim(
             (string)($readinessCandidate['candidate_signature'] ?? '')
         );
-        $readinessStable = !empty($readinessCandidate['stable']);
-
-        // Bootstrap/migrazione del nuovo readiness state per album già
-        // importati dal worker precedente. Questi candidati vengono osservati
-        // fino a quando la persistent signature è temporalmente stabile, ma
-        // NON passano mai da Identity/Gate/Executor finché la worker signature
-        // coincide con imported_signature.
-        if (
-            $alreadyDone
-            && !$signatureChanged
-        ) {
-            $firstBootstrapObservation =
-                empty($previous['candidate_signature']);
-
-            $state['albums'][$albumKey]['last_scan'] = $now;
-            $state['albums'][$albumKey]['readiness_status'] = $readinessStatus;
-            $state['albums'][$albumKey]['candidate_signature'] =
-                $candidateSignature;
-            $state['albums'][$albumKey]['readiness_stable'] =
-                $readinessStable;
-
-            if ($readinessStable) {
-                $state['albums'][$albumKey]['readiness_bootstrap_signature'] =
-                    $signature;
-            }
-
-            if ($firstBootstrapObservation) {
-                workerLog(
-                    '[READINESS] ' . $albumLabel
-                    . ' | bootstrap=observing'
-                    . ' | status='
-                    . ($readinessStatus !== '' ? $readinessStatus : 'UNKNOWN')
-                );
-            } elseif (
-                $readinessStable
-                && !$readinessBootstrapDone
-            ) {
-                workerLog(
-                    '[READINESS] ' . $albumLabel
-                    . ' | bootstrap=complete'
-                    . ' | status='
-                    . ($readinessStatus !== '' ? $readinessStatus : 'UNKNOWN')
-                );
-            }
-
-            continue;
-        }
-
-        // La lightweight snapshot del worker resta un ulteriore guardrail per
-        // restart/ignored/excluded lifecycle. Non decide più la completezza:
-        // quella decisione appartiene esclusivamente ad AlbumReadinessService.
-        if ($signatureChanged) {
-            $state['albums'][$albumKey] = [
-                'signature'           => $signature,
-                'stable_since'        => $now,
-                'imported_signature'  => isset($previous['imported_signature'])
-                    ? $previous['imported_signature']
-                    : null,
-                'last_result'         => 'pending',
-                'last_scan'           => isset($previous['last_scan'])
-                    ? $previous['last_scan']
-                    : null,
-                'deferred_sources'    => [],
-                'readiness_status'    => $readinessStatus,
-                'candidate_signature' => $candidateSignature,
-            ];
-
-            $cycleWaitingCandidates++;
-            workerLog('[PENDING] Modifiche rilevate: ' . $albumLabel);
-            continue;
-        }
-
-        // Manteniamo anche la stability window storica come guardrail locale.
-        // Non può rendere READY un candidato: può soltanto ritardarlo.
-        if ($stableFor < $stable) {
-            $cycleWaitingCandidates++;
-            workerLog(
-                '[WAIT] ' . $albumLabel
-                . ' stabile da ' . $stableFor . 's'
-            );
-            continue;
-        }
-
-        // Canonical gate:
-        // non-READY => Identity NOT_RUN;
-        // READY => IdentityResolver;
-        // solo CREATE/RECONCILE producono un AlbumImportPlan eseguibile.
-        try {
-            $gateResult = $scanGate->evaluate(
-                $realImport,
-                $readinessCandidate
-            );
-        } catch (Throwable $e) {
-            $state['albums'][$albumKey]['last_result'] = 'error';
-            $state['albums'][$albumKey]['last_scan'] = $now;
-            $cycleRescanHadError = true;
-
-            workerLog(
-                '[ERROR] ' . $albumLabel
-                . ' | gate: ' . $e->getMessage()
-            );
-            continue;
-        }
 
         $gateAction = strtoupper(
             trim((string)($gateResult['action'] ?? 'REVIEW'))
@@ -1669,6 +2435,7 @@ while (true) {
                     : 'pending';
             $state['albums'][$albumKey]['last_scan'] = $now;
             $state['albums'][$albumKey]['deferred_sources'] = [];
+            unset($state['albums'][$albumKey]['deferred_target_revision']);
             $state['albums'][$albumKey]['readiness_status'] = $readinessStatus;
             $state['albums'][$albumKey]['candidate_signature'] =
                 $candidateSignature;
@@ -1688,6 +2455,7 @@ while (true) {
             $state['albums'][$albumKey]['last_result'] = 'review';
             $state['albums'][$albumKey]['last_scan'] = $now;
             $state['albums'][$albumKey]['deferred_sources'] = [];
+            unset($state['albums'][$albumKey]['deferred_target_revision']);
             $state['albums'][$albumKey]['readiness_status'] = $readinessStatus;
             $state['albums'][$albumKey]['candidate_signature'] =
                 $candidateSignature;
@@ -1728,6 +2496,37 @@ while (true) {
             workerLog(
                 '[ERROR] ' . $albumLabel
                 . ' | piano import assente per ' . $gateAction
+            );
+            continue;
+        }
+
+        if (
+            $canonicalClass === 'NEW'
+            && $gateAction !== 'CREATE'
+        ) {
+            $state['albums'][$albumKey]['last_result'] = 'review';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+            workerLog(
+                '[REVIEW] ' . $albumLabel
+                . ' | canonical NEW incompatible with gate=' . $gateAction
+            );
+            continue;
+        }
+
+        if (
+            $canonicalClass === 'CHANGED'
+            && (
+                $gateAction !== 'RECONCILE'
+                || $canonicalAlbumId === null
+                || $canonicalAlbumId <= 0
+                || $plan->targetAlbumId() !== $canonicalAlbumId
+            )
+        ) {
+            $state['albums'][$albumKey]['last_result'] = 'review';
+            $state['albums'][$albumKey]['last_scan'] = $now;
+            workerLog(
+                '[REVIEW] ' . $albumLabel
+                . ' | canonical CHANGED target mismatch'
             );
             continue;
         }
@@ -1786,12 +2585,10 @@ while (true) {
             !empty($execution['ok'])
             && $executionStatus === 'committed'
         ) {
+            $cycleDbMutated = true;
             $state['albums'][$albumKey]['last_result'] = 'ok';
-            $state['albums'][$albumKey]['imported_signature'] = $signature;
-            $state['albums'][$albumKey]['readiness_bootstrap_signature'] =
-                $signature;
-            $state['albums'][$albumKey]['readiness_stable'] = true;
             $state['albums'][$albumKey]['deferred_sources'] = [];
+            unset($state['albums'][$albumKey]['deferred_target_revision']);
 
             workerLog(
                 '[OK] ' . $albumLabel
@@ -1813,6 +2610,18 @@ while (true) {
             $state['albums'][$albumKey]['deferred_sources'] =
                 array_keys($waitSources);
 
+            $deferredTargetRevision = $canonicalAlbumId !== null
+                && $canonicalAlbumId > 0
+                    ? scannerAlbumSemanticRevision($db, $canonicalAlbumId)
+                    : '';
+
+            if ($deferredTargetRevision !== '') {
+                $state['albums'][$albumKey]['deferred_target_revision'] =
+                    $deferredTargetRevision;
+            } else {
+                unset($state['albums'][$albumKey]['deferred_target_revision']);
+            }
+
             workerLog(
                 '[DEFER] ' . $albumLabel
                 . ' | external in attesa='
@@ -1822,6 +2631,7 @@ while (true) {
         } elseif ($executionStatus === 'review') {
             $state['albums'][$albumKey]['last_result'] = 'review';
             $state['albums'][$albumKey]['deferred_sources'] = [];
+            unset($state['albums'][$albumKey]['deferred_target_revision']);
 
             workerLog(
                 '[REVIEW] ' . $albumLabel
@@ -1918,8 +2728,23 @@ while (true) {
         workerLog('[CONFIG] Riscansione della nuova watched folder completata.');
     }
 
+    // Il fast-path del ciclo successivo e' valido solo se il DB non e' cambiato
+    // durante questo ciclo. Una scrittura dello scanner o una modifica concorrente
+    // invalida il fingerprint: il prossimo ciclo fara' una classificazione piena
+    // e ricostruira' la cache da fonti autorevoli.
+    if (!$cycleDbMutated && $cycleDbRevision !== '') {
+        $endDbRevision = scannerSemanticDbRevision($db);
+        if ($endDbRevision !== '' && hash_equals($cycleDbRevision, $endDbRevision)) {
+            $state['semantic_db_revision'] = $endDbRevision;
+        } else {
+            unset($state['semantic_db_revision']);
+        }
+    } else {
+        unset($state['semantic_db_revision']);
+    }
+
     // Il worker state viene comunque salvato anche se il readiness state fallisce:
-    // un import già COMMITtato non deve perdere imported_signature.
+    // contiene solo cache/telemetria e deve restare coerente con il ciclo appena eseguito.
     saveWorkerState($stateFile, $state);
 
     if ($readinessSaveError !== '' && $stopReason === '') {

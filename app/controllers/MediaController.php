@@ -212,7 +212,7 @@ class MediaController
      */
     private function resolveExternalPath(array $audioRow): ?string
     {
-        $sourcePath = trim((string)($audioRow['source_path'] ?? ''));
+        $sourcePath = (string)($audioRow['source_path'] ?? '');
         if ($sourcePath === '') {
             return null;
         }

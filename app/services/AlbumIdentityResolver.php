@@ -76,65 +76,13 @@ class AlbumIdentityResolver
         ];
 
         /*
-         * 1. SOURCE PATH
-         * Strongest local evidence. If different source files already point to
-         * different albums we refuse to guess.
-         */
-        $sourceAlbumIds = $this->albumIdsBySourcePaths($importRoot, $audioFiles);
-
-        if (count($sourceAlbumIds) > 1) {
-            return $base + [
-                'decision' => self::CONFLICT,
-                'confidence' => 'strong',
-                'album_id' => null,
-                'match_source' => 'source-path',
-                'candidate_album_ids' => $sourceAlbumIds,
-                'reasons' => ['source-paths-point-to-multiple-albums'],
-            ];
-        }
-
-        if (count($sourceAlbumIds) === 1) {
-            $album = $this->loadAlbum($sourceAlbumIds[0]);
-            if ($album === null) {
-                return $base + [
-                    'decision' => self::CONFLICT,
-                    'confidence' => 'strong',
-                    'album_id' => null,
-                    'match_source' => 'source-path',
-                    'candidate_album_ids' => $sourceAlbumIds,
-                    'reasons' => ['source-path-album-not-found'],
-                ];
-            }
-
-            $metadataWarnings = $this->strongIdentityVetoes(
-                $artist,
-                $title,
-                $year,
-                $releaseMbid,
-                $album
-            );
-
-            $reasons = ['exact-source-path'];
-            if (!empty($metadataWarnings)) {
-                $reasons[] = 'source-path-metadata-warning';
-            }
-
-            return $base + [
-                'decision' => self::EXACT_EXISTING,
-                'confidence' => 'strong',
-                'album_id' => (int)$album['id'],
-                'match_source' => 'source-path',
-                'candidate_album_ids' => [(int)$album['id']],
-                'reasons' => $reasons,
-                'metadata_warnings' => $metadataWarnings,
-                'matched_album' => $this->publicAlbum($album),
-            ];
-        }
-
-        /*
-         * 2. EXACT RELEASE MBID
+         * 1. EXACT RELEASE MBID
+         * Ownership by source_path is resolved before Identity by
+         * ExternalSourceOwnershipService. Identity only receives
+         * candidates that are semantically UNOWNED.
          * Release MBID identifies a release; release-group MBID does not.
          */
+
         if ($this->isUuid($releaseMbid)) {
             $albums = $this->albumsByReleaseMbid($releaseMbid);
 
@@ -566,6 +514,43 @@ class AlbumIdentityResolver
     }
 
     /**
+     * Strip only "Artist - Album - NN - Track" style labels.
+     */
+    private function cleanCompoundTrackLabel(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+
+        if (preg_match(
+            '/^.+\s[-–—]\s.+\s[-–—]\s\d{1,3}\s[-–—]\s(.+)$/u',
+            $value,
+            $m
+        )) {
+            return trim((string)$m[1]);
+        }
+
+        return $value;
+    }
+
+    private function candidateTrackTitleFromFilename(string $path): string
+    {
+        $title = trim((string)pathinfo($path, PATHINFO_FILENAME));
+        if ($title === '') {
+            return '';
+        }
+
+        $compound = $this->cleanCompoundTrackLabel($title);
+        if ($compound !== $title) {
+            return $compound;
+        }
+
+        $title = (string)preg_replace('/^\s*\d+\s*[-._ ]+\s*/u', '', $title);
+        return trim($title);
+    }
+
+    /**
      * @param array<int,string> $audioFiles
      * @return array<int,string>
      */
@@ -590,7 +575,9 @@ class AlbumIdentityResolver
                         ? $info['comments']
                         : [];
 
-                    $title = $this->firstComment($comments, ['title']);
+                    $title = $this->cleanCompoundTrackLabel(
+                        $this->firstComment($comments, ['title'])
+                    );
                     $trackRaw = $this->firstComment(
                         $comments,
                         ['track_number', 'tracknumber', 'track']
@@ -611,9 +598,7 @@ class AlbumIdentityResolver
             }
 
             if ($title === '') {
-                $title = pathinfo($path, PATHINFO_FILENAME);
-                $title = preg_replace('/^\s*\d+\s*[-._ ]+\s*/u', '', $title);
-                $title = trim((string)$title);
+                $title = $this->candidateTrackTitleFromFilename($path);
             }
 
             $tracks[] = [
@@ -646,70 +631,7 @@ class AlbumIdentityResolver
         }, $tracks));
     }
 
-    /**
-     * @param array<int,string> $audioFiles
-     * @return array<int,int>
-     */
-    private function albumIdsBySourcePaths(string $importRoot, array $audioFiles): array
-    {
-        if (empty($audioFiles)) {
-            return [];
-        }
-
-        $stmt = $this->db->prepare(
-            "SELECT DISTINCT album_id
-             FROM audio_files
-             WHERE album_id IS NOT NULL
-               AND source_path = :source_path
-             ORDER BY album_id ASC
-             LIMIT 3"
-        );
-
-        $ids = [];
-
-        foreach ($audioFiles as $path) {
-            foreach ($this->sourcePathVariants($importRoot, $path) as $variant) {
-                $stmt->execute([':source_path' => $variant]);
-
-                foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $albumId) {
-                    $albumId = (int)$albumId;
-                    if ($albumId > 0) {
-                        $ids[$albumId] = true;
-                    }
-                }
-
-                if (count($ids) > 1) {
-                    break 2;
-                }
-            }
-        }
-
-        $out = array_map('intval', array_keys($ids));
-        sort($out, SORT_NUMERIC);
-        return $out;
-    }
-
-    /**
-     * @return array<int,string>
-     */
-    private function sourcePathVariants(string $importRoot, string $path): array
-    {
-        $variants = [];
-
-        $sourcePath = $this->sourcePathForDb($path);
-        if ($sourcePath !== '') {
-            $variants[$sourcePath] = true;
-        }
-
-        $legacyRel = $this->relPath($importRoot, $path);
-        if ($legacyRel !== '') {
-            $variants[$legacyRel] = true;
-        }
-
-        return array_values(array_keys($variants));
-    }
-
-    /**
+            /**
      * @return array<string,mixed>|null
      */
     private function loadAlbum(int $albumId): ?array
@@ -1293,42 +1215,6 @@ class AlbumIdentityResolver
         $path = trim(str_replace('\\', '/', $path));
         $path = preg_replace('#/+#', '/', $path);
         return rtrim((string)$path, '/');
-    }
-
-    private function sourcePathForDb(string $runtimePath): string
-    {
-        $real = realpath($runtimePath);
-        $path = $real !== false ? $real : $runtimePath;
-        $path = str_replace('\\', '/', $path);
-
-        $prefix = trim((string)getenv('MEDIA_SCAN_HOST_PREFIX'));
-        if ($prefix === '') {
-            return $path;
-        }
-
-        $prefix = rtrim(str_replace('\\', '/', $prefix), '/');
-        if ($path === $prefix) {
-            return '/';
-        }
-
-        if (strpos($path, $prefix . '/') === 0) {
-            $hostPath = substr($path, strlen($prefix));
-            return $hostPath === '' ? '/' : $hostPath;
-        }
-
-        return $path;
-    }
-
-    private function relPath(string $importDir, string $abs): string
-    {
-        $importDir = rtrim(str_replace('\\', '/', $importDir), '/') . '/';
-        $abs = str_replace('\\', '/', $abs);
-
-        if (strpos($abs, $importDir) === 0) {
-            return substr($abs, strlen($importDir));
-        }
-
-        return basename($abs);
     }
 
     private function isUuid(string $value): bool

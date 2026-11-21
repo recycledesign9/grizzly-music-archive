@@ -267,20 +267,20 @@ class MediaRootRelocationService
             }
 
             $expectedHash = (string)$row['source_hash'];
-            if ($expectedHash !== '') {
-                $actualHash = @sha1_file($real);
-                if (
-                    $actualHash === false
-                    || !hash_equals($expectedHash, strtolower((string)$actualHash))
-                ) {
-                    continue;
-                }
-                $verifiedHashes++;
-            } elseif ($expectedSize <= 0) {
-                // Senza hash e senza size non c'e' prova sufficiente, anche se
-                // il path relativo e' identico.
+            if ($expectedHash === '') {
+                // Un rebind automatico deve essere dimostrato dal contenuto.
+                // Relative path + filesize non sono sufficienti su una nuova root.
                 continue;
             }
+
+            $actualHash = @sha1_file($real);
+            if (
+                $actualHash === false
+                || !hash_equals($expectedHash, strtolower((string)$actualHash))
+            ) {
+                continue;
+            }
+            $verifiedHashes++;
 
             $collision->execute([
                 ':source_path' => $newPath,
@@ -300,6 +300,7 @@ class MediaRootRelocationService
                 'runtime_path' => $real,
                 'size' => $size,
                 'mtime' => $mtime === false ? null : (int)$mtime,
+                'source_hash' => $expectedHash,
                 'method' => 'relative',
             ];
             $mappedIds[$id] = true;
@@ -462,6 +463,7 @@ class MediaRootRelocationService
                     'runtime_path' => (string)$candidate['runtime_path'],
                     'size' => (int)$candidate['size'],
                     'mtime' => $candidate['mtime'],
+                    'source_hash' => $hash,
                     'method' => 'hash',
                 ];
                 $mappedIds[$id] = true;
@@ -556,6 +558,16 @@ class MediaRootRelocationService
                 && (int)$mtimeNow !== (int)$item['mtime']
             ) {
                 throw new RuntimeException('Target mtime changed during verification: ' . $item['new_path']);
+            }
+
+            $expectedHash = strtolower((string)($item['source_hash'] ?? ''));
+            $hashNow = @sha1_file($runtimePath);
+            if (
+                $expectedHash === ''
+                || $hashNow === false
+                || !hash_equals($expectedHash, strtolower((string)$hashNow))
+            ) {
+                throw new RuntimeException('Target content changed during verification: ' . $item['new_path']);
             }
         }
 
@@ -708,6 +720,673 @@ class MediaRootRelocationService
 
         sort($out, SORT_STRING);
         return $out;
+    }
+
+
+    /**
+     * Resolve read-only a complete external-source relocation without requiring
+     * Identity to provide album_id first.
+     *
+     * This is deliberately fail-closed. File count/filesize are only a cheap
+     * prefilter; verifyCandidateRelocation() remains the authoritative proof
+     * and requires the complete persisted SHA-1 set to match 1:1 while all old
+     * external sources are no longer live.
+     *
+     * This method never writes to the database.
+     *
+     * @return array<string,mixed>
+     */
+    public function resolveCandidateRelocationByFingerprint(
+        string $importRoot,
+        string $candidatePath
+    ): array {
+        $result = [
+            'verified' => false,
+            'ambiguous' => false,
+            'album_id' => null,
+            'reason' => 'no-verified-relocation-match',
+            'candidate_album_ids' => [],
+            'verified_album_ids' => [],
+        ];
+
+        $importReal = realpath($importRoot);
+        $candidateReal = realpath($candidatePath);
+
+        if (
+            $importReal === false
+            || $candidateReal === false
+            || !is_dir($candidateReal)
+            || !is_readable($candidateReal)
+        ) {
+            $result['reason'] = 'path-unavailable';
+            return $result;
+        }
+
+        $importReal = rtrim(str_replace('\\\\', '/', $importReal), '/');
+        $candidateReal = rtrim(str_replace('\\\\', '/', $candidateReal), '/');
+
+        if (!$this->within($candidateReal, $importReal)) {
+            $result['reason'] = 'candidate-outside-root';
+            return $result;
+        }
+
+        $files = $this->candidateAudioFiles($candidateReal);
+        $candidateCount = count($files);
+
+        if ($candidateCount <= 0) {
+            $result['reason'] = 'no-audio';
+            return $result;
+        }
+
+        $candidateSizes = [];
+        foreach ($files as $file) {
+            if (!is_file($file) || !is_readable($file)) {
+                $result['reason'] = 'audio-unreadable';
+                return $result;
+            }
+
+            $size = @filesize($file);
+            if ($size === false) {
+                $result['reason'] = 'filesize-unavailable';
+                return $result;
+            }
+
+            $candidateSizes[] = (int)$size;
+        }
+        sort($candidateSizes, SORT_NUMERIC);
+
+        $albumStmt = $this->db->query(
+            "SELECT album_id, COUNT(*) AS audio_files\n"
+            . "FROM audio_files\n"
+            . "WHERE storage_type = 'external'\n"
+            . "  AND source_path IS NOT NULL\n"
+            . "  AND source_path <> ''\n"
+            . "GROUP BY album_id\n"
+            . "HAVING COUNT(*) = " . (int)$candidateCount . "\n"
+            . "ORDER BY album_id ASC"
+        );
+
+        $albumIds = [];
+        foreach ($albumStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $albumId = (int)($row['album_id'] ?? 0);
+            if ($albumId > 0) {
+                $albumIds[] = $albumId;
+            }
+        }
+
+        if (empty($albumIds)) {
+            $result['reason'] = 'no-file-count-compatible-album';
+            return $result;
+        }
+
+        $sizeStmt = $this->db->prepare(
+            "SELECT filesize\n"
+            . "FROM audio_files\n"
+            . "WHERE album_id = :album_id\n"
+            . "  AND storage_type = 'external'\n"
+            . "  AND source_path IS NOT NULL\n"
+            . "  AND source_path <> ''\n"
+            . "ORDER BY id ASC"
+        );
+
+        $sizeCompatible = [];
+
+        foreach ($albumIds as $albumId) {
+            $sizeStmt->execute([':album_id' => $albumId]);
+            $dbSizes = [];
+            $hasUnknownSize = false;
+
+            foreach ($sizeStmt->fetchAll(PDO::FETCH_COLUMN) as $size) {
+                $size = (int)$size;
+                if ($size <= 0) {
+                    $hasUnknownSize = true;
+                }
+                $dbSizes[] = $size;
+            }
+
+            if (count($dbSizes) !== $candidateCount) {
+                continue;
+            }
+
+            if ($hasUnknownSize) {
+                $sizeCompatible[] = $albumId;
+                continue;
+            }
+
+            sort($dbSizes, SORT_NUMERIC);
+            if ($dbSizes === $candidateSizes) {
+                $sizeCompatible[] = $albumId;
+            }
+        }
+
+        $result['candidate_album_ids'] = $sizeCompatible;
+
+        if (empty($sizeCompatible)) {
+            $result['reason'] = 'filesize-multiset-not-found';
+            return $result;
+        }
+
+        $verified = [];
+
+        foreach ($sizeCompatible as $albumId) {
+            $verification = $this->verifyCandidateRelocation(
+                $importRoot,
+                $candidatePath,
+                $albumId
+            );
+
+            if (!empty($verification['verified'])) {
+                $verified[] = $albumId;
+            }
+        }
+
+        $verified = array_values(array_unique(array_map('intval', $verified)));
+        sort($verified, SORT_NUMERIC);
+        $result['verified_album_ids'] = $verified;
+
+        if (count($verified) > 1) {
+            $result['ambiguous'] = true;
+            $result['reason'] = 'multiple-verified-relocation-matches';
+            return $result;
+        }
+
+        if (count($verified) !== 1) {
+            $result['reason'] = 'no-verified-relocation-match';
+            return $result;
+        }
+
+        $result['verified'] = true;
+        $result['album_id'] = $verified[0];
+        $result['reason'] = 'unique-verified-relocation-by-hash';
+
+        return $result;
+    }
+
+    /**
+     * Verifica read-only che un candidato rappresenti lo spostamento fisico
+     * di TUTTE le sorgenti external di un album esistente.
+     *
+     * Non aggiorna source_path e non modifica il database.
+     *
+     * Regole fail-closed:
+     * - deve esistere almeno una sorgente external persistita;
+     * - nessuna vecchia sorgente deve essere ancora viva;
+     * - il numero dei file correnti deve coincidere con quello persistito;
+     * - ogni sorgente DB deve avere SHA-1 persistito;
+     * - filesize deve coincidere quando presente nel DB;
+     * - ogni SHA-1 deve essere univoco sia nel DB sia nel candidato;
+     * - tutti i fingerprint devono avere una corrispondenza 1:1.
+     *
+     * @return array<string,mixed>
+     */
+    public function verifyCandidateRelocation(
+        string $importRoot,
+        string $candidatePath,
+        int $albumId
+    ): array {
+        $result = [
+            'verified' => false,
+            'reason' => 'unverified',
+            'album_id' => $albumId > 0 ? $albumId : null,
+            'expected_files' => 0,
+            'candidate_files' => 0,
+            'verified_files' => 0,
+            'verified_hashes' => 0,
+            'mapping' => [],
+        ];
+
+        if ($albumId <= 0) {
+            $result['reason'] = 'invalid-album-id';
+            return $result;
+        }
+
+        $importReal = realpath($importRoot);
+        $candidateReal = realpath($candidatePath);
+
+        if (
+            $importReal === false
+            || $candidateReal === false
+            || !is_dir($candidateReal)
+            || !is_readable($candidateReal)
+        ) {
+            $result['reason'] = 'path-unavailable';
+            return $result;
+        }
+
+        $importReal = rtrim(str_replace('\\', '/', $importReal), '/');
+        $candidateReal = rtrim(str_replace('\\', '/', $candidateReal), '/');
+
+        if (!$this->within($candidateReal, $importReal)) {
+            $result['reason'] = 'candidate-outside-root';
+            return $result;
+        }
+
+        $files = $this->candidateAudioFiles($candidateReal);
+        $result['candidate_files'] = count($files);
+
+        if (empty($files)) {
+            $result['reason'] = 'no-audio';
+            return $result;
+        }
+
+        $stmt = $this->db->prepare("
+            SELECT id, track_id, source_path, source_hash, filesize
+            FROM audio_files
+            WHERE album_id = :album_id
+              AND storage_type = 'external'
+              AND source_path IS NOT NULL
+              AND source_path <> ''
+            ORDER BY id ASC
+        ");
+        $stmt->execute([':album_id' => $albumId]);
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $result['expected_files'] = count($rows);
+
+        if (empty($rows)) {
+            $result['reason'] = 'no-persisted-external-sources';
+            return $result;
+        }
+
+        if (count($rows) !== count($files)) {
+            $result['reason'] = 'file-count-differs';
+            return $result;
+        }
+
+        /*
+         * Una relocation di questo candidato e' ammessa soltanto quando le
+         * sorgenti persistite non sono piu' raggiungibili. Se anche una sola
+         * vecchia sorgente e' ancora viva, siamo davanti a una seconda copia
+         * o a un source set differente, non a un move dimostrato.
+         */
+        foreach ($rows as $row) {
+            $oldPath = $this->normalizeAbsolutePath(
+                (string)($row['source_path'] ?? '')
+            );
+
+            if ($oldPath === '') {
+                $result['reason'] = 'persisted-source-path-invalid';
+                return $result;
+            }
+
+            $runtimeOldPath = $this->runtimePath($oldPath);
+
+            if (
+                $runtimeOldPath !== ''
+                && is_file($runtimeOldPath)
+                && is_readable($runtimeOldPath)
+            ) {
+                $result['reason'] = 'old-source-still-live';
+                return $result;
+            }
+        }
+
+        /*
+         * Costruisce l'insieme dei fingerprint DB.
+         *
+         * Per uno spostamento arbitrario il solo filename non e' autoritativo.
+         * SHA-1 e' la prova di contenuto gia' usata dal relocation service.
+         *
+         * Un hash duplicato non permette un mapping 1:1 sicuro tra le tracce:
+         * in quel caso la classificazione deve fallire chiusa.
+         */
+        $dbByHash = [];
+
+        foreach ($rows as $row) {
+            $hash = strtolower(trim((string)($row['source_hash'] ?? '')));
+
+            if ($hash === '') {
+                $result['reason'] = 'persisted-hash-unavailable';
+                return $result;
+            }
+
+            if (isset($dbByHash[$hash])) {
+                $result['reason'] = 'persisted-hash-ambiguous';
+                return $result;
+            }
+
+            $dbByHash[$hash] = [
+                'id' => (int)($row['id'] ?? 0),
+                'track_id' => (int)($row['track_id'] ?? 0),
+                'old_path' => $this->normalizeAbsolutePath(
+                    (string)($row['source_path'] ?? '')
+                ),
+                'source_hash' => $hash,
+                'filesize' => (int)($row['filesize'] ?? 0),
+            ];
+        }
+
+        $candidateByHash = [];
+
+        foreach ($files as $file) {
+            if (!is_file($file) || !is_readable($file)) {
+                $result['reason'] = 'audio-unreadable';
+                return $result;
+            }
+
+            $size = @filesize($file);
+            if ($size === false) {
+                $result['reason'] = 'filesize-unavailable';
+                return $result;
+            }
+            $size = (int)$size;
+
+            /*
+             * Prima dello SHA-1 possiamo scartare file la cui dimensione non
+             * compare tra quelle persistite, quando tali size sono note.
+             * Non usiamo comunque la size come prova definitiva.
+             */
+            $possibleBySize = false;
+            $hasUnknownDbSize = false;
+
+            foreach ($dbByHash as $dbRow) {
+                $expectedSize = (int)$dbRow['filesize'];
+
+                if ($expectedSize <= 0) {
+                    $hasUnknownDbSize = true;
+                    continue;
+                }
+
+                if ($expectedSize === $size) {
+                    $possibleBySize = true;
+                    break;
+                }
+            }
+
+            if (!$possibleBySize && !$hasUnknownDbSize) {
+                $result['reason'] = 'filesize-set-differs';
+                return $result;
+            }
+
+            $hash = @sha1_file($file);
+            if ($hash === false || $hash === '') {
+                $result['reason'] = 'candidate-hash-unavailable';
+                return $result;
+            }
+
+            $hash = strtolower((string)$hash);
+
+            if (isset($candidateByHash[$hash])) {
+                $result['reason'] = 'candidate-hash-ambiguous';
+                return $result;
+            }
+
+            $mtime = @filemtime($file);
+
+            $candidateByHash[$hash] = [
+                'path' => str_replace('\\', '/', $file),
+                'filesize' => $size,
+                'source_mtime' => $mtime === false ? null : (int)$mtime,
+            ];
+        }
+
+        if (count($candidateByHash) !== count($dbByHash)) {
+            $result['reason'] = 'fingerprint-set-differs';
+            return $result;
+        }
+
+        foreach ($dbByHash as $hash => $dbRow) {
+            if (!isset($candidateByHash[$hash])) {
+                $result['reason'] = 'content-differs';
+                return $result;
+            }
+
+            $candidateRow = $candidateByHash[$hash];
+            $expectedSize = (int)$dbRow['filesize'];
+
+            if (
+                $expectedSize > 0
+                && (int)$candidateRow['filesize'] !== $expectedSize
+            ) {
+                $result['reason'] = 'filesize-changed';
+                return $result;
+            }
+
+            $newPath = $this->dbPath((string)$candidateRow['path']);
+            if ($newPath === '') {
+                $result['reason'] = 'candidate-db-path-unavailable';
+                return $result;
+            }
+
+            $result['mapping'][] = [
+                'id' => (int)$dbRow['id'],
+                'track_id' => (int)$dbRow['track_id'],
+                'old_path' => (string)$dbRow['old_path'],
+                'new_path' => $newPath,
+                'runtime_path' => (string)$candidateRow['path'],
+                'source_hash' => $hash,
+                'filesize' => (int)$candidateRow['filesize'],
+                'source_mtime' => $candidateRow['source_mtime'],
+            ];
+
+            $result['verified_files']++;
+            $result['verified_hashes']++;
+        }
+
+        if (
+            $result['verified_files'] !== $result['expected_files']
+            || $result['verified_hashes'] !== $result['expected_files']
+        ) {
+            $result['reason'] = 'verification-incomplete';
+            return $result;
+        }
+
+        $result['verified'] = true;
+        $result['reason'] = 'all-external-sources-relocated-by-hash';
+
+        return $result;
+    }
+
+    /**
+     * Applica una relocation gia' dimostrabile per contenuto.
+     *
+     * La verifica viene rieseguita immediatamente prima della scrittura: un
+     * MOVED non puo' quindi trasformarsi in un UPDATE basato su una decisione
+     * vecchia. Vengono aggiornate esclusivamente righe external dello stesso
+     * album; managed, track binding e source_hash restano invariati.
+     *
+     * @return array<string,mixed>
+     */
+    public function applyCandidateRelocation(
+        string $importRoot,
+        string $candidatePath,
+        int $albumId
+    ): array {
+        if ($this->db->inTransaction()) {
+            throw new RuntimeException(
+                'Candidate relocation requires no active transaction.'
+            );
+        }
+
+        $verification = $this->verifyCandidateRelocation(
+            $importRoot,
+            $candidatePath,
+            $albumId
+        );
+
+        if (empty($verification['verified'])) {
+            throw new RuntimeException(
+                'Candidate relocation verification failed: '
+                . (string)($verification['reason'] ?? 'unknown')
+            );
+        }
+
+        $mapping = isset($verification['mapping'])
+            && is_array($verification['mapping'])
+                ? $verification['mapping']
+                : [];
+
+        if (
+            empty($mapping)
+            || count($mapping) !== (int)($verification['expected_files'] ?? 0)
+        ) {
+            throw new RuntimeException('Candidate relocation mapping incomplete.');
+        }
+
+        /*
+         * TOCTOU guard: il contenuto deve essere ancora esattamente quello
+         * verificato prima di aprire la transazione DB.
+         */
+        foreach ($mapping as $item) {
+            $runtimePath = (string)($item['runtime_path'] ?? '');
+            $expectedHash = strtolower((string)($item['source_hash'] ?? ''));
+            $expectedSize = (int)($item['filesize'] ?? 0);
+
+            if (
+                $runtimePath === ''
+                || !is_file($runtimePath)
+                || !is_readable($runtimePath)
+            ) {
+                throw new RuntimeException(
+                    'Relocation target disappeared: '
+                    . (string)($item['new_path'] ?? '')
+                );
+            }
+
+            $sizeNow = @filesize($runtimePath);
+            if ($sizeNow === false || (int)$sizeNow !== $expectedSize) {
+                throw new RuntimeException(
+                    'Relocation target size changed: '
+                    . (string)($item['new_path'] ?? '')
+                );
+            }
+
+            $hashNow = @sha1_file($runtimePath);
+            if (
+                $hashNow === false
+                || $expectedHash === ''
+                || !hash_equals($expectedHash, strtolower((string)$hashNow))
+            ) {
+                throw new RuntimeException(
+                    'Relocation target content changed: '
+                    . (string)($item['new_path'] ?? '')
+                );
+            }
+        }
+
+        $this->db->beginTransaction();
+
+        try {
+            $lockRow = $this->db->prepare("
+                SELECT id, album_id, source_path, source_hash, filesize
+                FROM audio_files
+                WHERE id = :id
+                  AND album_id = :album_id
+                  AND storage_type = 'external'
+                FOR UPDATE
+            ");
+
+            $collision = $this->db->prepare("
+                SELECT id
+                FROM audio_files
+                WHERE storage_type = 'external'
+                  AND BINARY source_path = BINARY :new_path
+                  AND id <> :id
+                LIMIT 1
+                FOR UPDATE
+            ");
+
+            $update = $this->db->prepare("
+                UPDATE audio_files
+                SET source_path = :new_path,
+                    source_mtime = :source_mtime,
+                    filesize = :filesize
+                WHERE id = :id
+                  AND album_id = :album_id
+                  AND storage_type = 'external'
+                  AND BINARY source_path = BINARY :old_path
+            ");
+
+            $updated = 0;
+
+            foreach ($mapping as $item) {
+                $id = (int)($item['id'] ?? 0);
+                $oldPath = (string)($item['old_path'] ?? '');
+                $newPath = (string)($item['new_path'] ?? '');
+                $expectedHash = strtolower(
+                    (string)($item['source_hash'] ?? '')
+                );
+
+                if ($id <= 0 || $oldPath === '' || $newPath === '') {
+                    throw new RuntimeException(
+                        'Invalid candidate relocation mapping entry.'
+                    );
+                }
+
+                $lockRow->execute([
+                    ':id' => $id,
+                    ':album_id' => $albumId,
+                ]);
+                $current = $lockRow->fetch(PDO::FETCH_ASSOC);
+
+                if (!is_array($current)) {
+                    throw new RuntimeException(
+                        'Relocation DB row disappeared: audio id=' . $id
+                    );
+                }
+
+                if ((string)($current['source_path'] ?? '') !== $oldPath) {
+                    throw new RuntimeException(
+                        'Relocation DB source changed: audio id=' . $id
+                    );
+                }
+
+                $currentHash = strtolower(
+                    trim((string)($current['source_hash'] ?? ''))
+                );
+                if (
+                    $currentHash === ''
+                    || !hash_equals($expectedHash, $currentHash)
+                ) {
+                    throw new RuntimeException(
+                        'Relocation DB hash changed: audio id=' . $id
+                    );
+                }
+
+                $collision->execute([
+                    ':new_path' => $newPath,
+                    ':id' => $id,
+                ]);
+                if ($collision->fetchColumn() !== false) {
+                    throw new RuntimeException(
+                        'Relocation target source_path already indexed: ' . $newPath
+                    );
+                }
+
+                $update->execute([
+                    ':new_path' => $newPath,
+                    ':source_mtime' => $item['source_mtime'],
+                    ':filesize' => (int)$item['filesize'],
+                    ':id' => $id,
+                    ':album_id' => $albumId,
+                    ':old_path' => $oldPath,
+                ]);
+
+                if ($update->rowCount() !== 1) {
+                    throw new RuntimeException(
+                        'Relocation DB guard lost: audio id=' . $id
+                    );
+                }
+
+                $updated++;
+            }
+
+            $this->db->commit();
+
+            return [
+                'status' => 'applied',
+                'album_id' => $albumId,
+                'updated_files' => $updated,
+                'verified_hashes' => (int)(
+                    $verification['verified_hashes'] ?? 0
+                ),
+            ];
+        } catch (Throwable $e) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $e;
+        }
     }
 
     /**

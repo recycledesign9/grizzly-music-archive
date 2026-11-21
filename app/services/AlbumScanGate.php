@@ -5,7 +5,7 @@
  *
  * Canonical read-only orchestration gate:
  *
- *   Readiness -> Identity -> Action -> AlbumImportPlan
+ *   Readiness/Evidence -> resolved authority -> Action -> AlbumImportPlan
  *
  * This service NEVER writes to the database or filesystem and NEVER executes
  * an import. It exists so the worker does not duplicate the decision table
@@ -224,6 +224,90 @@ final class AlbumScanGate
             'readiness_status' => 'READY',
             'identity' => $identity,
             'plan' => null,
+        ];
+    }
+
+    /**
+     * Build a RECONCILE plan whose target is already authoritative through
+     * ExternalSourceOwnershipService. Identity is intentionally NOT_RUN.
+     *
+     * @return array<string,mixed>
+     */
+    public function fromResolvedOwnership(
+        string $importRoot,
+        array $candidate,
+        int $targetAlbumId,
+        array $ownership
+    ): array {
+        $status = strtoupper(trim((string)($candidate['status'] ?? '')));
+
+        if ($status !== 'READY') {
+            if ($status === 'PENDING') {
+                return $this->nonExecutable(
+                    'NONE',
+                    'readiness-pending',
+                    $candidate
+                );
+            }
+
+            if ($status === 'INCOMPLETE') {
+                return $this->nonExecutable(
+                    'NONE',
+                    'readiness-incomplete',
+                    $candidate
+                );
+            }
+
+            if ($status === 'AMBIGUOUS') {
+                return $this->nonExecutable(
+                    'REVIEW',
+                    'readiness-ambiguous',
+                    $candidate
+                );
+            }
+
+            return $this->nonExecutable(
+                'REVIEW',
+                'unknown-readiness-status',
+                $candidate
+            );
+        }
+
+        if ($targetAlbumId <= 0) {
+            return [
+                'action' => 'REVIEW',
+                'reason' => 'ownership-target-invalid',
+                'readiness_status' => 'READY',
+                'identity' => [
+                    'decision' => 'NOT_RUN',
+                    'album_id' => null,
+                    'match_source' => null,
+                    'reasons' => [],
+                ],
+                'ownership' => $ownership,
+                'plan' => null,
+            ];
+        }
+
+        $plan = AlbumImportPlan::fromOwnershipDecision(
+            $importRoot,
+            $candidate,
+            $targetAlbumId,
+            $ownership
+        );
+
+        return [
+            'action' => 'RECONCILE',
+            'reason' => 'ownership-owned-partial',
+            'readiness_status' => 'READY',
+            'identity' => [
+                'decision' => 'NOT_RUN',
+                'album_id' => null,
+                'match_source' => null,
+                'reasons' => [],
+            ],
+            'ownership' => $ownership,
+            'plan' => $plan,
         ];
     }
 

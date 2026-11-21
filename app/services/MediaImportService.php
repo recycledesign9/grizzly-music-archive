@@ -244,6 +244,453 @@ class MediaImportService
         return $this->discoverAlbums($root, $strictFilesystem);
     }
 
+
+    /**
+     * Discovery + candidate signatures from one coherent filesystem observation.
+     *
+     * This is an optimization-only API for the scanner worker:
+     * - candidate grouping preserves discoverAlbumCandidates() semantics/order;
+     * - signatures preserve candidateSnapshot()/albumSnapshot() semantics;
+     * - configured excluded subtrees remain pruned from this traversal;
+     * - when an excluded subtree could affect a historical recursive snapshot,
+     *   that candidate is returned in signature_fallback so the worker can use
+     *   the legacy candidateSnapshot() path for exact compatibility.
+     *
+     * No metadata/tag parsing and no import writes happen here.
+     *
+     * @return array{
+     *   candidates:array<string,array<int,array{dir:string,disc:int}>>,
+     *   signatures:array<string,?string>,
+     *   signature_fallback:array<string,bool>
+     * }
+     */
+    public function discoverAlbumCandidatesWithSignatures(
+        string $importDir,
+        bool $strictFilesystem = false
+    ): array {
+        $real = realpath($importDir);
+        if ($real === false || !is_dir($real) || !is_readable($real)) {
+            if ($strictFilesystem) {
+                throw new RuntimeException(
+                    'Discovery root missing or unreadable: ' . $importDir
+                );
+            }
+
+            return [
+                'candidates' => [],
+                'signatures' => [],
+                'signature_fallback' => [],
+            ];
+        }
+
+        $root = rtrim(str_replace('\\', '/', $real), '/');
+
+        if (!class_exists('MediaScanExclusionService')) {
+            require_once __DIR__ . '/MediaScanExclusionService.php';
+        }
+
+        $exclusionService = new MediaScanExclusionService($this->db);
+        $excludedRuntimeRoots = $exclusionService->runtimeExcludedRoots($root);
+
+        if (
+            MediaScanExclusionService::pathInAnySubtree(
+                $root,
+                $excludedRuntimeRoots
+            )
+        ) {
+            return [
+                'candidates' => [],
+                'signatures' => [],
+                'signature_fallback' => [],
+            ];
+        }
+
+        $normalize = static function (string $path): string {
+            return rtrim(str_replace('\\', '/', $path), '/');
+        };
+
+        $within = static function (string $path, string $base) use ($normalize): bool {
+            $path = $normalize($path);
+            $base = $normalize($base);
+
+            if ($path === '' || $base === '') {
+                return false;
+            }
+
+            return $path === $base
+                || strpos($path, $base . '/') === 0;
+        };
+
+        $snapshotExt = array_values(
+            array_unique(array_merge(self::AUDIO_EXT, self::IMAGE_EXT))
+        );
+
+        // allDirectories() exposes directories in discovery order when they are
+        // first encountered, not when later popped from its LIFO stack.
+        // Preserve that exact order so multidisc parts are not reordered.
+        $directoryOrder = [$root];
+
+        /** @var array<string,bool> */
+        $directAudio = [];
+
+        /**
+         * Non-link files relevant to candidateSnapshot().
+         *
+         * @var array<int,array{path:string,size:?int,mtime:?int,ctime:?int}>
+         */
+        $snapshotFiles = [];
+
+        /** @var array<string,bool> */
+        $unreadableSnapshotDirs = [];
+
+        /**
+         * Excluded roots are deliberately NOT entered. If one lies inside a
+         * candidate area historically traversed by candidateSnapshot(), that
+         * candidate uses the legacy snapshot fallback.
+         *
+         * @var array<string,bool>
+         */
+        $skippedExcludedDirs = [];
+
+        $stack = [
+            [
+                'dir' => $root,
+                'discovery_visible' => true,
+            ],
+        ];
+
+        while (!empty($stack)) {
+            $item = array_pop($stack);
+
+            $dir = $normalize((string)$item['dir']);
+            $discoveryVisible = (bool)$item['discovery_visible'];
+
+            $entries = @scandir($dir);
+            if ($entries === false) {
+                if ($strictFilesystem && $discoveryVisible) {
+                    throw new RuntimeException(
+                        'Discovery cannot read directory: ' . $dir
+                    );
+                }
+
+                // Hidden/non-discovery descendants can still belong to the
+                // historical recursive snapshot. Remember the failure so an
+                // affected candidate gets the same empty signature.
+                $unreadableSnapshotDirs[$dir] = true;
+                continue;
+            }
+
+            foreach ($entries as $entry) {
+                if ($entry === '.' || $entry === '..') {
+                    continue;
+                }
+
+                $path = $dir . '/' . $entry;
+                $hidden = $entry !== '' && $entry[0] === '.';
+                $isLink = @is_link($path);
+
+                if (!$isLink && @is_dir($path)) {
+                    $child = $normalize($path);
+
+                    if (
+                        MediaScanExclusionService::pathInAnySubtree(
+                            $child,
+                            $excludedRuntimeRoots
+                        )
+                    ) {
+                        $skippedExcludedDirs[$child] = true;
+                        continue;
+                    }
+
+                    $childDiscoveryVisible =
+                        $discoveryVisible && !$hidden;
+
+                    if ($childDiscoveryVisible) {
+                        $directoryOrder[] = $child;
+                    }
+
+                    // Hidden directories are not discovery candidates, but
+                    // albumSnapshot()/candidateSnapshot() historically recurse
+                    // through them. Traverse them snapshot-only.
+                    $stack[] = [
+                        'dir' => $child,
+                        'discovery_visible' => $childDiscoveryVisible,
+                    ];
+
+                    continue;
+                }
+
+                // listByExt() uses is_file() and does not reject symlink files.
+                // Preserve that for discovery candidate detection.
+                if (!@is_file($path)) {
+                    continue;
+                }
+
+                $name = basename($path);
+                $ext = strtolower(
+                    pathinfo($name, PATHINFO_EXTENSION)
+                );
+
+                if (
+                    $discoveryVisible
+                    && !$hidden
+                    && in_array($ext, self::AUDIO_EXT, true)
+                ) {
+                    $directAudio[$dir] = true;
+                }
+
+                // Snapshot code rejects symlink files, hidden files and
+                // extensions unrelated to scanner import/cover state.
+                if (
+                    $isLink
+                    || $hidden
+                    || !in_array($ext, $snapshotExt, true)
+                ) {
+                    continue;
+                }
+
+                $size = @filesize($path);
+                $mtime = @filemtime($path);
+                $ctime = @filectime($path);
+
+                $snapshotFiles[] = [
+                    'path' => str_replace('\\', '/', $path),
+                    'size' => $size === false ? null : (int)$size,
+                    'mtime' => $mtime === false ? null : (int)$mtime,
+                    'ctime' => $ctime === false ? null : (int)$ctime,
+                ];
+            }
+        }
+
+        // Reproduce discoverAlbums() candidate order and grouping exactly.
+        $groups = [];
+
+        foreach ($directoryOrder as $dir) {
+            if (!isset($directAudio[$dir])) {
+                continue;
+            }
+
+            $disc = $this->discNumberFromName(basename($dir));
+
+            if ($disc !== null && $dir !== $root) {
+                $key = dirname($dir);
+            } else {
+                $key = $dir;
+                $disc = ($disc === null) ? 1 : $disc;
+            }
+
+            if (
+                $key === ''
+                || strpos($key . '/', $root . '/') !== 0
+            ) {
+                $key = $dir;
+                $disc = 1;
+            }
+
+            if (!isset($groups[$key])) {
+                $groups[$key] = [];
+            }
+
+            $groups[$key][] = [
+                'dir' => $dir,
+                'disc' => ($disc === null ? 1 : $disc),
+            ];
+        }
+
+        ksort($groups);
+
+        $signatures = [];
+        $signatureFallback = [];
+
+        foreach ($groups as $albumKey => $parts) {
+            $base = $normalize((string)$albumKey);
+
+            if ($base === '' || empty($parts)) {
+                $signatures[$albumKey] = '';
+                continue;
+            }
+
+            $normalizedParts = [];
+            $invalidParts = false;
+
+            foreach ($parts as $part) {
+                if (!is_array($part)) {
+                    $invalidParts = true;
+                    break;
+                }
+
+                $partDir = isset($part['dir'])
+                    ? $normalize((string)$part['dir'])
+                    : '';
+
+                if ($partDir === '') {
+                    $invalidParts = true;
+                    break;
+                }
+
+                $normalizedParts[$partDir] = true;
+            }
+
+            if ($invalidParts || empty($normalizedParts)) {
+                $signatures[$albumKey] = '';
+                continue;
+            }
+
+            $standard =
+                count($normalizedParts) === 1
+                && isset($normalizedParts[$base]);
+
+            // Do not read a configured excluded subtree merely to manufacture a
+            // cache signature. Preserve exact historical behavior by requesting
+            // the legacy snapshot only for an affected candidate.
+            foreach (array_keys($skippedExcludedDirs) as $excludedDir) {
+                $affects = false;
+
+                if ($standard) {
+                    $affects =
+                        $excludedDir !== $base
+                        && $within($excludedDir, $base);
+                } else {
+                    foreach (array_keys($normalizedParts) as $partDir) {
+                        // In a mixed parent+CDn candidate, the parent part is
+                        // direct-files-only; its descendants do not affect the
+                        // candidateSnapshot() branch for that part.
+                        if ($partDir === $base) {
+                            continue;
+                        }
+
+                        if (
+                            $excludedDir !== $partDir
+                            && $within($excludedDir, $partDir)
+                        ) {
+                            $affects = true;
+                            break;
+                        }
+                    }
+                }
+
+                if ($affects) {
+                    $signatureFallback[$albumKey] = true;
+                    $signatures[$albumKey] = null;
+                    continue 2;
+                }
+            }
+
+            // Preserve candidateSnapshot() fail-closed behavior for unreadable
+            // snapshot-only descendants.
+            foreach (array_keys($unreadableSnapshotDirs) as $unreadableDir) {
+                $affects = false;
+
+                if ($standard) {
+                    $affects = $within($unreadableDir, $base);
+                } else {
+                    foreach (array_keys($normalizedParts) as $partDir) {
+                        if ($partDir === $base) {
+                            continue;
+                        }
+
+                        if ($within($unreadableDir, $partDir)) {
+                            $affects = true;
+                            break;
+                        }
+                    }
+                }
+
+                if ($affects) {
+                    $signatures[$albumKey] = '';
+                    continue 2;
+                }
+            }
+
+            $rows = [];
+            $seen = [];
+            $snapshotValid = true;
+
+            foreach ($snapshotFiles as $record) {
+                $path = (string)$record['path'];
+                $include = false;
+
+                if ($standard) {
+                    // albumSnapshot(base): recursive entire candidate tree.
+                    $include =
+                        $path !== $base
+                        && $within($path, $base);
+                } else {
+                    foreach (array_keys($normalizedParts) as $partDir) {
+                        if ($partDir === $base) {
+                            // Mixed parent part: only direct files.
+                            if (dirname($path) === $base) {
+                                $include = true;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        // Selected CDn/DiscN part: recursive.
+                        if (
+                            $path !== $partDir
+                            && $within($path, $partDir)
+                        ) {
+                            $include = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!$include) {
+                    continue;
+                }
+
+                if (
+                    $record['size'] === null
+                    || $record['mtime'] === null
+                    || $record['ctime'] === null
+                ) {
+                    $snapshotValid = false;
+                    break;
+                }
+
+                if (isset($seen[$path])) {
+                    continue;
+                }
+                $seen[$path] = true;
+
+                if (
+                    $path === $base
+                    || !$within($path, $base)
+                ) {
+                    $snapshotValid = false;
+                    break;
+                }
+
+                $rel = substr($path, strlen($base) + 1);
+
+                $rows[] =
+                    $rel
+                    . '|'
+                    . (int)$record['size']
+                    . '|'
+                    . (int)$record['mtime']
+                    . '|'
+                    . (int)$record['ctime'];
+            }
+
+            if (!$snapshotValid) {
+                $signatures[$albumKey] = '';
+                continue;
+            }
+
+            sort($rows, SORT_STRING);
+            $signatures[$albumKey] = sha1(implode("\n", $rows));
+        }
+
+        return [
+            'candidates' => $groups,
+            'signatures' => $signatures,
+            'signature_fallback' => $signatureFallback,
+        ];
+    }
+
     /**
      * Esegue un AlbumImportPlan gia' autorizzato senza rifare identity matching.
      *
@@ -496,18 +943,15 @@ class MediaImportService
         $exclusionService = new MediaScanExclusionService($this->db);
         $excludedRuntimeRoots = $exclusionService->runtimeExcludedRoots($importDir);
 
-        $candidates = [];
-        foreach (
-            $this->allDirectories(
-                $importDir,
-                $excludedRuntimeRoots,
-                $strictFilesystem
-            ) as $dir
-        ) {
-            if (count($this->listByExt($dir, self::AUDIO_EXT, $strictFilesystem)) > 0) {
-                $candidates[] = $dir;
-            }
-        }
+        // Single-pass discovery: while each directory is listed to discover
+        // child directories, remember whether it contains direct audio files.
+        // This preserves the historical candidate ordering and grouping while
+        // avoiding a second scandir() of every directory.
+        $candidates = $this->directoriesWithDirectAudio(
+            $importDir,
+            $excludedRuntimeRoots,
+            $strictFilesystem
+        );
 
         $groups = [];
         foreach ($candidates as $dir) {
@@ -534,6 +978,99 @@ class MediaImportService
 
         ksort($groups);
         return $groups;
+    }
+
+    /**
+     * Directory che contengono almeno un file audio DIRETTO.
+     *
+     * Mantiene esattamente l'ordine prodotto storicamente da allDirectories()
+     * filtrato tramite listByExt(): le directory figlie vengono aggiunte a
+     * $orderedDirectories durante la scansione del parent, mentre lo stack
+     * continua a essere LIFO.
+     *
+     * La differenza e' solo operativa: ogni directory viene listata una volta
+     * invece di una volta per scoprire le sottodirectory + una seconda volta
+     * per verificare la presenza di audio.
+     *
+     * I symlink a directory non vengono attraversati. I symlink a file audio
+     * continuano invece a contare come file diretti, come faceva listByExt()
+     * tramite is_file().
+     *
+     * @return array<int,string>
+     */
+    private function directoriesWithDirectAudio(
+        string $root,
+        array $excludedRuntimeRoots = [],
+        bool $strictFilesystem = false
+    ): array
+    {
+        $root = rtrim(str_replace('\\', '/', $root), '/');
+
+        if (MediaScanExclusionService::pathInAnySubtree($root, $excludedRuntimeRoots)) {
+            return [];
+        }
+
+        $orderedDirectories = [$root];
+        $stack = [$root];
+        $hasDirectAudio = [];
+
+        while (!empty($stack)) {
+            $dir = array_pop($stack);
+            $entries = @scandir($dir);
+
+            if ($entries === false) {
+                if ($strictFilesystem) {
+                    throw new RuntimeException(
+                        'Discovery cannot read directory: ' . $dir
+                    );
+                }
+                continue;
+            }
+
+            foreach ($entries as $e) {
+                if ($e === '.' || $e === '..') {
+                    continue;
+                }
+                if ($e !== '' && $e[0] === '.') {
+                    continue;
+                }
+
+                $path = $dir . '/' . $e;
+
+                // Historical traversal rule: directory symlinks are never
+                // followed. Do not apply this shortcut to file symlinks,
+                // because listByExt() historically counted those via is_file().
+                if (!is_link($path) && is_dir($path)) {
+                    $path = rtrim(str_replace('\\', '/', $path), '/');
+
+                    if (MediaScanExclusionService::pathInAnySubtree($path, $excludedRuntimeRoots)) {
+                        continue;
+                    }
+
+                    $orderedDirectories[] = $path;
+                    $stack[] = $path;
+                    continue;
+                }
+
+                if (!is_file($path)) {
+                    continue;
+                }
+
+                $ext = strtolower(pathinfo($e, PATHINFO_EXTENSION));
+                if (in_array($ext, self::AUDIO_EXT, true)) {
+                    $hasDirectAudio[$dir] = true;
+                }
+            }
+        }
+
+        $out = [];
+        foreach ($orderedDirectories as $dir) {
+            if (isset($hasDirectAudio[$dir])) {
+                $out[] = $dir;
+            }
+        }
+
+        return $out;
     }
 
     /**
@@ -2308,6 +2845,14 @@ class MediaImportService
 
         $albumTitle    = trim($albumTitle);
 
+        // Some rips store the complete source filename in TITLE. Normalize only
+        // the strict "Artist - Album - NN - Track" convention; leave every other
+        // tagged title untouched.
+        $compoundTag = $this->compoundTrackLabelParts($tagTitle);
+        if ($compoundTag !== null) {
+            $tagTitle = (string)$compoundTag['title'];
+        }
+
 
         if ($tagTitle === '') {
 
@@ -3166,7 +3711,7 @@ class MediaImportService
             $hasLiveOldSource = false;
 
             foreach ($audioRows as $audioRow) {
-                $oldPath = trim((string)($audioRow['source_path'] ?? ''));
+                $oldPath = (string)($audioRow['source_path'] ?? '');
                 $runtime = $oldPath !== '' ? $this->sourcePathForRuntime($oldPath) : '';
 
                 // Se almeno una vecchia sorgente esiste ancora, potrebbe essere
@@ -3319,7 +3864,7 @@ class MediaImportService
                 continue;
             }
 
-            $oldDbPath = trim((string)($row['source_path'] ?? ''));
+            $oldDbPath = (string)($row['source_path'] ?? '');
             $runtime = $oldDbPath !== '' ? $this->sourcePathForRuntime($oldDbPath) : '';
             if ($runtime !== '' && is_file($runtime) && is_readable($runtime)) {
                 $hasLiveExternal = true;
@@ -3402,7 +3947,7 @@ class MediaImportService
 
             $externalRows[] = $row;
 
-            $oldDbPath = trim((string)($row['source_path'] ?? ''));
+            $oldDbPath = (string)($row['source_path'] ?? '');
             $runtime   = $oldDbPath !== '' ? $this->sourcePathForRuntime($oldDbPath) : '';
 
             if ($runtime !== '' && is_file($runtime) && is_readable($runtime)) {
@@ -3427,7 +3972,7 @@ class MediaImportService
         // Il worker manterra' il nuovo candidato in stato deferred e riprovera'.
         if (!empty($liveRows)) {
             foreach ($liveRows as $row) {
-                $waitPath = trim((string)($row['source_path'] ?? ''));
+                $waitPath = (string)($row['source_path'] ?? '');
                 if ($waitPath !== '') {
                     $deferredSources[] = $waitPath;
                 }
@@ -4776,8 +5321,44 @@ class MediaImportService
         return null;
     }
 
+    /**
+     * Parse only the strict compound scanner convention:
+     * "Artist - Album - 01 - Track title".
+     *
+     * @return array{track:int,title:string}|null
+     */
+    private function compoundTrackLabelParts(string $value): ?array
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+
+        if (!preg_match(
+            '/^.+\s[-–—]\s.+\s[-–—]\s(\d{1,3})\s[-–—]\s(.+)$/u',
+            $value,
+            $m
+        )) {
+            return null;
+        }
+
+        $track = (int)$m[1];
+        $title = trim((string)$m[2]);
+        if ($track <= 0 || $title === '') {
+            return null;
+        }
+
+        return ['track' => $track, 'title' => $title];
+    }
+
     private function trackNumberFromFilename(string $name): ?int
     {
+        $base = (string)pathinfo($name, PATHINFO_FILENAME);
+        $compound = $this->compoundTrackLabelParts($base);
+        if ($compound !== null) {
+            return (int)$compound['track'];
+        }
+
         if (preg_match('/^\s*(\d{1,3})\b/', $name, $m)) {
             return (int)$m[1];
         }
@@ -4786,7 +5367,13 @@ class MediaImportService
 
     private function titleFromFilename(string $name): string
     {
-        $base = pathinfo($name, PATHINFO_FILENAME);
+        $base = (string)pathinfo($name, PATHINFO_FILENAME);
+
+        $compound = $this->compoundTrackLabelParts($base);
+        if ($compound !== null) {
+            return (string)$compound['title'];
+        }
+
         // Togli numero traccia iniziale e separatori: "08 - Titolo", "08. Titolo", "08_Titolo".
         $base = preg_replace('/^\s*\d{1,3}\s*[-_.)\]]*\s*/u', '', $base);
         $base = str_replace('_', ' ', $base);

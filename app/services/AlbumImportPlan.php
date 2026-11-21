@@ -1,19 +1,21 @@
 <?php
 
 /**
- * Immutable execution contract between:
+ * Immutable execution contract between the scanner decision pipeline and
+ * AlbumImportExecutor.
  *
- *   READINESS -> IDENTITY -> DECISION
+ * A plan is executable only when temporal readiness is READY/stable and the
+ * write target has one explicit authority:
  *
- * and the future AlbumImportExecutor.
+ *   IDENTITY  + NEW_RELEASE      -> CREATE
+ *   IDENTITY  + EXACT_EXISTING   -> RECONCILE(target album id)
+ *   OWNERSHIP + OWNED_PARTIAL    -> RECONCILE(target album id)
  *
- * This class performs NO database writes and NO filesystem writes.
- * It accepts only executable decisions:
+ * The ownership path exists so I08 remains true: once active external
+ * ownership already identifies the album, Identity must not be re-run merely
+ * to manufacture an executable plan.
  *
- *   READY + NEW_RELEASE     -> CREATE
- *   READY + EXACT_EXISTING  -> RECONCILE(target album id)
- *
- * REVIEW / NONE / PENDING / INCOMPLETE / AMBIGUOUS are not executable plans.
+ * PHP 7.4 compatible.
  */
 final class AlbumImportPlan implements JsonSerializable
 {
@@ -22,10 +24,15 @@ final class AlbumImportPlan implements JsonSerializable
     public const ACTION_CREATE = 'CREATE';
     public const ACTION_RECONCILE = 'RECONCILE';
 
+    public const AUTHORITY_IDENTITY = 'IDENTITY';
+    public const AUTHORITY_OWNERSHIP = 'OWNERSHIP';
+
+    public const IDENTITY_NOT_RUN = 'NOT_RUN';
     public const IDENTITY_NEW_RELEASE = 'NEW_RELEASE';
     public const IDENTITY_EXACT_EXISTING = 'EXACT_EXISTING';
 
     private string $action;
+    private string $decisionAuthority;
     private string $importRoot;
     private string $candidatePath;
     private array $parts;
@@ -53,16 +60,14 @@ final class AlbumImportPlan implements JsonSerializable
 
     private array $candidateSnapshot;
     private array $identitySnapshot;
+    private array $authoritySnapshot;
 
     private function __construct()
     {
     }
 
     /**
-     * Build a write-authorized import plan from an already resolved decision.
-     *
-     * @throws InvalidArgumentException when the decision is not executable or
-     *                                  the invariants are inconsistent.
+     * Build an executable plan authorized by AlbumIdentityResolver.
      */
     public static function fromResolvedDecision(
         string $action,
@@ -71,15 +76,168 @@ final class AlbumImportPlan implements JsonSerializable
         array $identity
     ): self {
         $action = strtoupper(trim($action));
+        $identityDecision = strtoupper(trim((string)($identity['decision'] ?? '')));
+        $albumId = isset($identity['album_id']) && $identity['album_id'] !== null
+            ? (int)$identity['album_id']
+            : null;
+
+        if ($action === self::ACTION_CREATE) {
+            if ($identityDecision !== self::IDENTITY_NEW_RELEASE) {
+                throw new InvalidArgumentException(
+                    'CREATE requires identity=NEW_RELEASE; got '
+                    . ($identityDecision !== '' ? $identityDecision : '<empty>')
+                );
+            }
+
+            if ($albumId !== null && $albumId > 0) {
+                throw new InvalidArgumentException(
+                    'CREATE must not carry a target album id.'
+                );
+            }
+
+            $albumId = null;
+        } elseif ($action === self::ACTION_RECONCILE) {
+            if ($identityDecision !== self::IDENTITY_EXACT_EXISTING) {
+                throw new InvalidArgumentException(
+                    'Identity-authorized RECONCILE requires identity=EXACT_EXISTING; got '
+                    . ($identityDecision !== '' ? $identityDecision : '<empty>')
+                );
+            }
+
+            if ($albumId === null || $albumId <= 0) {
+                throw new InvalidArgumentException(
+                    'RECONCILE requires a positive target album id.'
+                );
+            }
+        } else {
+            throw new InvalidArgumentException(
+                'Non-executable action: ' . ($action !== '' ? $action : '<empty>')
+            );
+        }
+
+        return self::build(
+            $action,
+            self::AUTHORITY_IDENTITY,
+            $importRoot,
+            $candidate,
+            $identity,
+            $albumId,
+            [
+                'type' => self::AUTHORITY_IDENTITY,
+                'decision' => $identityDecision,
+                'album_id' => $albumId,
+                'match_source' => $identity['match_source'] ?? null,
+            ]
+        );
+    }
+
+    /**
+     * Build an executable RECONCILE plan when ExternalSourceOwnershipService
+     * has already identified the target album authoritatively.
+     *
+     * Identity is intentionally NOT_RUN here.
+     */
+    public static function fromOwnershipDecision(
+        string $importRoot,
+        array $candidate,
+        int $targetAlbumId,
+        array $ownership
+    ): self {
+        if ($targetAlbumId <= 0) {
+            throw new InvalidArgumentException(
+                'Ownership-authorized RECONCILE requires a positive target album id.'
+            );
+        }
+
+        $ownershipState = strtoupper(trim((string)($ownership['state'] ?? '')));
+        if ($ownershipState !== 'OWNED_PARTIAL') {
+            throw new InvalidArgumentException(
+                'Ownership-authorized RECONCILE requires ownership=OWNED_PARTIAL; got '
+                . ($ownershipState !== '' ? $ownershipState : '<empty>')
+            );
+        }
+
+        $ownedAlbumId = isset($ownership['album_id']) && $ownership['album_id'] !== null
+            ? (int)$ownership['album_id']
+            : null;
+
+        if ($ownedAlbumId === null || $ownedAlbumId !== $targetAlbumId) {
+            throw new InvalidArgumentException(
+                'Ownership target mismatch: expected '
+                . $targetAlbumId
+                . ' got '
+                . ($ownedAlbumId !== null ? $ownedAlbumId : 'NULL')
+            );
+        }
+
+        $identity = [
+            'decision' => self::IDENTITY_NOT_RUN,
+            'album_id' => null,
+            'match_source' => null,
+            'reasons' => [],
+        ];
+
+        return self::build(
+            self::ACTION_RECONCILE,
+            self::AUTHORITY_OWNERSHIP,
+            $importRoot,
+            $candidate,
+            $identity,
+            $targetAlbumId,
+            [
+                'type' => self::AUTHORITY_OWNERSHIP,
+                'state' => $ownershipState,
+                'album_id' => $targetAlbumId,
+                'reason' => (string)($ownership['reason'] ?? ''),
+            ]
+        );
+    }
+
+    /**
+     * Shared constructor. Every executable plan must carry the exact persistent
+     * candidate signature and immutable evidence used to authorize the write.
+     */
+    private static function build(
+        string $action,
+        string $decisionAuthority,
+        string $importRoot,
+        array $candidate,
+        array $identity,
+        ?int $targetAlbumId,
+        array $authoritySnapshot
+    ): self {
+        $action = strtoupper(trim($action));
+        $decisionAuthority = strtoupper(trim($decisionAuthority));
         $importRoot = self::normalizePath($importRoot);
 
         if ($importRoot === '') {
             throw new InvalidArgumentException('Import root is empty.');
         }
 
-        if ($action !== self::ACTION_CREATE && $action !== self::ACTION_RECONCILE) {
+        if (!in_array($action, [self::ACTION_CREATE, self::ACTION_RECONCILE], true)) {
             throw new InvalidArgumentException(
                 'Non-executable action: ' . ($action !== '' ? $action : '<empty>')
+            );
+        }
+
+        if (!in_array(
+            $decisionAuthority,
+            [self::AUTHORITY_IDENTITY, self::AUTHORITY_OWNERSHIP],
+            true
+        )) {
+            throw new InvalidArgumentException(
+                'Invalid decision authority: '
+                . ($decisionAuthority !== '' ? $decisionAuthority : '<empty>')
+            );
+        }
+
+        if ($action === self::ACTION_CREATE && $decisionAuthority !== self::AUTHORITY_IDENTITY) {
+            throw new InvalidArgumentException('CREATE must be authorized by Identity.');
+        }
+
+        if ($action === self::ACTION_RECONCILE && ($targetAlbumId === null || $targetAlbumId <= 0)) {
+            throw new InvalidArgumentException(
+                'RECONCILE requires a positive target album id.'
             );
         }
 
@@ -89,7 +247,8 @@ final class AlbumImportPlan implements JsonSerializable
 
         if ($readinessStatus !== 'READY') {
             throw new InvalidArgumentException(
-                'Executable plan requires readiness=READY; got ' . ($readinessStatus ?: '<empty>')
+                'Executable plan requires readiness=READY; got '
+                . ($readinessStatus !== '' ? $readinessStatus : '<empty>')
             );
         }
 
@@ -136,55 +295,54 @@ final class AlbumImportPlan implements JsonSerializable
         }
 
         $identityDecision = strtoupper(trim((string)($identity['decision'] ?? '')));
-        $albumId = isset($identity['album_id']) && $identity['album_id'] !== null
-            ? (int)$identity['album_id']
-            : null;
 
-        if ($action === self::ACTION_CREATE) {
-            if ($identityDecision !== self::IDENTITY_NEW_RELEASE) {
+        if ($decisionAuthority === self::AUTHORITY_IDENTITY) {
+            if (
+                $action === self::ACTION_CREATE
+                && $identityDecision !== self::IDENTITY_NEW_RELEASE
+            ) {
                 throw new InvalidArgumentException(
-                    'CREATE requires identity=NEW_RELEASE; got '
-                    . ($identityDecision ?: '<empty>')
+                    'CREATE requires identity=NEW_RELEASE.'
                 );
             }
 
-            if ($albumId !== null && $albumId > 0) {
+            if (
+                $action === self::ACTION_RECONCILE
+                && $identityDecision !== self::IDENTITY_EXACT_EXISTING
+            ) {
                 throw new InvalidArgumentException(
-                    'CREATE must not carry a target album id.'
+                    'Identity-authorized RECONCILE requires identity=EXACT_EXISTING.'
                 );
             }
-
-            $albumId = null;
+        } elseif ($identityDecision !== self::IDENTITY_NOT_RUN) {
+            throw new InvalidArgumentException(
+                'Ownership-authorized RECONCILE requires identity=NOT_RUN.'
+            );
         }
 
-        if ($action === self::ACTION_RECONCILE) {
-            if ($identityDecision !== self::IDENTITY_EXACT_EXISTING) {
-                throw new InvalidArgumentException(
-                    'RECONCILE requires identity=EXACT_EXISTING; got '
-                    . ($identityDecision ?: '<empty>')
-                );
-            }
+        $candidateSignature = trim((string)(
+            $candidate['candidate_signature']
+            ?? $candidate['signature']
+            ?? ''
+        ));
 
-            if ($albumId === null || $albumId <= 0) {
-                throw new InvalidArgumentException(
-                    'RECONCILE requires a positive target album id.'
-                );
-            }
+        if ($candidateSignature === '') {
+            throw new InvalidArgumentException(
+                'Executable plan requires candidate_signature.'
+            );
         }
 
         $plan = new self();
-
         $plan->action = $action;
+        $plan->decisionAuthority = $decisionAuthority;
         $plan->importRoot = $importRoot;
         $plan->candidatePath = $candidatePath;
         $plan->parts = $parts;
-
         $plan->readinessStatus = $readinessStatus;
         $plan->evidenceStatus = $evidenceStatus !== '' ? $evidenceStatus : 'READY';
         $plan->stable = $stable;
-
         $plan->identityDecision = $identityDecision;
-        $plan->targetAlbumId = $albumId;
+        $plan->targetAlbumId = $targetAlbumId;
 
         $matchSource = trim((string)($identity['match_source'] ?? ''));
         $plan->matchSource = $matchSource !== '' ? $matchSource : null;
@@ -214,37 +372,22 @@ final class AlbumImportPlan implements JsonSerializable
             ?? ''
         ));
         $plan->candidateKey = $candidateKey !== '' ? $candidateKey : null;
-
-        // AlbumReadinessService v4.1 exposes the persistent fingerprint as
-        // `candidate_signature`. Keep `signature` only as a compatibility
-        // fallback for synthetic/older fixtures.
-        $candidateSignature = trim((string)(
-            $candidate['candidate_signature']
-            ?? $candidate['signature']
-            ?? ''
-        ));
-
-        if ($candidateSignature === '') {
-            throw new InvalidArgumentException(
-                'Executable plan requires candidate_signature.'
-            );
-        }
-
         $plan->candidateSignature = $candidateSignature;
 
-        // Preserve the exact evidence used to authorize the future write.
-        // The executor must not run identity matching again.
         $plan->candidateSnapshot = $candidate;
         $plan->candidateSnapshot['path'] = $candidatePath;
         $plan->candidateSnapshot['parts'] = $parts;
         $plan->identitySnapshot = $identity;
+        $plan->authoritySnapshot = $authoritySnapshot;
 
         $plan->snapshotHash = self::hashSnapshot([
             'version' => self::VERSION,
             'action' => $plan->action,
+            'decision_authority' => $plan->decisionAuthority,
             'import_root' => $plan->importRoot,
             'candidate' => $plan->candidateSnapshot,
             'identity' => $plan->identitySnapshot,
+            'authority' => $plan->authoritySnapshot,
             'target_album_id' => $plan->targetAlbumId,
         ]);
 
@@ -254,6 +397,11 @@ final class AlbumImportPlan implements JsonSerializable
     public function action(): string
     {
         return $this->action;
+    }
+
+    public function decisionAuthority(): string
+    {
+        return $this->decisionAuthority;
     }
 
     public function importRoot(): string
@@ -296,6 +444,11 @@ final class AlbumImportPlan implements JsonSerializable
         return $this->identitySnapshot;
     }
 
+    public function authoritySnapshot(): array
+    {
+        return $this->authoritySnapshot;
+    }
+
     public function snapshotHash(): string
     {
         return $this->snapshotHash;
@@ -306,6 +459,7 @@ final class AlbumImportPlan implements JsonSerializable
         return [
             'version' => self::VERSION,
             'action' => $this->action,
+            'decision_authority' => $this->decisionAuthority,
             'import_root' => $this->importRoot,
             'candidate_path' => $this->candidatePath,
             'parts' => $this->parts,
@@ -326,6 +480,8 @@ final class AlbumImportPlan implements JsonSerializable
                 'match_source' => $this->matchSource,
                 'reasons' => array_values((array)($this->identitySnapshot['reasons'] ?? [])),
             ],
+
+            'authority' => $this->authoritySnapshot,
 
             'metadata' => [
                 'artist' => $this->artist,

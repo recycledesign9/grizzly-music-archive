@@ -254,6 +254,19 @@ class AlbumReadinessService
             $metadataRows[] = $this->analyzeAudio((string)$row['path'], (int)$row['disc']);
         }
 
+        // Temporal stability must be recoverable from the filesystem itself.
+        // Persistent state strengthens the observation but is never the only
+        // authority: deleting/recreating readiness state must not turn an old,
+        // unchanged candidate into a semantically new one.
+        $mtimeStableFor = $latestMtime > 0
+            ? max(0, time() - $latestMtime)
+            : 0;
+
+        $mtimeStable = empty($unreadable)
+            && empty($tempFiles)
+            && $latestMtime > 0
+            && $mtimeStableFor >= $stableSeconds;
+
         if ($this->stateRepository !== null) {
             $signatureInfo = $this->buildPersistentSignature(
                 $importRoot,
@@ -277,20 +290,29 @@ class AlbumReadinessService
             $signatureFirstSeenAt = (int)$observation['first_seen_at'];
             $signatureLastSeenAt = (int)$observation['last_seen_at'];
             $signatureLastChangedAt = (int)$observation['last_changed_at'];
-            $stableFor = (int)$observation['stable_for'];
+
+            $stateStableFor = (int)$observation['stable_for'];
+            $stateStable = !empty($observation['stable']);
+
+            /*
+             * When persistent observation state is available, temporal
+             * stability belongs exclusively to the candidate signature.
+             *
+             * A file may appear in the watched folder with an old preserved
+             * mtime (for example after Soulseek/rsync/cp -p). Its age must not
+             * bypass the first-observation/change guard.
+             */
+            $stableFor = $stateStableFor;
 
             $stable = empty($unreadable)
                 && empty($tempFiles)
-                && !empty($observation['stable']);
+                && $stateStable;
 
             $stabilityBasis = 'persistent-signature-v1';
         } else {
-            $stableFor = $latestMtime > 0 ? max(0, time() - $latestMtime) : 0;
-
-            $stable = empty($unreadable)
-                && empty($tempFiles)
-                && $latestMtime > 0
-                && $stableFor >= $stableSeconds;
+            $stableFor = $mtimeStableFor;
+            $stable = $mtimeStable;
+            $stabilityBasis = 'mtime-age-shadow-proxy';
         }
 
         $identity = $this->candidateIdentity($albumKey, $metadataRows);
@@ -383,20 +405,33 @@ class AlbumReadinessService
             }
         } elseif ($localExpected !== null && $localExpected > 0) {
             $localTracklistExact = !empty($localEvidence['tracklist_exact']);
+            $localTracklistStrong = !empty($localEvidence['tracklist_strong']);
 
             if ($localExpected > $observedTracks) {
                 // Il DB locale puo' provare che mancano file se conosce PIU'
                 // tracce di quelle osservate.
                 $expectedTracks = $localExpected;
                 $expectedSource = (string)$localEvidence['source'];
-            } elseif ($localExpected === $observedTracks && $localTracklistExact) {
-                // Per un album manuale/curato (needs_review=0), il confronto
-                // esatto dell'intera tracklist candidata con quella locale e'
-                // una prova di completezza. Il solo conteggio continua a NON
-                // bastare, cosi' un vecchio album scanner incompleto non puo'
-                // certificare un altro candidato incompleto.
+            } elseif (
+                $localExpected === $observedTracks
+                && ($localTracklistExact || $localTracklistStrong)
+            ) {
+                // GRIZZLY_LOCAL_NEAR_FULL_EVIDENCE_V1
+                //
+                // Album manuale/curato (needs_review=0): il conteggio da solo
+                // non basta, ma una tracklist completa puo' essere certificata
+                // sia dal match conservativo 1:1 sia dalla policy near-full
+                // centralizzata in TrackMatcher::isStrongNearFullEvidence().
+                //
+                // Questo ripristina la tolleranza storica (es. 9/10 con una
+                // sola variante editoriale) senza rendere permissivi download
+                // parziali: observedTracks deve comunque coincidere con il
+                // numero di tracce locale.
                 $expectedTracks = $localExpected;
-                $expectedSource = (string)$localEvidence['source'] . '+tracklist';
+                $expectedSource = (string)$localEvidence['source']
+                    . ($localTracklistExact
+                        ? '+tracklist'
+                        : '+strong-track-evidence');
             }
         }
 
@@ -416,12 +451,60 @@ class AlbumReadinessService
         // crawl while still resolving redirected/stale external identities.
         $needsExternalCompleteness = $expectedTracks === null
             || !empty($tagEvidenceConflicts);
-        $needsExternalIdentity = $this->needsExternalIdentityCanonicalization(
-            $identity,
-            $audio,
-            $metadataRows,
-            $localEvidence
-        );
+
+        $needsExternalIdentityCanonicalization =
+            $this->needsExternalIdentityCanonicalization(
+                $identity,
+                $audio,
+                $metadataRows,
+                $localEvidence
+            );
+
+        // GRIZZLY_SCANNER_IDENTITY_BOOTSTRAP_V1
+        //
+        // A new candidate may already have enough LOCAL evidence to prove
+        // completeness (typically TRACKTOTAL/TOTALTRACKS) while carrying no
+        // MusicBrainz release identity at all. In that case the old condition
+        // above skipped resolveScannerEvidence() completely and CREATE froze an
+        // empty release MBID/release-group into AlbumImportPlan.
+        //
+        // Identity enrichment is intentionally narrower than completeness:
+        // - only candidates not already bound to a local album;
+        // - only when the observed file set is already complete by non-network
+        //   evidence;
+        // - only when release MBID or release-group is missing;
+        // - network is still gated by candidate stability inside
+        //   externalCompletenessEvidence(); cache reads remain allowed earlier.
+        //
+        // This restores one-shot MusicBrainz identity enrichment BEFORE the
+        // immutable import plan without reintroducing network I/O in the bound
+        // executor or on subsequent OWNED_EXACT -> SAME scans.
+        $tagMissingDiscs = isset($tagEvidence['missing_discs'])
+            && is_array($tagEvidence['missing_discs'])
+                ? $tagEvidence['missing_discs']
+                : [];
+        $tagMissingTracks = isset($tagEvidence['missing_tracks'])
+            && is_array($tagEvidence['missing_tracks'])
+                ? $tagEvidence['missing_tracks']
+                : [];
+
+        $completeWithoutExternal = $expectedTracks !== null
+            && $expectedTracks > 0
+            && $observedTracks === $expectedTracks
+            && empty($tagMissingDiscs)
+            && empty($tagMissingTracks)
+            && empty($tagEvidenceConflicts);
+
+        $needsExternalIdentityBootstrap =
+            empty($localEvidence['album_id'])
+            && $completeWithoutExternal
+            && (
+                !$this->isUuid($observedReleaseMbid)
+                || !$this->isUuid($observedReleaseGroup)
+            );
+
+        $needsExternalIdentity = $needsExternalIdentityCanonicalization
+            || $needsExternalIdentityBootstrap;
 
         // Only tag-completeness conflicts are recoverable here. Any identity,
         // edition or local-count conflict remains a hard stop and must not be
@@ -444,6 +527,30 @@ class AlbumReadinessService
                 $stable
             );
             $externalEvidence['identity_requested'] = $needsExternalIdentity;
+            $externalEvidence['identity_canonicalization_requested'] =
+                $needsExternalIdentityCanonicalization;
+            $externalEvidence['identity_bootstrap_requested'] =
+                $needsExternalIdentityBootstrap;
+
+            // GRIZZLY_SCANNER_ARTIST_IDENTITY_PROVENANCE_V1
+            //
+            // Search-derived artist MBID is authoritative for a bound import
+            // only after the external release has passed the scanner tracklist
+            // verification. Keep an unmatched value for diagnostics, but never
+            // expose it through artist_mbid where AlbumImportPlan/MediaImportService
+            // could treat it as frozen identity.
+            if (empty($externalEvidence['matched'])) {
+                $unverifiedArtistMbid = strtolower(trim((string)(
+                    $externalEvidence['artist_mbid'] ?? ''
+                )));
+
+                if ($this->isUuid($unverifiedArtistMbid)) {
+                    $externalEvidence['unverified_artist_mbid'] =
+                        $unverifiedArtistMbid;
+                }
+
+                $externalEvidence['artist_mbid'] = '';
+            }
 
             if (!empty($externalEvidence['matched'])) {
                 $externalExpected = (int)($externalEvidence['expected_tracks'] ?? 0);
@@ -555,9 +662,17 @@ class AlbumReadinessService
                         : null;
                     if ($expectedTracks === null && $refreshedExpected !== null) {
                         $expectedTracks = $refreshedExpected;
-                        if (!empty($localEvidence['tracklist_exact'])
-                            && $refreshedExpected === $observedTracks) {
-                            $expectedSource = (string)$localEvidence['source'] . '+tracklist';
+                        if (
+                            (
+                                !empty($localEvidence['tracklist_exact'])
+                                || !empty($localEvidence['tracklist_strong'])
+                            )
+                            && $refreshedExpected === $observedTracks
+                        ) {
+                            $expectedSource = (string)$localEvidence['source']
+                                . (!empty($localEvidence['tracklist_exact'])
+                                    ? '+tracklist'
+                                    : '+strong-track-evidence');
                         } elseif ($refreshedExpected > $observedTracks) {
                             $expectedSource = (string)$localEvidence['source'];
                         }
@@ -1715,6 +1830,53 @@ class AlbumReadinessService
         return $matcher->isStrongNearFullEvidence($evidence);
     }
 
+    /**
+     * Strip only the strict compound scanner convention:
+     * "Artist - Album - 01 - Track title".
+     *
+     * Ordinary titles are left untouched. In particular, a title such as
+     * "Song - 2 - Remix" does not match because it has only one prefix segment
+     * before the numeric token.
+     */
+    private function cleanCompoundTrackLabel(string $value): string
+    {
+        $value = trim($value);
+        if ($value === '') {
+            return '';
+        }
+
+        if (preg_match(
+            '/^.+\s[-–—]\s.+\s[-–—]\s\d{1,3}\s[-–—]\s(.+)$/u',
+            $value,
+            $m
+        )) {
+            return trim((string)$m[1]);
+        }
+
+        return $value;
+    }
+
+    private function candidateTrackTitleFromFilename(string $path): string
+    {
+        $title = trim((string)pathinfo($path, PATHINFO_FILENAME));
+        if ($title === '') {
+            return '';
+        }
+
+        $compound = $this->cleanCompoundTrackLabel($title);
+        if ($compound !== $title) {
+            return $compound;
+        }
+
+        $title = (string)preg_replace(
+            '/^\s*\d+\s*[-._ ]+\s*/u',
+            '',
+            $title
+        );
+
+        return trim($title);
+    }
+
     /** @return array<int,string> */
     private function candidateTrackTitles(array $audio, array $metadataRows): array
     {
@@ -1725,17 +1887,13 @@ class AlbumReadinessService
                 ? $metadataRows[$index]
                 : [];
 
-            $title = trim((string)($metadata['title'] ?? ''));
+            $title = $this->cleanCompoundTrackLabel(
+                trim((string)($metadata['title'] ?? ''))
+            );
 
             if ($title === '') {
                 $path = (string)($row['path'] ?? '');
-                $title = pathinfo($path, PATHINFO_FILENAME);
-                $title = (string)preg_replace(
-                    '/^\s*\d+\s*[-._ ]+\s*/u',
-                    '',
-                    $title
-                );
-                $title = trim($title);
+                $title = $this->candidateTrackTitleFromFilename($path);
             }
 
             if ($title === '') {
@@ -2079,19 +2237,29 @@ class AlbumReadinessService
         $stmt->execute([':id' => $albumId]);
         $needsReview = $stmt->fetchColumn();
 
-        $tracklistExact = $needsReview !== false
-            && (int)$needsReview === 0
-            && $this->candidateTracklistMatchesAlbum(
+        $curated = $needsReview !== false && (int)$needsReview === 0;
+        $trackEvidence = $curated
+            ? $this->candidateTracklistEvidenceForAlbum(
                 $audio,
                 $metadataRows,
                 $albumId
-            );
+            )
+            : null;
+
+        $tracklistExact = $trackEvidence !== null
+            && !empty($trackEvidence['exact']);
+        $tracklistStrong = $trackEvidence !== null
+            && !empty($trackEvidence['strong']);
 
         return [
             'album_id'        => $albumId,
             'expected_tracks' => $count,
             'source'          => $source,
             'tracklist_exact' => $tracklistExact,
+            'tracklist_strong' => $tracklistStrong,
+            'track_evidence'  => $trackEvidence !== null
+                ? ($trackEvidence['evidence'] ?? null)
+                : null,
         ];
     }
 
@@ -2108,34 +2276,79 @@ class AlbumReadinessService
         array $metadataRows,
         int $albumId
     ): bool {
+        $result = $this->candidateTracklistEvidenceForAlbum(
+            $audio,
+            $metadataRows,
+            $albumId
+        );
+
+        return $result !== null && !empty($result['exact']);
+    }
+
+    /**
+     * Album-level track evidence for a curated local album.
+     *
+     * Keep the strict compare() verdict separate from the bounded near-full
+     * policy. Catalogue aliases can continue to require tracklist_exact, while
+     * ordinary same-title completeness may use tracklist_strong.
+     *
+     * The threshold itself remains owned by TrackMatcher so Readiness and
+     * Identity cannot diverge again.
+     *
+     * @param array<int,array{path:string,disc:int}> $audio
+     * @param array<int,array<string,mixed>> $metadataRows
+     * @return array<string,mixed>|null
+     */
+    private function candidateTracklistEvidenceForAlbum(
+        array $audio,
+        array $metadataRows,
+        int $albumId
+    ): ?array {
         if ($albumId <= 0 || empty($audio)) {
-            return false;
+            return null;
         }
 
         $candidate = $this->candidateTrackTitles($audio, $metadataRows);
         if (empty($candidate)) {
-            return false;
+            return null;
         }
 
-        $stmt = $this->db->prepare(
-            "SELECT title FROM tracks WHERE album_id = :album_id ORDER BY position ASC, id ASC"
-        );
-        $stmt->execute([':album_id' => $albumId]);
-        $localTitles = array_values(array_map(
-            'strval',
-            $stmt->fetchAll(PDO::FETCH_COLUMN)
-        ));
-
+        $localTitles = $this->localTrackTitles($albumId);
         if (empty($localTitles)) {
-            return false;
+            return null;
         }
 
-        $match = $this->trackMatcher()->compare(
-            $candidate,
-            $localTitles
-        );
+        $matcher = $this->trackMatcher();
+        $strict = $matcher->compare($candidate, $localTitles);
 
-        return !empty($match['equivalent']);
+        if (!empty($strict['equivalent'])) {
+            return [
+                'exact' => true,
+                'strong' => true,
+                'evidence' => method_exists($matcher, 'analyzeEvidence')
+                    ? $matcher->analyzeEvidence($candidate, $localTitles)
+                    : null,
+            ];
+        }
+
+        if (
+            !method_exists($matcher, 'analyzeEvidence')
+            || !method_exists($matcher, 'isStrongNearFullEvidence')
+        ) {
+            return [
+                'exact' => false,
+                'strong' => false,
+                'evidence' => null,
+            ];
+        }
+
+        $evidence = $matcher->analyzeEvidence($candidate, $localTitles);
+
+        return [
+            'exact' => false,
+            'strong' => $matcher->isStrongNearFullEvidence($evidence),
+            'evidence' => $evidence,
+        ];
     }
 
     /**
