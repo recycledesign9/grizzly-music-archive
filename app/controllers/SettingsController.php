@@ -116,7 +116,7 @@ class SettingsController
         }
 
         $mediaScanEnabled = $scannerSettings['media_scan_enabled'] === '1';
-        $mediaScanPath = trim($scannerSettings['media_scan_path']);
+        $mediaScanPath = (string)$scannerSettings['media_scan_path'];
         $mediaScanInterval = max(5, (int)$scannerSettings['media_scan_interval']);
         $mediaScanStableSeconds = max(10, (int)$scannerSettings['media_scan_stable_seconds']);
 
@@ -167,7 +167,11 @@ class SettingsController
      * Con media_scan_bound_root assente il worker adotta la cartella al primo
      * avvio senza spostare nulla: nessun cambio.
      *
-     * @return array{pending: bool, phase: string, from: string, to: string}
+     * "unresolved" riporta le righe external rimaste fuori dalla cartella a
+     * cui il DB è legato (vedi unresolvedExternalSources()): è indipendente
+     * dalle due fasi e resta visibile finché non viene risolto.
+     *
+     * @return array{pending: bool, phase: string, from: string, to: string, unresolved: array}
      */
     private function relocationState(PDO $db): array
     {
@@ -193,8 +197,16 @@ class SettingsController
         $to = $normalize($values['media_scan_path']);
         $from = $normalize($values['media_scan_bound_root']);
 
+        $unresolved = $this->unresolvedExternalSources($db, $from);
+
         if ($to !== '' && $from !== '' && $to !== $from) {
-            return ['pending' => true, 'phase' => 'relink', 'from' => $from, 'to' => $to];
+            return [
+                'pending'    => true,
+                'phase'      => 'relink',
+                'from'       => $from,
+                'to'         => $to,
+                'unresolved' => $unresolved,
+            ];
         }
 
         $heartbeat = MediaScanWorkerSupervisor::readHeartbeat();
@@ -203,14 +215,101 @@ class SettingsController
         if ($to !== '' && $rescanPath === $to) {
             $rescanFrom = $normalize((string)($heartbeat['rescan_from'] ?? ''));
             return [
-                'pending' => true,
-                'phase'   => 'rescan',
-                'from'    => $rescanFrom !== '' ? $rescanFrom : $from,
-                'to'      => $to,
+                'pending'    => true,
+                'phase'      => 'rescan',
+                'from'       => $rescanFrom !== '' ? $rescanFrom : $from,
+                'to'         => $to,
+                'unresolved' => $unresolved,
             ];
         }
 
-        return ['pending' => false, 'phase' => '', 'from' => $from, 'to' => $to];
+        return [
+            'pending'    => false,
+            'phase'      => '',
+            'from'       => $from,
+            'to'         => $to,
+            'unresolved' => $unresolved,
+        ];
+    }
+
+    /**
+     * File external registrati fuori dalla cartella a cui il DB è legato.
+     *
+     * Il cambio della cartella da scansionare non copia né sposta file:
+     * MediaRootRelocationService::rebind() aggiorna solo i percorsi dei file
+     * che ritrova nella nuova cartella. Le righe dei file assenti restano con
+     * il percorso precedente e non sono riproducibili, perché lo streaming
+     * serve solo file dentro media_scan_bound_root. Si risolvono copiando le
+     * cartelle mancanti nella cartella scansionata: il worker le riconosce
+     * (classificazione MOVED) e riaggancia le righe alla stessa scheda.
+     *
+     * Sono escluse le righe @library/... di un backup importato e non ancora
+     * rimappato: hanno già il loro avviso dopo l'import.
+     *
+     * Il confronto è byte per byte (CAST AS BINARY): funziona con source_path
+     * VARCHAR o VARBINARY e non dipende dai caratteri jolly di LIKE presenti
+     * nei nomi delle cartelle. Un errore non deve mai bloccare la pagina.
+     *
+     * @return array{files: int, album_count: int, albums: array<int, array{id: int, label: string, files: int}>}
+     */
+    private function unresolvedExternalSources(PDO $db, string $boundRoot): array
+    {
+        $result = ['files' => 0, 'album_count' => 0, 'albums' => []];
+
+        if ($boundRoot === '' || $boundRoot === '/') {
+            return $result;
+        }
+
+        $rootPrefix = $boundRoot . '/';
+        $portablePrefix = '@library/';
+
+        try {
+            $stmt = $db->prepare("
+                SELECT af.album_id, COUNT(*) AS files, a.title, ar.name AS artist
+                FROM audio_files af
+                LEFT JOIN albums a ON a.id = af.album_id
+                LEFT JOIN artists ar ON ar.id = a.artist_id
+                WHERE af.storage_type = 'external'
+                  AND af.source_path IS NOT NULL
+                  AND af.source_path <> ''
+                  AND LEFT(CAST(af.source_path AS BINARY), :root_len)
+                      <> CAST(:root_prefix AS BINARY)
+                  AND LEFT(CAST(af.source_path AS BINARY), :portable_len)
+                      <> CAST(:portable_prefix AS BINARY)
+                GROUP BY af.album_id, a.title, ar.name
+                ORDER BY ar.name, a.title, af.album_id
+            ");
+            $stmt->bindValue(':root_len', strlen($rootPrefix), PDO::PARAM_INT);
+            $stmt->bindValue(':root_prefix', $rootPrefix, PDO::PARAM_STR);
+            $stmt->bindValue(':portable_len', strlen($portablePrefix), PDO::PARAM_INT);
+            $stmt->bindValue(':portable_prefix', $portablePrefix, PDO::PARAM_STR);
+            $stmt->execute();
+
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $files = (int)($row['files'] ?? 0);
+                $result['files'] += $files;
+                $result['album_count']++;
+
+                // L'elenco nella pagina resta breve; i totali sono esatti.
+                if (count($result['albums']) < 30) {
+                    $artist = trim((string)($row['artist'] ?? ''));
+                    $title = trim((string)($row['title'] ?? ''));
+                    $label = $artist !== '' && $title !== ''
+                        ? $artist . ' - ' . $title
+                        : ($title !== '' ? $title : 'Album #' . (int)$row['album_id']);
+
+                    $result['albums'][] = [
+                        'id'    => (int)$row['album_id'],
+                        'label' => $label,
+                        'files' => $files,
+                    ];
+                }
+            }
+        } catch (Throwable $e) {
+            return ['files' => 0, 'album_count' => 0, 'albums' => []];
+        }
+
+        return $result;
     }
 
     /**
@@ -436,7 +535,7 @@ class SettingsController
             exit;
         }
 
-        $path = trim((string)($_POST['media_scan_path'] ?? ''));
+        $path = (string)($_POST['media_scan_path'] ?? '');
         $interval = (int)($_POST['media_scan_interval'] ?? 10);
         $stableSeconds = (int)($_POST['media_scan_stable_seconds'] ?? 30);
 
@@ -1153,6 +1252,12 @@ class SettingsController
             $transfer = new ArchiveTransfer();
             $zipPath  = $transfer->export();
 
+            // Percorsi della libreria rimasti assoluti perché fuori dalla
+            // cartella della libreria (per esempio file non ritrovati dopo un
+            // cambio cartella). Non bloccano l'export, ma vanno segnalati.
+            $exportReport = $transfer->getLastExportReport();
+            $unportableTotal = (int)($exportReport['unportable_total'] ?? 0);
+
             $filename = 'grizzly-export-' . date('Ymd-His') . '.zip';
 
             // Pulisce eventuale output bufferizzato prima del binario
@@ -1167,10 +1272,22 @@ class SettingsController
             // contiene solo il token casuale generato dal browser.
             $exportToken = (string)($_GET['export_token'] ?? '');
             if (preg_match('/^[a-f0-9]{32}$/', $exportToken)) {
+                $cookieSecure = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+
                 setcookie('grz_export_done', $exportToken, [
                     'expires'  => time() + 300,
                     'path'     => '/',
-                    'secure'   => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+                    'secure'   => $cookieSecure,
+                    'httponly' => false,
+                    'samesite' => 'Lax',
+                ]);
+
+                // Numero di percorsi non portabili, letto dalla pagina insieme
+                // alla conferma. Con zero il cookie viene rimosso.
+                setcookie('grz_export_unportable', (string)$unportableTotal, [
+                    'expires'  => $unportableTotal > 0 ? time() + 300 : time() - 3600,
+                    'path'     => '/',
+                    'secure'   => $cookieSecure,
                     'httponly' => false,
                     'samesite' => 'Lax',
                 ]);
@@ -1185,6 +1302,12 @@ class SettingsController
             @unlink($zipPath); // pulizia file temporaneo
             exit;
         } catch (Throwable $e) {
+            // La sessione è stata chiusa all'inizio del metodo: va riaperta,
+            // altrimenti il messaggio non viene salvato e dopo il redirect
+            // la pagina non mostra alcun errore.
+            if (session_status() !== PHP_SESSION_ACTIVE && !headers_sent()) {
+                session_start();
+            }
             $_SESSION['flash_error'] = 'Export fallito: ' . $e->getMessage();
             header('Location: ' . BASE_URL . '/index.php?route=settings');
             exit;

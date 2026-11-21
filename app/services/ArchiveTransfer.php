@@ -22,6 +22,14 @@
  * NON include l'audio (gestito a parte). NON include il percorso
  * audio nelle settings (specifico per server).
  *
+ * PERCORSI DELLA LIBRERIA EXTERNAL: i source_path vengono resi relativi
+ * (@library/...) rispetto a media_scan_bound_root, cioè la cartella a cui
+ * i percorsi del DB sono effettivamente legati (la stessa usata dallo
+ * streaming). Le righe che si trovano fuori da quella cartella, per esempio
+ * file non ritrovati dopo un cambio della cartella da scansionare, restano
+ * con il percorso assoluto originale: vengono contate nel manifest
+ * (unportable) e segnalate all'utente, ma non bloccano l'export.
+ *
  * Agnostico rispetto all'ambiente: usa BASE_PATH / UPLOAD_PATH,
  * quindi funziona identico su MAMP e in container Docker.
  *
@@ -44,8 +52,11 @@ class ArchiveTransfer
      */
     private const FORMAT_VERSION = 5;
 
-    /** Prefisso interno usato nello ZIP per i path relativi alla media_scan_path. */
+    /** Prefisso interno usato nello ZIP per i path relativi alla root della libreria. */
     private const PORTABLE_LIBRARY_PREFIX = '@library/';
+
+    /** Numero massimo di percorsi non portabili elencati nel manifest. */
+    private const UNPORTABLE_SAMPLE_LIMIT = 50;
 
     /**
      * Tabelle nell'ORDINE DI IMPORT (FK-safe).
@@ -76,28 +87,57 @@ class ArchiveTransfer
      *
      * Non vengono esportate e, durante l'import, vengono preservate dalla
      * macchina di destinazione. media_scan_enabled viene sempre forzata a 0.
+     *
+     * media_scan_bound_root è la cartella a cui sono legati i source_path di
+     * QUESTA macchina: nel backup i percorsi viaggiano come @library/...,
+     * quindi il binding della macchina di origine non ha significato altrove.
      */
     private const SETTINGS_SKIP = [
         'audio_path',
         'media_scan_path',
+        'media_scan_bound_root',
         'media_scan_enabled',
-        'api_lastfm_key',
-        'api_discogs_token',
-        'api_youtube_key',
     ];
 
-    /** Credenziali che non devono finire nemmeno nel backup JSON locale. */
-    private const SECRET_SETTINGS = [
-        'api_lastfm_key',
-        'api_discogs_token',
-        'api_youtube_key',
-    ];
+    /**
+     * Prefisso delle chiavi settings che contengono credenziali dei servizi
+     * esterni (api_discogs_token, api_youtube_key, api_listenbrainz_token…).
+     * Le credenziali non vengono mai esportate, non vengono accettate da un
+     * archivio importato, non finiscono nel backup JSON locale e, durante
+     * l'import, restano quelle della macchina di destinazione. La regola
+     * vale per prefisso: un servizio aggiunto o tolto non richiede di
+     * aggiornare questo file, e le chiavi di servizi dismessi presenti in
+     * archivi vecchi vengono scartate allo stesso modo.
+     */
+    private const CREDENTIAL_PREFIX = 'api_';
 
     private PDO $db;
+
+    /**
+     * Esito dell'ultimo export: percorsi external/ignored rimasti assoluti
+     * perché fuori dalla root della libreria. Letto da SettingsController
+     * per avvisare l'utente dopo il download.
+     */
+    private array $lastExportReport = [
+        'library_root'       => '',
+        'unportable_audio'   => 0,
+        'unportable_ignored' => 0,
+        'unportable_total'   => 0,
+    ];
 
     public function __construct()
     {
         $this->db = Database::getInstance();
+    }
+
+    /**
+     * Riepilogo dell'ultimo export eseguito da questa istanza.
+     *
+     * @return array{library_root: string, unportable_audio: int, unportable_ignored: int, unportable_total: int}
+     */
+    public function getLastExportReport(): array
+    {
+        return $this->lastExportReport;
     }
 
     // ============================================================
@@ -122,20 +162,25 @@ class ArchiveTransfer
         $data = ['__format' => self::FORMAT_VERSION, 'tables' => []];
         $counts = [];
         $sourceLibraryRoot = '';
+        $unportable = [
+            'audio_files' => 0,
+            'ignored'     => 0,
+            'samples'     => [],
+        ];
 
         try {
             $this->db->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
             $this->db->beginTransaction();
 
-            $sourceLibraryRoot = trim((string)$this->getSettingValue('media_scan_path', ''));
+            $sourceLibraryRoot = $this->resolveLibraryRoot();
 
             foreach (self::TABLES as $table) {
                 $rows = $this->dumpTable($table);
 
                 if ($table === 'audio_files') {
-                    $rows = $this->makeExternalAudioPathsPortable($rows, $sourceLibraryRoot);
+                    $rows = $this->makeExternalAudioPathsPortable($rows, $sourceLibraryRoot, $unportable);
                 } elseif ($table === 'media_scan_ignored') {
-                    $rows = $this->makeIgnoredPathsPortable($rows, $sourceLibraryRoot);
+                    $rows = $this->makeIgnoredPathsPortable($rows, $sourceLibraryRoot, $unportable);
                 }
 
                 $data['tables'][$table] = $rows;
@@ -150,6 +195,8 @@ class ArchiveTransfer
             throw $e;
         }
 
+        $unportableTotal = (int)$unportable['audio_files'] + (int)$unportable['ignored'];
+
         $manifest = [
             'format'              => self::FORMAT_VERSION,
             'created_at'          => date('c'),
@@ -157,7 +204,30 @@ class ArchiveTransfer
             'counts'              => $counts,
             'library_path_mode'   => 'relative-v1',
             'scanner_restores_on' => false,
+            // Percorsi rimasti assoluti perché fuori dalla root della libreria.
+            // Nel nuovo server non vengono rimappati: restano come riferimenti
+            // storici, esattamente come sulla macchina di origine.
+            'unportable'          => [
+                'audio_files' => (int)$unportable['audio_files'],
+                'ignored'     => (int)$unportable['ignored'],
+                'total'       => $unportableTotal,
+                'samples'     => $unportable['samples'],
+            ],
         ];
+
+        // Serializzazione PRIMA di creare lo ZIP. json_encode() restituisce
+        // false con byte non UTF-8 (per esempio un source_path binario): senza
+        // questo controllo lo ZIP conterrebbe un data.json vuoto e l'errore
+        // emergerebbe solo al momento dell'import.
+        $manifestJson = json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+        if ($manifestJson === false) {
+            throw new RuntimeException('Export impossibile: manifest non serializzabile (' . json_last_error_msg() . ').');
+        }
+
+        $dataJson = json_encode($data, JSON_UNESCAPED_UNICODE);
+        if ($dataJson === false) {
+            throw new RuntimeException('Export impossibile: dati non serializzabili in JSON (' . json_last_error_msg() . ').');
+        }
 
         // File ZIP temporaneo
         $tmpDir = sys_get_temp_dir();
@@ -168,8 +238,9 @@ class ArchiveTransfer
             throw new RuntimeException('Impossibile creare il file ZIP.');
         }
 
-        $zip->addFromString('manifest.json', json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-        $zip->addFromString('data.json', json_encode($data, JSON_UNESCAPED_UNICODE));
+        $zip->addFromString('manifest.json', $manifestJson);
+        $zip->addFromString('data.json', $dataJson);
+        unset($dataJson);
 
         // Immagini
         foreach (self::IMAGE_DIRS as $sub) {
@@ -190,7 +261,36 @@ class ArchiveTransfer
         }
 
         $zip->close();
+
+        $this->lastExportReport = [
+            'library_root'       => $sourceLibraryRoot,
+            'unportable_audio'   => (int)$unportable['audio_files'],
+            'unportable_ignored' => (int)$unportable['ignored'],
+            'unportable_total'   => $unportableTotal,
+        ];
+
         return $zipPath;
+    }
+
+    /**
+     * Root rispetto alla quale i percorsi external diventano @library/...
+     *
+     * È media_scan_bound_root, cioè la cartella a cui i source_path del DB
+     * sono realmente legati: la stessa usata da MediaController per lo
+     * streaming. media_scan_path è invece la cartella scelta in Settings e,
+     * durante un cambio cartella non ancora completato dal worker, punta già
+     * alla nuova posizione mentre i source_path sono ancora sulla vecchia.
+     * Installazioni precedenti alla durable binding: fallback su
+     * media_scan_path.
+     */
+    private function resolveLibraryRoot(): string
+    {
+        $bound = (string)$this->getSettingValue('media_scan_bound_root', '');
+        if ($bound !== '') {
+            return $bound;
+        }
+
+        return (string)$this->getSettingValue('media_scan_path', '');
     }
 
     /**
@@ -213,11 +313,19 @@ class ArchiveTransfer
 
         if ($table === 'settings') {
             $rows = array_values(array_filter($rows, function ($r) {
-                return !in_array($r['key'] ?? '', self::SETTINGS_SKIP, true);
+                $key = (string)($r['key'] ?? '');
+                return !in_array($key, self::SETTINGS_SKIP, true)
+                    && !$this->isCredentialKey($key);
             }));
         }
 
         return $rows;
+    }
+
+    /** Vero se la chiave settings contiene la credenziale di un servizio esterno. */
+    private function isCredentialKey(string $key): bool
+    {
+        return strpos($key, self::CREDENTIAL_PREFIX) === 0;
     }
 
     /**
@@ -241,7 +349,7 @@ class ArchiveTransfer
      */
     private function normalizePath(string $path): string
     {
-        $path = trim(str_replace('\\', '/', $path));
+        $path = str_replace('\\', '/', $path);
         if ($path === '') {
             return '';
         }
@@ -254,15 +362,20 @@ class ArchiveTransfer
     }
 
     /**
-     * Converte un path assoluto appartenente alla media_scan_path in
-     * @library/<percorso-relativo>. Se il path è fuori dalla root l'export
-     * viene fermato: meglio un errore esplicito che un backup non portabile.
+     * Converte un path assoluto appartenente alla root della libreria in
+     * @library/<percorso-relativo>.
+     *
+     * Restituisce null quando il path non è convertibile: root non
+     * configurata, path fuori dalla root o con segmenti "." / "..". Il
+     * chiamante conserva allora il valore originale e lo conta come non
+     * portabile. Un riferimento storico fuori root è uno stato previsto da
+     * MediaRootRelocationService e non deve impedire il backup.
      */
-    private function toPortableLibraryPath(string $path, string $root): string
+    private function tryPortableLibraryPath(string $path, string $root): ?string
     {
         $path = $this->normalizePath($path);
         if ($path === '') {
-            return '';
+            return null;
         }
 
         if (strpos($path, self::PORTABLE_LIBRARY_PREFIX) === 0) {
@@ -270,69 +383,87 @@ class ArchiveTransfer
         }
 
         $root = $this->normalizePath($root);
-        if ($root === '') {
-            throw new RuntimeException(
-                'Export portabile impossibile: esistono riferimenti alla libreria external, '
-                . 'ma media_scan_path non è configurata.'
-            );
+        if ($root === '' || $path[0] !== '/') {
+            return null;
         }
 
         if ($root === '/') {
-            if ($path[0] !== '/') {
-                throw new RuntimeException('Percorso external non valido: ' . $path);
-            }
             $relative = ltrim($path, '/');
+        } elseif (strpos($path, $root . '/') === 0) {
+            $relative = substr($path, strlen($root) + 1);
         } else {
-            if ($path === $root) {
-                $relative = '';
-            } elseif (strpos($path, $root . '/') === 0) {
-                $relative = substr($path, strlen($root) + 1);
-            } else {
-                throw new RuntimeException(
-                    'Export portabile impossibile: il percorso non appartiene a media_scan_path: ' . $path
-                );
-            }
+            return null;
         }
 
         if ($relative === '' || preg_match('~(^|/)\.\.?(/|$)~', $relative)) {
-            throw new RuntimeException('Percorso relativo libreria non valido: ' . $path);
+            return null;
         }
 
         return self::PORTABLE_LIBRARY_PREFIX . $relative;
     }
 
-    private function makeExternalAudioPathsPortable(array $rows, string $root): array
+    /**
+     * Registra un percorso rimasto assoluto. Nel manifest finiscono solo
+     * percorsi UTF-8 validi, fino a UNPORTABLE_SAMPLE_LIMIT: il conteggio
+     * resta comunque esatto.
+     */
+    private function noteUnportable(array &$unportable, string $bucket, string $path): void
+    {
+        $unportable[$bucket] = (int)($unportable[$bucket] ?? 0) + 1;
+
+        if (
+            count($unportable['samples']) < self::UNPORTABLE_SAMPLE_LIMIT
+            && preg_match('//u', $path) === 1
+        ) {
+            $unportable['samples'][] = $path;
+        }
+    }
+
+    private function makeExternalAudioPathsPortable(array $rows, string $root, array &$unportable): array
     {
         foreach ($rows as &$row) {
             if (!is_array($row) || ($row['storage_type'] ?? '') !== 'external') {
                 continue;
             }
 
-            $sourcePath = trim((string)($row['source_path'] ?? ''));
+            $sourcePath = (string)($row['source_path'] ?? '');
             if ($sourcePath === '') {
                 continue;
             }
 
-            $row['source_path'] = $this->toPortableLibraryPath($sourcePath, $root);
+            $portable = $this->tryPortableLibraryPath($sourcePath, $root);
+            if ($portable === null) {
+                // Valore originale invariato, byte per byte.
+                $this->noteUnportable($unportable, 'audio_files', $sourcePath);
+                continue;
+            }
+
+            $row['source_path'] = $portable;
         }
         unset($row);
 
         return $rows;
     }
 
-    private function makeIgnoredPathsPortable(array $rows, string $root): array
+    private function makeIgnoredPathsPortable(array $rows, string $root, array &$unportable): array
     {
         foreach ($rows as &$row) {
             if (!is_array($row)) {
                 continue;
             }
 
-            $sourcePath = trim((string)($row['source_path'] ?? ''));
+            $sourcePath = (string)($row['source_path'] ?? '');
             if ($sourcePath === '') {
                 continue;
             }
 
-            $row['source_path'] = $this->toPortableLibraryPath($sourcePath, $root);
+            $portable = $this->tryPortableLibraryPath($sourcePath, $root);
+            if ($portable === null) {
+                $this->noteUnportable($unportable, 'ignored', $sourcePath);
+                continue;
+            }
+
+            $row['source_path'] = $portable;
         }
         unset($row);
 
@@ -346,19 +477,21 @@ class ArchiveTransfer
     private function filterIncomingSettingsRows(array $rows): array
     {
         return array_values(array_filter($rows, function ($row) {
-            return is_array($row)
-                && !in_array((string)($row['key'] ?? ''), self::SETTINGS_SKIP, true);
+            if (!is_array($row)) {
+                return false;
+            }
+            $key = (string)($row['key'] ?? '');
+            return !in_array($key, self::SETTINGS_SKIP, true)
+                && !$this->isCredentialKey($key);
         }));
     }
 
     private function readLocalServerSettings(): array
     {
         $out = [
-            'audio_path'        => null,
-            'media_scan_path'   => null,
-            'api_lastfm_key'    => null,
-            'api_discogs_token' => null,
-            'api_youtube_key'   => null,
+            'audio_path'            => null,
+            'media_scan_path'       => null,
+            'media_scan_bound_root' => null,
         ];
 
         if (!$this->tableExists('settings')) {
@@ -371,9 +504,7 @@ class ArchiveTransfer
              WHERE `key` IN (
                  'audio_path',
                  'media_scan_path',
-                 'api_lastfm_key',
-                 'api_discogs_token',
-                 'api_youtube_key'
+                 'media_scan_bound_root'
              )"
         );
         $stmt->execute();
@@ -382,6 +513,33 @@ class ArchiveTransfer
             $key = (string)($row['key'] ?? '');
             if (array_key_exists($key, $out)) {
                 $out[$key] = (string)($row['value'] ?? '');
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Credenziali dei servizi esterni salvate su QUESTA macchina, con la
+     * loro etichetta, da ripristinare identiche dopo un import.
+     *
+     * @return array<int,array{key:string,value:string,label:string}>
+     */
+    private function readLocalCredentials(): array
+    {
+        if (!$this->tableExists('settings')) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($this->db->query("SELECT `key`, `value`, `label` FROM settings")->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $key = (string)($row['key'] ?? '');
+            if ($this->isCredentialKey($key)) {
+                $out[] = [
+                    'key'   => $key,
+                    'value' => (string)($row['value'] ?? ''),
+                    'label' => (string)($row['label'] ?? ''),
+                ];
             }
         }
 
@@ -517,22 +675,113 @@ class ArchiveTransfer
                      WHERE source_path LIKE :prefix"
                 );
                 $stmt->execute([':prefix' => self::PORTABLE_LIBRARY_PREFIX . '%']);
-                $update = $this->db->prepare(
-                    "UPDATE media_scan_ignored SET source_path = :source_path WHERE id = :id"
-                );
+                $pendingIgnored = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-                foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-                    $relative = $this->portableRelativePart((string)($row['source_path'] ?? ''));
-                    if ($relative === null) {
-                        continue;
+                if (!$this->columnExists('media_scan_ignored', 'path_hash')) {
+                    // Schema senza path_hash: comportamento storico.
+                    $update = $this->db->prepare(
+                        "UPDATE media_scan_ignored SET source_path = :source_path WHERE id = :id"
+                    );
+
+                    foreach ($pendingIgnored as $row) {
+                        $relative = $this->portableRelativePart((string)($row['source_path'] ?? ''));
+                        if ($relative === null) {
+                            continue;
+                        }
+
+                        $update->execute([
+                            ':source_path' => rtrim($newRoot, '/') . '/' . $relative,
+                            ':id'          => (int)$row['id'],
+                        ]);
+                        $ignoredUpdated += $update->rowCount();
+                    }
+                } else {
+                    // path_hash è sha1(percorso assoluto) ed è la chiave con cui
+                    // MediaImportService riconosce le cartelle ignorate: va
+                    // ricalcolato insieme al percorso, come fa
+                    // MediaRootRelocationService::rebind(). Dallo ZIP arriva
+                    // l'hash del percorso sulla macchina di origine.
+                    //
+                    // Fase 1: gli hash di origine delle righe da rimappare
+                    // vengono sostituiti con valori provvisori univoci. Senza
+                    // questo passaggio un hash di origine potrebbe coincidere
+                    // per caso con quello nuovo di un'altra riga (cartelle
+                    // annidate) e violare l'indice univoco.
+                    $park = $this->db->prepare(
+                        "UPDATE media_scan_ignored SET path_hash = :path_hash WHERE id = :id"
+                    );
+                    foreach ($pendingIgnored as $row) {
+                        // Le righe con percorso relativo non valido restano
+                        // intatte, come prima.
+                        if ($this->portableRelativePart((string)($row['source_path'] ?? '')) === null) {
+                            continue;
+                        }
+                        $park->execute([
+                            ':path_hash' => sha1(self::PORTABLE_LIBRARY_PREFIX . 'pending/' . (int)$row['id']),
+                            ':id'        => (int)$row['id'],
+                        ]);
                     }
 
-                    $update->execute([
-                        ':source_path' => rtrim($newRoot, '/') . '/' . $relative,
-                        ':id'          => (int)$row['id'],
-                    ]);
-                    $ignoredUpdated += $update->rowCount();
+                    // Fase 2: percorso e hash definitivi. Se un'altra riga
+                    // rappresenta già la stessa cartella, questa è un doppione
+                    // e viene eliminata: lasciarla in forma @library/...
+                    // impedirebbe per sempre di riattivare lo scanner.
+                    $collision = $this->db->prepare(
+                        "SELECT id FROM media_scan_ignored
+                         WHERE path_hash = :path_hash AND id <> :id
+                         LIMIT 1"
+                    );
+                    $update = $this->db->prepare(
+                        "UPDATE media_scan_ignored
+                         SET source_path = :source_path, path_hash = :path_hash
+                         WHERE id = :id"
+                    );
+                    $dropDuplicate = $this->db->prepare(
+                        "DELETE FROM media_scan_ignored WHERE id = :id"
+                    );
+
+                    foreach ($pendingIgnored as $row) {
+                        $id = (int)$row['id'];
+                        $relative = $this->portableRelativePart((string)($row['source_path'] ?? ''));
+                        if ($relative === null) {
+                            continue;
+                        }
+
+                        $newPath = rtrim($newRoot, '/') . '/' . $relative;
+                        $newHash = sha1($newPath);
+
+                        $collision->execute([':path_hash' => $newHash, ':id' => $id]);
+                        $duplicate = $collision->fetchColumn() !== false;
+                        $collision->closeCursor();
+
+                        if ($duplicate) {
+                            $dropDuplicate->execute([':id' => $id]);
+                            continue;
+                        }
+
+                        $update->execute([
+                            ':source_path' => $newPath,
+                            ':path_hash'   => $newHash,
+                            ':id'          => $id,
+                        ]);
+                        $ignoredUpdated += $update->rowCount();
+                    }
                 }
+            }
+
+            // I percorsi appena rimappati sono ora legati a $newRoot: il
+            // binding va aggiornato nella stessa transazione. Senza questo
+            // passaggio lo streaming, che serve solo file dentro
+            // media_scan_bound_root, rifiuterebbe i file appena rimappati
+            // finché il worker non riallinea il binding. Vale solo quando
+            // esistevano riferimenti @library/... (cioè dopo un import): in un
+            // normale cambio cartella il binding resta compito del worker.
+            if ($audioUpdated + $ignoredUpdated > 0) {
+                $this->upsertSetting(
+                    'media_scan_bound_root',
+                    $newRoot,
+                    'Scanner root bound to indexed external audio paths'
+                );
             }
 
             $this->db->commit();
@@ -609,6 +858,7 @@ class ArchiveTransfer
         // Settings specifiche della macchina di destinazione: non devono
         // essere sovrascritte dal backup importato.
         $localServerSettings = $this->readLocalServerSettings();
+        $localCredentials    = $this->readLocalCredentials();
 
         // Backup di sicurezza del DB attuale (prima di toccare nulla)
         $backupPath = $this->backupCurrentData();
@@ -720,28 +970,18 @@ class ArchiveTransfer
                 );
             }
 
-            if ($localServerSettings['api_lastfm_key'] !== null) {
+            if ($localServerSettings['media_scan_bound_root'] !== null) {
                 $this->upsertSetting(
-                    'api_lastfm_key',
-                    (string)$localServerSettings['api_lastfm_key'],
-                    'Last.fm API key'
+                    'media_scan_bound_root',
+                    (string)$localServerSettings['media_scan_bound_root'],
+                    'Scanner root bound to indexed external audio paths'
                 );
             }
 
-            if ($localServerSettings['api_discogs_token'] !== null) {
-                $this->upsertSetting(
-                    'api_discogs_token',
-                    (string)$localServerSettings['api_discogs_token'],
-                    'Discogs personal access token'
-                );
-            }
-
-            if ($localServerSettings['api_youtube_key'] !== null) {
-                $this->upsertSetting(
-                    'api_youtube_key',
-                    (string)$localServerSettings['api_youtube_key'],
-                    'YouTube Data API key'
-                );
+            // Credenziali dei servizi esterni: restano quelle di questa
+            // macchina, con la loro etichetta.
+            foreach ($localCredentials as $cred) {
+                $this->upsertSetting($cred['key'], $cred['value'], $cred['label']);
             }
 
             // Dopo un import lo scanner resta SEMPRE spento. I riferimenti
@@ -892,7 +1132,7 @@ class ArchiveTransfer
 
         if ($table === 'settings') {
             $rows = array_values(array_filter($rows, function ($row) {
-                return !in_array((string)($row['key'] ?? ''), self::SECRET_SETTINGS, true);
+                return !$this->isCredentialKey((string)($row['key'] ?? ''));
             }));
         }
 

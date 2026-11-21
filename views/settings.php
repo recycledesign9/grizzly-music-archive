@@ -29,12 +29,12 @@ $excludedScanPathsCount = (int)($excludedScanPathsCount ?? count($excludedScanPa
 /** @var array $externalApiServices */
 $externalApiServices = is_array($externalApiServices ?? null) ? $externalApiServices : [];
 $externalApiUi = [
-  'lastfm' => [
-    'title' => 'Last.fm',
-    'description' => 'Metadati aggiuntivi e suggerimenti musicali quando le fonti principali non bastano.',
-    'field_label' => 'API key',
-    'placeholder' => 'Inserisci una nuova API key',
-    'help_url' => 'https://www.last.fm/api/account/create',
+  'listenbrainz' => [
+    'title' => 'ListenBrainz',
+    'description' => 'Facoltativo. I consigli dalla collezione funzionano senza token; con il token la scheda disco propone anche album fuori archivio degli artisti simili.',
+    'field_label' => 'User token',
+    'placeholder' => 'Inserisci un nuovo token',
+    'help_url' => 'https://listenbrainz.org/settings/',
   ],
   'discogs' => [
     'title' => 'Discogs',
@@ -356,6 +356,7 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
                 value="<?= htmlspecialchars($mediaScanPath, ENT_QUOTES, 'UTF-8') ?>">
             </div>
             <div class="form-text">Scegli una cartella del server. In Docker Grizzly gestisce automaticamente il percorso interno.</div>
+            <div class="form-text">Cambiare cartella non copia né sposta file: Grizzly ricollega gli album di cui trova i file nella nuova cartella. Copia prima tutti gli album nella nuova cartella.</div>
 
             <div id="dirBrowserScan" class="d-none mt-3">
               <div class="card border">
@@ -429,6 +430,12 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
               </dl>
               <div class="grz-xfer__bar" aria-hidden="true"><span></span></div>
               <p class="grz-xfer__note" id="relocationNote"></p>
+              <!-- File external rimasti fuori dalla cartella della libreria:
+                   compilato da renderRelocation() con relocation.unresolved. -->
+              <div class="d-none" id="relocationUnresolved">
+                <p class="grz-xfer__note" id="relocationUnresolvedText"></p>
+                <ul class="grz-reloc__list" id="relocationUnresolvedList"></ul>
+              </div>
               <div class="mt-2 d-none" id="relocationActions">
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRelocationDismiss">Chiudi</button>
               </div>
@@ -717,7 +724,7 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
             </div>
             <details class="grz-set__more">
               <summary>File audio e percorsi</summary>
-              <p>I file audio vanno spostati a parte, con "Migra file audio" o copiando la cartella. I percorsi della libreria esterna e delle cartelle ignorate sono salvati in forma relativa, quindi si possono rimappare su una cartella diversa nel nuovo server.</p>
+              <p>I file audio vanno spostati a parte, con "Migra file audio" o copiando la cartella. I percorsi della libreria esterna e delle cartelle ignorate sono salvati in forma relativa, quindi si possono rimappare su una cartella diversa nel nuovo server. I file registrati fuori dalla cartella della libreria, per esempio quelli non ritrovati dopo un cambio cartella, restano con il percorso assoluto e vengono segnalati al termine dell'export.</p>
             </details>
           </div>
         </div>
@@ -863,6 +870,14 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
   }
   .grz-reloc__route dt { font-weight: 400; color: var(--bs-secondary-color); }
   .grz-reloc__route dd { margin: 0; word-break: break-all; }
+  /* Album con file non ritrovati nella cartella della libreria. */
+  .grz-reloc__list {
+    margin: .375rem 0 0;
+    padding-left: 1.1rem;
+    font-size: .8rem;
+  }
+  .grz-reloc__list li { margin: .125rem 0; }
+  .grz-reloc__list .text-muted { font-variant-numeric: tabular-nums; }
   @keyframes grz-xfer-slide {
     0%   { transform: translateX(-100%); }
     100% { transform: translateX(290%); }
@@ -1027,6 +1042,9 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
     var EXPORT_TIMEOUT_MS = 20 * 60 * 1000; // oltre questo limite si avvisa l'utente
     var POLL_MS = 500;
     var COOKIE_NAME = 'grz_export_done';
+    // Numero di percorsi della libreria rimasti assoluti nello ZIP perché
+    // fuori dalla cartella della libreria: arriva insieme alla conferma.
+    var UNPORTABLE_COOKIE_NAME = 'grz_export_unportable';
 
     function $(id) { return document.getElementById(id); }
 
@@ -1052,8 +1070,14 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       return m ? m[1] : '';
     }
 
+    function readUnportableCookie() {
+      var m = document.cookie.match(new RegExp('(?:^|;\\s*)' + UNPORTABLE_COOKIE_NAME + '=(\\d+)'));
+      return m ? (parseInt(m[1], 10) || 0) : 0;
+    }
+
     function clearDoneCookie() {
       document.cookie = COOKIE_NAME + '=; Max-Age=0; path=/; SameSite=Lax';
+      document.cookie = UNPORTABLE_COOKIE_NAME + '=; Max-Age=0; path=/; SameSite=Lax';
     }
 
     // ── Rendering: gli elementi vengono cercati a ogni chiamata perché la
@@ -1076,7 +1100,7 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       }
     }
 
-    function renderStatus(state, elapsedMs) {
+    function renderStatus(state, elapsedMs, unportable) {
       var box = $('exportStatus');
       if (!box) return;
       var title = $('exportStatusTitle');
@@ -1097,10 +1121,20 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
         if (note) note.textContent = 'Grizzly sta raccogliendo dati e immagini. '
           + 'Con molte copertine servono anche alcuni minuti: lascia aperta questa pagina.';
       } else if (state === 'done') {
-        box.classList.add('is-done');
-        if (title) title.textContent = 'Archivio pronto';
-        if (note) note.textContent = 'Il download è stato avviato dal browser. '
-          + 'Il file grizzly-export-….zip si trova nella cartella dei download.';
+        unportable = parseInt(unportable, 10) || 0;
+        if (unportable > 0) {
+          box.classList.add('is-warn');
+          if (title) title.textContent = 'Archivio pronto, con un avviso';
+          if (note) note.textContent = 'Il download è stato avviato dal browser. '
+            + unportable + ' percorsi sono registrati fuori dalla cartella della libreria '
+            + '(file non ritrovati dopo un cambio cartella): nel backup restano con il percorso assoluto '
+            + 'e non verranno rimappati sul nuovo server. L\'elenco degli album è in Scansione automatica.';
+        } else {
+          box.classList.add('is-done');
+          if (title) title.textContent = 'Archivio pronto';
+          if (note) note.textContent = 'Il download è stato avviato dal browser. '
+            + 'Il file grizzly-export-….zip si trova nella cartella dei download.';
+        }
       } else if (state === 'timeout') {
         box.classList.add('is-warn');
         if (title) title.textContent = 'Nessuna conferma dal server';
@@ -1119,17 +1153,20 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
     function finish(state) {
       var job = window.__grizzlyExportJob;
       var elapsed = job ? Date.now() - job.startedAt : 0;
+      // Letto prima di clearDoneCookie(), che rimuove anche questo cookie.
+      var unportable = state === 'done' ? readUnportableCookie() : 0;
       stopPolling();
       clearDoneCookie();
       window.__grizzlyExportJob = null;
       window.__grizzlyIgnoredPollingPaused = false;
 
       renderButton(false);
-      renderStatus(state, elapsed);
+      renderStatus(state, elapsed, unportable);
 
       // L'esito positivo resta visibile qualche secondo, poi il pannello si
-      // chiude. L'avviso di timeout resta finché l'utente non riprova.
-      if (state === 'done') {
+      // chiude. L'avviso di timeout e quello sui percorsi non portabili
+      // restano finché l'utente non riprova.
+      if (state === 'done' && unportable === 0) {
         if (window.__grizzlyExportHide) clearTimeout(window.__grizzlyExportHide);
         window.__grizzlyExportHide = setTimeout(function() {
           window.__grizzlyExportHide = null;
@@ -1793,6 +1830,18 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
         if (memory) writeRelocationMemory(null);
       }
 
+      // File external registrati fuori dalla cartella della libreria: lo
+      // stato viene dal DB e resta visibile finché non è risolto, anche
+      // senza un cambio cartella in corso o appena concluso.
+      var unresolved = relocationState.unresolved && typeof relocationState.unresolved === 'object'
+        ? relocationState.unresolved
+        : { files: 0, album_count: 0, albums: [] };
+      var unresolvedFiles = parseInt(unresolved.files, 10) || 0;
+
+      if (!mode && unresolvedFiles > 0) {
+        mode = 'unresolved';
+      }
+
       if (!mode) {
         box.classList.add('d-none');
         return;
@@ -1814,14 +1863,22 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
             'Lo stato del worker e l\'eventuale errore sono indicati nella riga Worker.'
           : 'La scansione automatica è disattivata: il cambio parte quando la riattivi. ' +
             'Fino ad allora l\'archivio usa la cartella precedente.';
-      } else {
-        title = 'Cambio cartella completato';
+      } else if (mode === 'done') {
+        title = unresolvedFiles > 0
+          ? 'Cambio cartella completato, con file non ritrovati'
+          : 'Cambio cartella completato';
         note = 'L\'archivio ora usa la nuova cartella.';
+      } else {
+        title = 'File audio non ritrovati';
+        note = 'Cartella della libreria: ' + (relocationState.from || to || '') + '.';
       }
 
       box.classList.remove('is-done', 'is-warn');
-      if (mode === 'waiting') box.classList.add('is-warn');
-      if (mode === 'done') box.classList.add('is-done');
+      if (mode === 'waiting' || mode === 'unresolved') box.classList.add('is-warn');
+      if (mode === 'done') box.classList.add(unresolvedFiles > 0 ? 'is-warn' : 'is-done');
+
+      var route = box.querySelector('.grz-reloc__route');
+      if (route) route.classList.toggle('d-none', mode === 'unresolved');
 
       document.getElementById('relocationTitle').textContent = title;
       document.getElementById('relocationFrom').textContent = from;
@@ -1829,14 +1886,60 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       document.getElementById('relocationNote').textContent = note;
       document.getElementById('relocationSpinner').classList.toggle('d-none', mode !== 'running');
       document.getElementById('relocationActions').classList.toggle('d-none', mode !== 'done');
+      renderRelocationUnresolved(unresolved, unresolvedFiles);
       box.classList.remove('d-none');
+    }
+
+    // Elenco degli album con file non ritrovati nella cartella della
+    // libreria. Il cambio cartella non copia file: si risolve copiando le
+    // cartelle mancanti nella cartella scansionata, dove il worker le
+    // ricollega alla stessa scheda.
+    function renderRelocationUnresolved(unresolved, unresolvedFiles) {
+      var wrap = document.getElementById('relocationUnresolved');
+      var textEl = document.getElementById('relocationUnresolvedText');
+      var listEl = document.getElementById('relocationUnresolvedList');
+      if (!wrap || !textEl || !listEl) return;
+
+      if (unresolvedFiles <= 0) {
+        wrap.classList.add('d-none');
+        listEl.innerHTML = '';
+        return;
+      }
+
+      var albumCount = parseInt(unresolved.album_count, 10) || 0;
+      var albums = Array.isArray(unresolved.albums) ? unresolved.albums : [];
+
+      textEl.textContent = unresolvedFiles + ' file' +
+        ' di ' + albumCount + (albumCount === 1 ? ' album non è' : ' album non sono') +
+        ' nella cartella della libreria e non si possono riprodurre. ' +
+        'Il cambio cartella non copia i file: copia le cartelle di questi album nella cartella da scansionare ' +
+        'e Grizzly le ricollega da solo alla stessa scheda.';
+
+      var html = albums.map(function(album) {
+        var id = parseInt(album.id, 10) || 0;
+        var files = parseInt(album.files, 10) || 0;
+        var label = escHtml(album.label || ('Album #' + id));
+        var link = id > 0
+          ? '<a href="' + escAttr(BASE_URL + '/index.php?route=albums/detail/' + id) + '">' + label + '</a>'
+          : label;
+        return '<li>' + link + ' <span class="text-muted">· ' + files + ' file</span></li>';
+      }).join('');
+
+      if (albumCount > albums.length) {
+        html += '<li class="text-muted">e altri ' + (albumCount - albums.length) + ' album</li>';
+      }
+
+      listEl.innerHTML = html;
+      wrap.classList.remove('d-none');
     }
 
     var btnRelocationDismiss = document.getElementById('btnRelocationDismiss');
     if (btnRelocationDismiss) {
       btnRelocationDismiss.addEventListener('click', function() {
         writeRelocationMemory(null);
-        document.getElementById('relocationStatus').classList.add('d-none');
+        // Chiude l'esito del cambio cartella. Se restano file non ritrovati,
+        // il riquadro torna a mostrare soltanto quelli.
+        renderRelocation(relocationState);
       });
     }
 
