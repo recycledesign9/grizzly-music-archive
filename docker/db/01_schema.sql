@@ -235,14 +235,15 @@ CREATE TABLE `audio_files` (
   `filesize`      INT(10) UNSIGNED DEFAULT NULL,
   `source_hash`   CHAR(40) COLLATE utf8mb4_unicode_ci DEFAULT NULL
                   COMMENT 'SHA-1 fingerprint of scanner source content',
-  `source_path`   VARCHAR(1000) COLLATE utf8mb4_unicode_ci DEFAULT NULL
-                  COMMENT 'Absolute source path for external scanner media',
+  `source_path`   VARBINARY(1000) DEFAULT NULL
+                  COMMENT 'Absolute active source path for external scanner media; NULL for managed audio',
   `source_mtime`  INT(10) UNSIGNED DEFAULT NULL,
   `storage_type`  ENUM('managed','external') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'managed',
   `uploaded_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_audio_album` (`album_id`),
   KEY `idx_audio_track` (`track_id`),
+  UNIQUE KEY `uq_audio_source_path` (`source_path`),
   KEY `idx_audio_source_path` (`source_path`(255)),
   KEY `idx_audio_source_hash` (`source_hash`),
   CONSTRAINT `fk_audio_album` FOREIGN KEY (`album_id`) REFERENCES `albums` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -285,7 +286,7 @@ CREATE TABLE `playlist_tracks` (
 CREATE TABLE `media_scan_ignored` (
   `id`          INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,
   `path_hash`   CHAR(40) COLLATE utf8mb4_unicode_ci NOT NULL,
-  `source_path` VARCHAR(1000) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `source_path` VARBINARY(1000) NOT NULL,
   `created_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_media_scan_ignored_hash` (`path_hash`)
@@ -300,7 +301,7 @@ CREATE TABLE `media_scan_ignored` (
 CREATE TABLE `media_scan_excluded` (
   `id`          INT(10) UNSIGNED NOT NULL AUTO_INCREMENT,
   `path_hash`   CHAR(40) COLLATE utf8mb4_unicode_ci NOT NULL,
-  `source_path` VARCHAR(1000) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `source_path` VARBINARY(1000) NOT NULL,
   `created_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_media_scan_excluded_hash` (`path_hash`)
