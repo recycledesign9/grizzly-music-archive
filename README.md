@@ -201,15 +201,15 @@ docker compose exec -T worker php -v
 docker compose exec -T app php -i | grep session.upload_progress.enabled
 ```
 
-Expected result: **PHP 8.3.36** in both `app` and `worker`, with `session.upload_progress.enabled => Off => Off`. Verify dashboard, album details, MP3/FLAC playback and scanner settings. The SQL schema upgrade to Grizzly v0.6.0 is a **separate step** described below: do not apply the upgrade migration on a newly initialized database.
+Expected result: **PHP 8.3.36** in both `app` and `worker`, with `session.upload_progress.enabled => Off => Off`. Verify dashboard, album details, MP3/FLAC playback and scanner settings. The SQL schema upgrade to Grizzly v0.6.2 is a **separate step** described below: do not apply the upgrade migration on a newly initialized database.
 
 A pinned image tag will not automatically receive future PHP security fixes. Follow [supported PHP versions](https://www.php.net/supported-versions.php) and validate new patched images before updating the published Dockerfile.
 
 ---
 
-## ⬆️ Upgrading to v0.6.0
+## ⬆️ Upgrading to v0.6.2
 
-**Back up your database before upgrading.** Existing installations update to v0.6.0 with a single cumulative migration, without running earlier migration files separately. Upgrades from v0.4.0 and later are supported.
+**Back up your database before upgrading.** Existing installations update to v0.6.2 with a single cumulative migration, without running earlier migration files separately. Upgrades from v0.4.0 and later are supported.
 
 ```bash
 # Keep MySQL running, but stop the application and scanner during the upgrade.
@@ -220,7 +220,7 @@ docker compose config | grep -E "image: (mysql:|grizzly-music-archive:)"
 
 docker compose exec -T db sh -c \
   'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"' \
-  < docker/db/migrations/grizzly_0.6.0_migration.sql
+  < docker/db/migrations/grizzly_0.6.2_migration.sql
 
 docker compose build --pull app
 docker compose up -d --no-deps app worker
@@ -310,7 +310,7 @@ grizzly-music-archive/
 │   └── db/
 │       ├── 01_schema.sql        < Current database structure for fresh installs
 │       ├── 02_seed.sql          < Demo data
-│       └── migrations/          < grizzly_0.6.0_migration.sql (cumulative upgrade)
+│       └── migrations/          < grizzly_0.6.2_migration.sql (cumulative upgrade)
 ├── app/
 │   ├── controllers/             < Album, Artist, Playlist, Mix, Settings, Media…
 │   ├── models/                  < Album, Artist, Track…
