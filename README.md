@@ -21,7 +21,8 @@
 **Catalogue**
 
 - Add, edit and delete albums; artists, genres and labels are created from the album form
-- Cover art and tracklist from MusicBrainz and Cover Art Archive, with Last.fm and Discogs as optional fallbacks, or manual entry
+- Cover art and tracklist from MusicBrainz and Cover Art Archive, with Deezer and Discogs as fallbacks, or manual entry
+- Album suggestions from ListenBrainz similar artists, with no API key required
 - Advanced search by artist, title, format, genre, year and label
 - Archive in list or grid view, with the same sorting in both
 - Artist page with biography, photo, and a single list that combines the official discography with the albums in your archive
@@ -237,7 +238,10 @@ The migration adds only what is missing and can be run again safely. Fresh insta
 | Feature               | Service             | Variable          | Notes                                                                        |
 | --------------------- | ------------------- | ----------------- | ---------------------------------------------------------------------------- |
 | Cover art + tracklist | **MusicBrainz**     | none              | ✅ Works out of the box                                                       |
-| Cover art + tracklist | Last.fm             | `LASTFM_API_KEY`  | Optional fallback, also used for similar artists. [Get a key](https://www.last.fm/api/account/create) |
+| Tracklist + durations | **Deezer**          | none              | ✅ Works out of the box, fallback when MusicBrainz has no tracklist or durations |
+| Artist biographies    | **Wikipedia / Wikidata** | none         | ✅ Works out of the box                                                       |
+| Similar artists       | **ListenBrainz**    | none              | ✅ Works out of the box, used for suggestions from your archive               |
+| Albums outside the archive | ListenBrainz   | `LISTENBRAINZ_TOKEN` | Optional user token: adds suggestions of albums you don't own. [Get a token](https://listenbrainz.org/settings/) |
 | Cover art             | Discogs             | `DISCOGS_TOKEN`   | Optional fallback. [Get a token](https://www.discogs.com/settings/developers) |
 | YouTube integration   | YouTube Data API v3 | `YOUTUBE_API_KEY` | Required for YouTube search and preview. [Get a key](https://console.cloud.google.com) |
 
@@ -359,7 +363,7 @@ Infrastructure settings live in `.env` (see `.env.example`). The watched folder 
 | `DB_USER` / `DB_PASS`      | `grizzly` / `grizzly_secret`                        | Database credentials                                           |
 | `DB_ROOT_PASS`             | `root_secret_change_me`                             | MySQL root password                                            |
 | `DEBUG`                    | `false`                                             | Show PHP errors (`true` only for development)                  |
-| `LASTFM_API_KEY`           | *(empty)*                                           | Last.fm key, used when none is saved in Settings               |
+| `LISTENBRAINZ_TOKEN`       | *(empty)*                                           | ListenBrainz user token, used when none is saved in Settings   |
 | `DISCOGS_TOKEN`            | *(empty)*                                           | Discogs token, used when none is saved in Settings             |
 | `YOUTUBE_API_KEY`          | *(empty)*                                           | YouTube key, used when none is saved in Settings               |
 | `GRIZZLY_WORKER_AUTOSTART` | `1`                                                 | Without Docker: `0` stops Grizzly from starting the worker     |

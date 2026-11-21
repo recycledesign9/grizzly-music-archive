@@ -113,10 +113,15 @@ define('MAX_COVER_SIZE', 5   * 1024 * 1024);   //   5 MB
 define('MAX_AUDIO_SIZE', 512 * 1024 * 1024);   // 512 MB (supports FLAC)
 
 // ── External API keys (optional — features degrade gracefully without them) ───
-define('LASTFM_API_KEY',  _env('LASTFM_API_KEY',  ''));
-define('DISCOGS_TOKEN',   _env('DISCOGS_TOKEN',   ''));
-define('YOUTUBE_API_KEY', _env('YOUTUBE_API_KEY', ''));
-define('APP_USER_AGENT',  'GrizzlyMusicArchive/1.0');
+// Keys saved in Settings take precedence over these values.
+define('LISTENBRAINZ_TOKEN', _env('LISTENBRAINZ_TOKEN', ''));
+define('DISCOGS_TOKEN',      _env('DISCOGS_TOKEN',      ''));
+define('YOUTUBE_API_KEY',    _env('YOUTUBE_API_KEY',    ''));
+
+// User-Agent for external requests. Wikimedia and MusicBrainz require a
+// contact (URL or e-mail): without it Wikipedia answers 429 and artist
+// biographies are not loaded.
+define('APP_USER_AGENT', 'GrizzlyMusicArchive/1.0 ( https://github.com/recycledesign9/grizzly-music-archive )');
 
 // ── Debug mode — default OFF ──────────────────────────────────────────────────
 define('DEBUG', filter_var(_env('DEBUG', 'false'), FILTER_VALIDATE_BOOLEAN));
