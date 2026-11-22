@@ -2708,6 +2708,14 @@ class AlbumController
         ];
       }
 
+      // Consigli in collezione completi: tutte le fonti hanno risposto con
+      // dati aggiornati e il budget non è stato superato. Va valutato prima
+      // della sezione scoperta, che consuma lo stesso budget.
+      $collectionComplete = $rgInfo['ok']
+        && $identity['ok']
+        && $similar['ok']
+        && !$service->budgetExceeded();
+
       // ---- Sezione SCOPERTA: album di simili fuori archivio ----
       // Si saltano gli artisti già in archivio (mostrati sopra o comunque
       // posseduti) e l'artista del disco.
@@ -2749,9 +2757,7 @@ class AlbumController
 
       // Tutte le fonti hanno risposto e il budget non è stato superato:
       // solo in questo caso il risultato è definitivo.
-      $complete = $rgInfo['ok']
-        && $identity['ok']
-        && $similar['ok']
+      $complete = $collectionComplete
         && $externalOk
         && !$service->budgetExceeded();
 
@@ -2761,6 +2767,9 @@ class AlbumController
           'identity'        => $identity,
           'release_group'   => $rgInfo,
           'similar_ok'      => $similar['ok'],
+          'similar_sources' => $similar['sources'] ?? [],
+          'collection_complete' => $collectionComplete,
+          'lb_paused'       => $service->listenBrainzPauses(),
           'similar_top'     => array_slice($similar['rows'], 0, 15),
           'similar_total'   => count($similar['rows']),
           'external'        => $external,
@@ -2785,7 +2794,10 @@ class AlbumController
       }, ARRAY_FILTER_USE_BOTH);
 
       // In cache per 30 giorni solo un risultato completo e non vuoto. Un
-      // risultato parziale si mostra ma non si conserva.
+      // risultato parziale si mostra ma non si conserva: durante una
+      // sospensione di ListenBrainz le aperture successive restano veloci
+      // grazie alle cache del service (simili, album, sospensione), e al
+      // termine della sospensione la scoperta viene ritentata davvero.
       if (!$debugMode && $complete && (!empty($payload) || !empty($suggestions))) {
         $toCache = $responsePayload;
         unset($toCache['debug']);
@@ -2865,6 +2877,18 @@ class AlbumController
       'source_tracks' => $sourceTracks,
     ];
 
+    // Gli album fuori archivio ("suggestions") esistono solo con un token
+    // ListenBrainz. Senza questa voce un risultato calcolato senza token
+    // resterebbe in cache 30 giorni anche dopo l'aggiunta del token dalle
+    // Impostazioni, e viceversa. La voce compare solo quando il token manca:
+    // con il token configurato la firma resta quella delle versioni
+    // precedenti e le cache esistenti restano valide. Il token non entra
+    // mai nella firma.
+    require_once BASE_PATH . '/app/services/ExternalApiConfig.php';
+    if (ExternalApiConfig::getListenBrainzToken() === '') {
+      $context['externals'] = 'off';
+    }
+
     $encoded = json_encode(
       $context,
       JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
@@ -2906,7 +2930,17 @@ class AlbumController
       return null;
     }
 
-    return is_array($data['_payload']) ? $data['_payload'] : null;
+    // Solo risultati completi: la scrittura salva soltanto quelli, e la
+    // lettura scarta qualunque payload non completo (per esempio quelli
+    // salvati per un'ora da una versione intermedia del 22/11/2026). Tutte
+    // le versioni con la chiave recs:v3 scrivono il campo "complete".
+    $payload = is_array($data['_payload']) ? $data['_payload'] : null;
+    if ($payload === null || empty($payload['complete'])) {
+      @unlink($file);
+      return null;
+    }
+
+    return $payload;
   }
 
   private function setRecCache(

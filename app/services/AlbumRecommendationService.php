@@ -28,6 +28,21 @@ require_once __DIR__ . '/ExternalApiConfig.php';
  * lavora entro un budget (startBudget) e, finito il tempo, salta le
  * chiamate rimaste segnando il risultato come incompleto.
  *
+ * Disservizi di api.listenbrainz.org (popolarità, album più ascoltati):
+ *   - ogni chiamata ha un timeout breve (LB_API_TIMEOUT);
+ *   - dopo un timeout, un 429 o un 5xx l'endpoint che ha fallito resta
+ *     sospeso per LB_API_PAUSE secondi, per tutte le richieste. Le due
+ *     sospensioni sono separate: popolarità (correzione dei simili, quindi
+ *     consigli in collezione) e album più ascoltati (solo scoperta). Un
+ *     guasto della scoperta non tocca i consigli in collezione. Le schede
+ *     aperte subito dopo non ripetono l'attesa e l'installazione non
+ *     insiste su un endpoint che non risponde;
+ *   - se l'aggiornamento non riesce si riusano i dati già scaricati anche
+ *     se scaduti (fino a STALE_MAX_AGE oltre la scadenza); per i simili mai
+ *     scaricati si usa la lista di ListenBrainz Labs nel suo ordine, senza
+ *     correzione per popolarità. In questi casi l'esito resta ok=false, così
+ *     il risultato complessivo non viene salvato come definitivo.
+ *
  * Cache file: cache/recommendations/{sha1}.json
  *
  * Compatibile PHP 7.4.
@@ -69,6 +84,29 @@ class AlbumRecommendationService
 
     /** Rate limit MusicBrainz: 1 richiesta al secondo. */
     private const MB_THROTTLE_US = 1100000;
+
+    /**
+     * Timeout (secondi) di una chiamata ad api.listenbrainz.org. Le risposte
+     * normali arrivano in meno di un secondo; il 21/11/2026 gli endpoint di
+     * popolarità sono rimasti appesi per ore e, con il timeout precedente di
+     * 8 secondi, una sola chiamata esauriva il budget della scheda.
+     */
+    private const LB_API_TIMEOUT = 3.0;
+
+    /** Timeout (secondi) della chiamata a ListenBrainz Labs (artisti simili). */
+    private const LB_LABS_TIMEOUT = 5.0;
+
+    /** Sospensione (secondi) di un endpoint di api.listenbrainz.org dopo un errore. */
+    private const LB_API_PAUSE = 600;
+
+    /** Sospensione dell'endpoint popularity/artist (correzione dei simili). */
+    private const LB_POPULARITY_PAUSE_KEY = 'lb-popularity-pause:v1';
+
+    /** Sospensione dell'endpoint top-release-groups-for-artist (scoperta). */
+    private const LB_TOP_ALBUMS_PAUSE_KEY = 'lb-top-albums-pause:v1';
+
+    /** Età massima, oltre la scadenza, di un dato riusabile quando l'aggiornamento fallisce. */
+    private const STALE_MAX_AGE = 7776000; // 90 giorni
 
     /** Istante (microtime) entro cui chiudere il lavoro; 0 = nessun limite. */
     private $deadline = 0.0;
@@ -275,14 +313,20 @@ class AlbumRecommendationService
      * Le righe sono già filtrate con MIN_INDEX e ordinate; con più MBID
      * sorgente vale l'indice più alto per ciascun artista.
      *
+     * Con ok=false le righe possono comunque esserci: dati già scaricati e
+     * scaduti, oppure la lista di ListenBrainz Labs senza correzione (vedi
+     * similarForMbid). "sources" indica per ogni MBID sorgente da dove
+     * arrivano: cache, fresh, stale, labs-only, none.
+     *
      * @param string[] $sourceMbids
-     * @return array{ok:bool,rows:array<int,array{mbid:string,name:string,index:float,match:float,rank:int}>}
+     * @return array{ok:bool,rows:array<int,array{mbid:string,name:string,index:float,match:float,rank:int}>,sources:array<string,string>}
      */
     public function getSimilarArtists(array $sourceMbids): array
     {
-        $ok     = true;
-        $merged = [];
-        $skip   = [];
+        $ok      = true;
+        $merged  = [];
+        $skip    = [];
+        $sources = [];
 
         foreach ($sourceMbids as $m) {
             $m = $this->normalizeMbid((string)$m);
@@ -293,9 +337,9 @@ class AlbumRecommendationService
 
         foreach (array_keys($skip) as $mbid) {
             $res = $this->similarForMbid($mbid);
+            $sources[$mbid] = (string)($res['source'] ?? '');
             if (!$res['ok']) {
                 $ok = false;
-                continue;
             }
             foreach ($res['rows'] as $row) {
                 if (isset($skip[$row['mbid']])) {
@@ -319,25 +363,29 @@ class AlbumRecommendationService
         }
         unset($r);
 
-        return ['ok' => $ok, 'rows' => $rows];
+        return ['ok' => $ok, 'rows' => $rows, 'sources' => $sources];
     }
 
     /**
      * Simili di un singolo MBID: similar-artists (ListenBrainz Labs) più
      * popolarità (API ListenBrainz). In cache solo gli esiti validi.
      *
-     * @return array{ok:bool,rows:array}
+     * Se una delle due chiamate non riesce: lista già scaricata anche se
+     * scaduta, altrimenti la lista Labs senza correzione (se è arrivata),
+     * sempre con ok=false.
+     *
+     * @return array{ok:bool,rows:array,source:string}
      */
     private function similarForMbid(string $mbid): array
     {
         $cacheKey = 'lb-sim:v1:' . $mbid;
         $cached   = $this->readCache($cacheKey);
         if ($cached !== null) {
-            return ['ok' => true, 'rows' => $cached];
+            return ['ok' => true, 'rows' => $cached, 'source' => 'cache'];
         }
 
-        if (!$this->hasTime(4.0)) {
-            return ['ok' => false, 'rows' => []];
+        if (!$this->hasTime(self::LB_LABS_TIMEOUT)) {
+            return $this->fallbackSimilar($cacheKey, []);
         }
 
         $algorithm = (defined('LISTENBRAINZ_SIMILAR_ALGORITHM') && trim((string)LISTENBRAINZ_SIMILAR_ALGORITHM) !== '')
@@ -346,10 +394,13 @@ class AlbumRecommendationService
 
         $resp = $this->httpJson(
             'https://labs.api.listenbrainz.org/similar-artists/json?artist_mbids='
-                . rawurlencode($mbid) . '&algorithm=' . rawurlencode($algorithm)
+                . rawurlencode($mbid) . '&algorithm=' . rawurlencode($algorithm),
+            null,
+            [],
+            self::LB_LABS_TIMEOUT
         );
         if (!$resp['ok']) {
-            return ['ok' => false, 'rows' => []];
+            return $this->fallbackSimilar($cacheKey, []);
         }
 
         // La risposta può essere una lista piatta di righe oppure una
@@ -368,7 +419,7 @@ class AlbumRecommendationService
         if (empty($raw)) {
             // Artista sconosciuto a ListenBrainz: esito valido, cache breve.
             $this->writeCache($cacheKey, [], self::CACHE_TTL_EMPTY);
-            return ['ok' => true, 'rows' => []];
+            return ['ok' => true, 'rows' => [], 'source' => 'fresh'];
         }
 
         $raw = array_slice($raw, 0, self::LB_SIMILAR_ROWS);
@@ -381,16 +432,20 @@ class AlbumRecommendationService
             }
         }
 
-        if (!$this->hasTime(3.0)) {
-            return ['ok' => false, 'rows' => []];
+        // Popolarità: api.listenbrainz.org, con la propria sospensione.
+        if ($this->isPaused(self::LB_POPULARITY_PAUSE_KEY) || !$this->hasTime(self::LB_API_TIMEOUT)) {
+            return $this->fallbackSimilar($cacheKey, $raw);
         }
         $pop = $this->httpJson(
             'https://api.listenbrainz.org/1/popularity/artist',
-            ['artist_mbids' => array_values(array_unique($ids))]
+            ['artist_mbids' => array_values(array_unique($ids))],
+            [],
+            self::LB_API_TIMEOUT
         );
         if (!$pop['ok']) {
             // Senza popolarità la correzione non si può applicare.
-            return ['ok' => false, 'rows' => []];
+            $this->pauseOnFailure(self::LB_POPULARITY_PAUSE_KEY, $pop['status']);
+            return $this->fallbackSimilar($cacheKey, $raw);
         }
 
         $users = [];
@@ -424,7 +479,53 @@ class AlbumRecommendationService
 
         $this->writeCache($cacheKey, $rows, !empty($rows) ? self::CACHE_TTL_OK : self::CACHE_TTL_EMPTY);
 
-        return ['ok' => true, 'rows' => $rows];
+        return ['ok' => true, 'rows' => $rows, 'source' => 'fresh'];
+    }
+
+    /**
+     * Simili quando l'aggiornamento non è riuscito, sempre con ok=false:
+     *   1) ultima lista corretta per popolarità, anche se scaduta;
+     *   2) altrimenti la risposta Labs appena ricevuta, nel suo ordine e
+     *      senza correzione: i primi SIMILAR_PRIMARY artisti, con indice
+     *      pari al punteggio Labs normalizzato sul massimo (0..1). Non va in
+     *      cache: al prossimo aggiornamento riuscito arriva la lista corretta.
+     *
+     * @param array $raw righe Labs già ricevute ([] se Labs non ha risposto)
+     * @return array{ok:bool,rows:array,source:string}
+     */
+    private function fallbackSimilar(string $cacheKey, array $raw): array
+    {
+        $stale = $this->readCacheStale($cacheKey);
+        if (is_array($stale) && !empty($stale)) {
+            return ['ok' => false, 'rows' => $stale, 'source' => 'stale'];
+        }
+
+        $rows = [];
+        $max  = 0.0;
+        $seen = [];
+        foreach ($raw as $r) {
+            $id = $this->normalizeMbid((string)($r['artist_mbid'] ?? ''));
+            $score = (float)($r['score'] ?? 0);
+            if ($id === '' || $score <= 0 || isset($seen[$id])) {
+                continue;
+            }
+            $seen[$id] = true;
+            $rows[] = ['mbid' => $id, 'name' => trim((string)($r['name'] ?? '')), 'score' => $score];
+            $max = max($max, $score);
+        }
+
+        usort($rows, function (array $a, array $b): int {
+            return $b['score'] <=> $a['score'];
+        });
+        $rows = array_slice($rows, 0, self::SIMILAR_PRIMARY);
+
+        foreach ($rows as &$row) {
+            $row['index'] = $max > 0 ? round($row['score'] / $max, 5) : 0.0;
+            unset($row['score']);
+        }
+        unset($row);
+
+        return ['ok' => false, 'rows' => $rows, 'source' => !empty($rows) ? 'labs-only' : 'none'];
     }
 
     // ============================================================
@@ -540,8 +641,9 @@ class AlbumRecommendationService
 
             $top = $this->topStudioAlbum($mbid, (string)($row['name'] ?? ''), $token);
             if (!$top['ok']) {
+                // Aggiornamento non riuscito: si usa l'album già scaricato,
+                // se c'è (topStudioAlbum lo restituisce anche con ok=false).
                 $ok = false;
-                continue;
             }
             if ($top['album'] === '') {
                 continue;
@@ -672,6 +774,10 @@ class AlbumRecommendationService
      * all'artista richiesto (MBID nel credito, oppure, se la risposta non
      * riporta gli MBID, lo stesso nome).
      *
+     * Se l'aggiornamento non riesce (servizio sospeso, errore, tempo
+     * esaurito) restituisce ok=false con l'ultimo album scaricato, anche se
+     * scaduto, oppure vuoto.
+     *
      * @return array{ok:bool,artist:string,album:string,cover:string}
      */
     private function topStudioAlbum(string $artistMbid, string $artistName, string $token): array
@@ -683,17 +789,19 @@ class AlbumRecommendationService
             return ['ok' => true] + $cached + $none;
         }
 
-        if (!$this->hasTime(3.0)) {
-            return ['ok' => false] + $none;
+        if ($this->isPaused(self::LB_TOP_ALBUMS_PAUSE_KEY) || !$this->hasTime(self::LB_API_TIMEOUT)) {
+            return $this->staleTopAlbum($cacheKey, $none);
         }
 
         $resp = $this->httpJson(
             'https://api.listenbrainz.org/1/popularity/top-release-groups-for-artist/' . rawurlencode($artistMbid),
             null,
-            ['Authorization: Token ' . $token]
+            ['Authorization: Token ' . $token],
+            self::LB_API_TIMEOUT
         );
         if (!$resp['ok']) {
-            return ['ok' => false] + $none;
+            $this->pauseOnFailure(self::LB_TOP_ALBUMS_PAUSE_KEY, $resp['status']);
+            return $this->staleTopAlbum($cacheKey, $none);
         }
 
         $pick = ['artist' => '', 'album' => '', 'cover' => ''];
@@ -741,6 +849,64 @@ class AlbumRecommendationService
         $this->writeCache($cacheKey, $pick, $pick['album'] !== '' ? self::CACHE_TTL_OK : self::CACHE_TTL_EMPTY);
 
         return ['ok' => true] + $pick;
+    }
+
+    /**
+     * Ultimo album più ascoltato scaricato per l'artista, anche se scaduto,
+     * con ok=false; vuoto se non è mai stato scaricato.
+     *
+     * @return array{ok:bool,artist:string,album:string,cover:string}
+     */
+    private function staleTopAlbum(string $cacheKey, array $none): array
+    {
+        $stale = $this->readCacheStale($cacheKey);
+        if (is_array($stale)) {
+            return ['ok' => false] + $stale + $none;
+        }
+        return ['ok' => false] + $none;
+    }
+
+    // ============================================================
+    // SOSPENSIONE DEGLI ENDPOINT DI api.listenbrainz.org
+    // ============================================================
+
+    /**
+     * Stato delle due sospensioni, per la diagnosi (debug=1).
+     *
+     * @return array{popularity:bool,top_albums:bool}
+     */
+    public function listenBrainzPauses(): array
+    {
+        return [
+            'popularity' => $this->isPaused(self::LB_POPULARITY_PAUSE_KEY),
+            'top_albums' => $this->isPaused(self::LB_TOP_ALBUMS_PAUSE_KEY),
+        ];
+    }
+
+    /**
+     * Vero se l'endpoint è sospeso dopo un errore recente. Vale per tutte
+     * le richieste: la sospensione sta nella cache su file.
+     */
+    private function isPaused(string $pauseKey): bool
+    {
+        return $this->readCache($pauseKey) !== null;
+    }
+
+    /**
+     * Sospende l'endpoint per LB_API_PAUSE secondi quando l'errore indica un
+     * servizio non disponibile: nessuna risposta (timeout, connessione
+     * chiusa), 429 o 5xx. Gli altri codici (per esempio 401 con un token non
+     * valido) non sospendono niente.
+     */
+    private function pauseOnFailure(string $pauseKey, int $status): void
+    {
+        if ($status === 0 || $status === 429 || $status >= 500) {
+            $this->writeCache(
+                $pauseKey,
+                ['at' => time(), 'status' => $status],
+                self::LB_API_PAUSE
+            );
+        }
     }
 
     /**
@@ -1291,7 +1457,37 @@ class AlbumRecommendationService
         }
 
         if (time() > (int)$data['_expires']) {
-            @unlink($file);
+            // Il file scaduto resta su disco per readCacheStale(), finché
+            // non viene riscritto o non supera STALE_MAX_AGE.
+            if (time() > (int)$data['_expires'] + self::STALE_MAX_AGE) {
+                @unlink($file);
+            }
+            return null;
+        }
+
+        return is_array($data['_payload']) ? $data['_payload'] : null;
+    }
+
+    /**
+     * Come readCache() ma accetta anche un dato scaduto da non più di
+     * STALE_MAX_AGE secondi. Si usa solo quando l'aggiornamento è fallito.
+     */
+    private function readCacheStale(string $key): ?array
+    {
+        $file = $this->cacheFile($key);
+
+        if (!is_file($file)) {
+            return null;
+        }
+
+        $raw = @file_get_contents($file);
+        $data = $raw ? json_decode($raw, true) : null;
+
+        if (!is_array($data) || !isset($data['_expires'], $data['_payload'])) {
+            return null;
+        }
+
+        if (time() > (int)$data['_expires'] + self::STALE_MAX_AGE) {
             return null;
         }
 
@@ -1369,18 +1565,19 @@ class AlbumRecommendationService
      *
      * ok=false per errori di rete, status diverso da 2xx, corpo non JSON o
      * oggetto {"error": ...}. status riporta il codice HTTP (0 = nessuna
-     * risposta). Il timeout totale non supera il budget residuo.
+     * risposta). Il timeout totale non supera $maxTimeout né il budget
+     * residuo.
      *
      * @param string[] $headers intestazioni aggiuntive
      * @return array{ok:bool,data:array,status:int}
      */
-    private function httpJson(string $url, ?array $postJson = null, array $headers = []): array
+    private function httpJson(string $url, ?array $postJson = null, array $headers = [], float $maxTimeout = 8.0): array
     {
         $ua = defined('APP_USER_AGENT')
             ? APP_USER_AGENT
             : 'GrizzlyMusicArchive/1.0 ( https://github.com/recycledesign9/grizzly-music-archive )';
 
-        $timeout = 8.0;
+        $timeout = max(1.0, $maxTimeout);
         $left    = $this->remaining();
         if ($left !== null) {
             $timeout = max(1.0, min($timeout, $left));
@@ -1401,8 +1598,11 @@ class AlbumRecommendationService
             $opts = [
                 CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_FOLLOWLOCATION => true,
-                CURLOPT_CONNECTTIMEOUT => 3,
-                CURLOPT_TIMEOUT        => (int)ceil($timeout),
+                // In millisecondi: con i secondi interi il timeout veniva
+                // arrotondato per eccesso e superava il budget.
+                CURLOPT_CONNECTTIMEOUT_MS => (int)min(3000, ceil($timeout * 1000)),
+                CURLOPT_TIMEOUT_MS        => (int)ceil($timeout * 1000),
+                CURLOPT_NOSIGNAL          => true,
                 CURLOPT_USERAGENT      => $ua,
                 CURLOPT_HTTPHEADER     => $headers,
             ];
