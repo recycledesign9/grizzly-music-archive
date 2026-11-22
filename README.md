@@ -447,3 +447,10 @@ Pull requests are welcome. For major changes please open an issue first.
 ## 📜 License
 
 MIT, see [LICENSE](LICENSE) for details.
+
+---
+
+> 🚫 **Boycott Last.fm**
+>
+> Grizzly no longer relies on Last.fm. The project prefers open, privacy-respecting and community-driven metadata sources whenever possible.
+
