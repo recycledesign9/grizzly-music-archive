@@ -3166,11 +3166,15 @@ $appDocsUrl     = 'https://www.recycledesign.it/grizzly/docs';
       btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Svuotamento…';
       result.textContent = '';
 
+      var wikiBody = new FormData();
+      wikiBody.append('csrf_token', CSRF_TOKEN);
+
       fetch(BASE_URL + '/index.php?route=settings/clear-wiki-cache', {
           method: 'POST',
           headers: {
             'X-Requested-With': 'XMLHttpRequest'
-          }
+          },
+          body: wikiBody
         })
         .then(function(r) {
           return r.json();

@@ -1390,7 +1390,18 @@ class SettingsController
         header('Content-Type: application/json; charset=utf-8');
 
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
             echo json_encode(['ok' => false, 'error' => 'Metodo non consentito.']);
+            exit;
+        }
+
+        // Stesso controllo CSRF delle altre azioni POST del controller.
+        // La view legge il campo 'error' per mostrare il messaggio.
+        $sessionToken = (string)($_SESSION['csrf_token'] ?? '');
+        $postedToken  = (string)($_POST['csrf_token'] ?? '');
+        if ($sessionToken === '' || $postedToken === '' || !hash_equals($sessionToken, $postedToken)) {
+            http_response_code(403);
+            echo json_encode(['ok' => false, 'error' => 'Token CSRF non valido. Ricarica la pagina e riprova.']);
             exit;
         }
 
