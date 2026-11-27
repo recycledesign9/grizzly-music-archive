@@ -152,6 +152,19 @@ if ($totalSec > 0) {
           </button>
         <?php endif; ?>
 
+        <!-- Scarica ZIP: link normale con attributo download, quindi
+             app.js non lo intercetta e il player non si interrompe.
+             Il browser gestisce il download con il suo avanzamento. -->
+        <?php if ($playableCount > 0): ?>
+          <a class="btn btn-outline-secondary grz-plhero__zip" id="btnDownloadZip"
+            href="<?= BASE_URL ?>/index.php?route=playlists/download/<?= (int)$playlist['id'] ?>"
+            download
+            data-title-tpl="Scarica in un archivio ZIP i brani con file audio ({n})"
+            title="Scarica in un archivio ZIP i brani con file audio (<?= $playableCount ?>)">
+            <i class="bi bi-file-earmark-zip me-1" aria-hidden="true"></i>Scarica
+          </a>
+        <?php endif; ?>
+
         <button class="btn btn-outline-secondary" id="btnToggleSelect"
           title="Seleziona tracce per eliminazione multipla">
           <i class="bi bi-check2-square me-1"></i>Seleziona
@@ -731,6 +744,16 @@ if ($totalSec > 0) {
           elDur.style.display = '';
         } else {
           elDur.style.display = 'none';
+        }
+      }
+
+      // Scarica ZIP: conteggio nel tooltip allineato, nascosto senza audio
+      var btnZip = document.getElementById('btnDownloadZip');
+      if (btnZip) {
+        if (playable === 0) {
+          btnZip.style.display = 'none';
+        } else if (btnZip.dataset.titleTpl) {
+          btnZip.title = btnZip.dataset.titleTpl.replace('{n}', playable);
         }
       }
 

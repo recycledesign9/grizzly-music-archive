@@ -60,6 +60,10 @@ class PlaylistController
                 $this->apiTracks($id);
                 break;
 
+            case 'download':
+                $this->download($id);
+                break;
+
             default:
                 $this->index();
                 break;
@@ -466,8 +470,194 @@ class PlaylistController
     }
 
     // ----------------------------------------------------------
+    // GET /playlists/download/{id}
+    // Scarica in un unico ZIP i file audio della playlist, nell'ordine
+    // della playlist, dentro una cartella con il nome della playlist e
+    // insieme a un file .m3u8 con la stessa sequenza.
+    //
+    // Lo ZIP è generato in streaming da ZipStreamWriter: nessun file
+    // temporaneo, Content-Length esatto, primi byte inviati subito
+    // (niente timeout del reverse proxy sulle playlist grandi).
+    // Le tracce senza file audio, o con file non più raggiungibile,
+    // vengono saltate.
+    // ----------------------------------------------------------
+    private function download(?int $id): void
+    {
+        if (!$id) {
+            $this->redirect('playlists');
+        }
+
+        $stmt = $this->db->prepare("SELECT name FROM playlists WHERE id = ?");
+        $stmt->execute([$id]);
+        $name = $stmt->fetchColumn();
+
+        if ($name === false) {
+            $this->notFound();
+        }
+
+        $files = $this->getPlaylistDownloadFiles($id);
+
+        if (empty($files)) {
+            $this->plainError(404, 'Nessun file audio disponibile per questa playlist.');
+        }
+
+        // Il download può durare minuti: la sessione non deve bloccare
+        // le altre richieste (player, navigazione SPA).
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+
+        $folder = ZipStreamWriter::safeName((string)$name);
+        if ($folder === '') {
+            $folder = 'Playlist ' . $id;
+        }
+
+        // Numerazione a larghezza fissa (01, 02 … oppure 001 oltre la 99a
+        // posizione) perché l'ordine alfabetico coincida con la playlist.
+        $maxPosition = 0;
+        foreach ($files as $f) {
+            $maxPosition = max($maxPosition, $f['position']);
+        }
+        $width = max(2, strlen((string)$maxPosition));
+
+        $zip = new ZipStreamWriter();
+        $zip->addDirectory($folder . '/');
+
+        $m3u   = "#EXTM3U\n";
+        $added = 0;
+
+        foreach ($files as $f) {
+            $title  = trim((string)$f['title']) !== '' ? (string)$f['title'] : 'Traccia ' . $f['position'];
+            $artist = (string)$f['artist_name'];
+
+            $entry = sprintf('%0' . $width . 'd', $f['position'])
+                . ' - '
+                . ZipStreamWriter::safeName($artist . ' - ' . $title, 160)
+                . '.' . $f['ext'];
+
+            if (!$zip->addFile($folder . '/' . $entry, $f['path'])) {
+                continue;
+            }
+            $added++;
+
+            $duration = $f['duration_sec'] > 0 ? $f['duration_sec'] : -1;
+            $m3u .= '#EXTINF:' . $duration . ',' . $this->m3uText($artist . ' - ' . $title) . "\n"
+                . $entry . "\n";
+        }
+
+        if ($added === 0) {
+            $this->plainError(404, 'Nessun file audio disponibile per questa playlist.');
+        }
+
+        $zip->addString($folder . '/' . $folder . '.m3u8', $m3u);
+
+        try {
+            $zip->send($folder . '.zip');
+        } catch (RuntimeException $e) {
+            // Eccezioni possibili solo prima dell'invio delle intestazioni
+            error_log('[playlist-zip] ' . $e->getMessage());
+            if (!headers_sent()) {
+                $this->plainError(500, $e->getMessage());
+            }
+        }
+
+        exit;
+    }
+
+    // ----------------------------------------------------------
     // Helpers privati
     // ----------------------------------------------------------
+
+    /**
+     * File audio da inserire nello ZIP, uno per traccia, nell'ordine
+     * della playlist.
+     *
+     * Se una traccia ha più file audio, vince il FLAC; a parità di
+     * formato il record più recente (stesso criterio dello streaming).
+     * Il percorso è risolto con MediaPathResolver::resolveAudioFile(),
+     * cioè con le stesse regole dello streaming per i file managed ed
+     * external; un file non raggiungibile passa al candidato successivo.
+     *
+     * @return array<int, array{position: int, title: string, artist_name: string, duration_sec: int, path: string, ext: string}>
+     */
+    private function getPlaylistDownloadFiles(int $playlistId): array
+    {
+        $sql = "
+            SELECT
+                pt.position,
+                t.id          AS track_id,
+                t.title,
+                t.duration_sec,
+                ar.name       AS artist_name,
+                af.id         AS audio_id,
+                af.filename,
+                %s
+            FROM playlist_tracks pt
+            JOIN tracks      t  ON t.id  = pt.track_id
+            JOIN albums      al ON al.id = t.album_id
+            JOIN artists     ar ON ar.id = al.artist_id
+            JOIN audio_files af ON af.track_id = t.id
+            WHERE pt.playlist_id = ?
+            ORDER BY pt.position ASC, af.id DESC
+        ";
+
+        try {
+            $stmt = $this->db->prepare(sprintf($sql, 'af.storage_type, af.source_path'));
+            $stmt->execute([$playlistId]);
+        } catch (PDOException $e) {
+            // DB precedente alle colonne storage_type/source_path:
+            // tutti i file sono managed, come nello streaming.
+            $stmt = $this->db->prepare(sprintf($sql, "'managed' AS storage_type, NULL AS source_path"));
+            $stmt->execute([$playlistId]);
+        }
+
+        $byTrack = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $tid = (int)$row['track_id'];
+            if (!isset($byTrack[$tid])) {
+                $byTrack[$tid] = [];
+            }
+            $byTrack[$tid][] = $row;
+        }
+
+        $files = [];
+
+        foreach ($byTrack as $candidates) {
+            usort($candidates, function (array $a, array $b): int {
+                $rankA = strtolower(pathinfo((string)$a['filename'], PATHINFO_EXTENSION)) === 'flac' ? 0 : 1;
+                $rankB = strtolower(pathinfo((string)$b['filename'], PATHINFO_EXTENSION)) === 'flac' ? 0 : 1;
+                if ($rankA !== $rankB) {
+                    return $rankA - $rankB;
+                }
+                return (int)$b['audio_id'] - (int)$a['audio_id'];
+            });
+
+            foreach ($candidates as $c) {
+                $path = MediaPathResolver::resolveAudioFile($c);
+                if ($path === null) {
+                    continue;
+                }
+
+                $files[] = [
+                    'position'     => (int)$c['position'],
+                    'title'        => (string)$c['title'],
+                    'artist_name'  => (string)$c['artist_name'],
+                    'duration_sec' => (int)($c['duration_sec'] ?? 0),
+                    'path'         => $path,
+                    'ext'          => strtolower(pathinfo($path, PATHINFO_EXTENSION)),
+                ];
+                break;
+            }
+        }
+
+        return $files;
+    }
+
+    /** Testo su una sola riga per le voci #EXTINF del file .m3u8 */
+    private function m3uText(string $value): string
+    {
+        return trim(preg_replace('/[\r\n]+/', ' ', $value) ?? $value);
+    }
 
     /**
      * URL della copertina di un album: locale > remota > nessuna.
@@ -560,6 +750,15 @@ class PlaylistController
     {
         http_response_code($code);
         $this->json(['success' => false, 'error' => $message]);
+    }
+
+    /** Risponde con un messaggio di testo semplice e termina. */
+    private function plainError(int $code, string $message): void
+    {
+        http_response_code($code);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo $message;
+        exit;
     }
 
     private function redirect(string $route): void
