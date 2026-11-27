@@ -368,14 +368,37 @@ class AlbumMetadataService
     {
         $artistRaw = trim($artist);
         $albumRaw  = trim($album);
+
+        // GRIZZLY_SCANNER_ARTIST_CREDIT_TITLE_V1
+        //
+        // Alcuni tag/folder incorporano l'artist credit nel campo ALBUM,
+        // per esempio:
+        //   High Rise [with Chester Bennington]
+        //   Album (feat. Guest)
+        //   Album [ft. Guest]
+        //
+        // MusicBrainz invece conserva normalmente quel testo nell'artist
+        // credit e il titolo dell'album resta "High Rise". Per il SOLO
+        // lookup di identita' scanner usiamo quindi il titolo base.
+        //
+        // Importante: questa regola NON interpreta soprannomi/disambiguazioni
+        // come "Weezer (The Green Album)" o "American Football (LP3)" e non
+        // modifica il titolo salvato nel DB.
+        $albumLookupRaw = $this->scannerIdentityLookupAlbumTitle($albumRaw);
+
         $artistNorm = $this->normalize($artistRaw);
-        $albumNorm  = $this->normalize($albumRaw);
+        $albumNorm  = $this->normalize($albumLookupRaw);
 
         if ($artistNorm === '' || $albumNorm === '') {
             return ['mbid' => '', 'artist_mbid' => '', 'release_group' => '', 'year' => ''];
         }
 
-        $mb = $this->searchMusicBrainzRelease($artistNorm, $albumNorm, $year, $albumRaw);
+        $mb = $this->searchMusicBrainzRelease(
+            $artistNorm,
+            $albumNorm,
+            $year,
+            $albumLookupRaw
+        );
         if (empty($mb)) {
             return ['mbid' => '', 'artist_mbid' => '', 'release_group' => '', 'year' => ''];
         }
@@ -386,6 +409,53 @@ class AlbumMetadataService
             'release_group' => (string)($mb['release-group']['id'] ?? ''),
             'year'          => !empty($mb['date']) ? substr((string)$mb['date'], 0, 4) : '',
         ];
+    }
+
+    /**
+     * Titolo usato esclusivamente dal lookup di identita' dello scanner.
+     *
+     * Regole volutamente strette:
+     * - "[with Nome]" viene riconosciuto solo tra parentesi QUADRE;
+     * - "feat.", "featuring" e "ft." sono riconosciuti tra tonde o quadre;
+     * - qualsiasi altro suffisso resta intatto.
+     *
+     * In questo modo restano fuori dal ramo:
+     *   Weezer (The Green Album)
+     *   American Football (LP3)
+     *   Album (Deluxe)
+     *   Album (Live)
+     *   Album (Remix)
+     */
+    private function scannerIdentityLookupAlbumTitle(string $album): string
+    {
+        $album = trim($album);
+        if ($album === '') {
+            return '';
+        }
+
+        // "with" e' volutamente ammesso solo nelle quadre: nelle parentesi
+        // tonde puo' essere parte reale del titolo/disambiguazione.
+        if (preg_match(
+            '/^(.+?)\s*\[\s*with\s+[^\]]+\s*\]\s*$/iu',
+            $album,
+            $m
+        ) === 1) {
+            $base = trim((string)$m[1]);
+            return $base !== '' ? $base : $album;
+        }
+
+        // feat./featuring/ft. sono marcatori di artist credit molto piu'
+        // specifici e possono comparire sia tra tonde sia tra quadre.
+        if (preg_match(
+            '/^(.+?)\s*[\(\[]\s*(?:feat(?:uring)?\.?|ft\.?)\s+[^\)\]]+[\)\]]\s*$/iu',
+            $album,
+            $m
+        ) === 1) {
+            $base = trim((string)$m[1]);
+            return $base !== '' ? $base : $album;
+        }
+
+        return $album;
     }
 
 
@@ -2602,6 +2672,18 @@ class AlbumMetadataService
             'year' => max(0, $year),
             'release_mbid' => strtolower(trim($releaseMbid)),
         ];
+
+        // GRIZZLY_SCANNER_ARTIST_CREDIT_TITLE_V1
+        //
+        // Le vecchie cache v2 costruite con un titolo che incorporava un
+        // artist credit possono contenere una release MusicBrainz sbagliata.
+        // Cambiamo la chiave SOLO per quei titoli: tutte le altre cache
+        // rimangono valide e non provocano una ricostruzione globale.
+        $identityLookupAlbum = $this->scannerIdentityLookupAlbumTitle($album);
+        if ($identityLookupAlbum !== trim($album)) {
+            $payload['identity_lookup_album'] = $normalize($identityLookupAlbum);
+            $payload['artist_credit_title_v'] = 1;
+        }
 
         $json = json_encode(
             $payload,

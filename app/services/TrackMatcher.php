@@ -113,7 +113,7 @@ class TrackMatcher
             $creditMatches = [];
 
             foreach (array_keys($remainingLocal) as $localIndex) {
-                if ($this->isTrailingFeaturedArtistVariant(
+                if ($this->isDeterministicAnnotationVariant(
                     $candidate[$candidateIndex],
                     $local[$localIndex]
                 )) {
@@ -395,7 +395,7 @@ class TrackMatcher
             $matches = [];
 
             foreach (array_keys($remainingLocal) as $localIndex) {
-                if ($this->isTrailingFeaturedArtistVariant(
+                if ($this->isDeterministicAnnotationVariant(
                     $candidate[$candidateIndex],
                     $local[$localIndex]
                 )) {
@@ -538,7 +538,9 @@ class TrackMatcher
             ? $weighted / $denominator
             : 0.0;
 
-        $variantCount = $deterministicCount + $compatibleCount;
+        // Deterministic annotations are exact-equivalent (see compare()):
+        // only tolerant matches are reported as variants.
+        $variantCount = $compatibleCount;
         $variantRatio = $candidateTotal > 0
             ? $variantCount / $candidateTotal
             : 0.0;
@@ -569,9 +571,11 @@ class TrackMatcher
             ];
         }
 
+        // Deterministic annotations count as exact, as in compare(): only
+        // genuinely fuzzy matches consume the variant budget.
         $conservativeFullMatch = $candidateTotal === $localTotal
             && $matchedCount === $candidateTotal
-            && $variantCount <= $this->maxCompatibleVariants($candidateTotal);
+            && $compatibleCount <= $this->maxCompatibleVariants($candidateTotal);
 
         return [
             'candidate_total' => $candidateTotal,
@@ -682,6 +686,180 @@ class TrackMatcher
         }
 
         return 0.0;
+    }
+
+    /**
+     * GRIZZLY_VERSION_ANNOTATION_V1
+     *
+     * Deterministic metadata annotations consumed before the generic variant
+     * budget: featured-artist credits and store/version labels.
+     *
+     * @param array<string,mixed> $a
+     * @param array<string,mixed> $b
+     */
+    private function isDeterministicAnnotationVariant(array $a, array $b): bool
+    {
+        return $this->isTrailingFeaturedArtistVariant($a, $b)
+            || $this->isVersionAnnotationVariant($a, $b)
+            || $this->isItalianDellDiVariant($a, $b);
+    }
+
+    /**
+     * GRIZZLY_ITALIAN_DELL_DI_TRACK_TITLE_FIX_V1
+     *
+     * Treat exactly one Italian articulated-preposition contraction as a
+     * deterministic metadata spelling variant:
+     *
+     *   "dell'acqua" <=> "di acqua"
+     *
+     * This is intentionally much narrower than stop-word removal or fuzzy
+     * matching. Exactly one side must contain exactly one "dell'..." token;
+     * after expanding only that token to "di ...", the complete normalized
+     * titles must be identical. No other words may differ.
+     *
+     * @param array<string,mixed> $a
+     * @param array<string,mixed> $b
+     */
+    private function isItalianDellDiVariant(array $a, array $b): bool
+    {
+        $aRaw = (string)($a['raw'] ?? '');
+        $bRaw = (string)($b['raw'] ?? '');
+
+        $aCount = preg_match_all("/\\bdell['’](?=\\p{L})/iu", $aRaw);
+        $bCount = preg_match_all("/\\bdell['’](?=\\p{L})/iu", $bRaw);
+
+        if ($aCount === false || $bCount === false) {
+            return false;
+        }
+
+        if (!(($aCount === 1 && $bCount === 0) || ($aCount === 0 && $bCount === 1))) {
+            return false;
+        }
+
+        $contracted = $aCount === 1 ? $aRaw : $bRaw;
+        $plain = $aCount === 1 ? $bRaw : $aRaw;
+
+        $expanded = preg_replace(
+            "/\\bdell['’](?=\\p{L})/iu",
+            'di ',
+            $contracted,
+            1
+        );
+
+        if (!is_string($expanded) || $expanded === '') {
+            return false;
+        }
+
+        $expandedKey = $this->deterministicCompact($expanded);
+        $plainKey = $this->deterministicCompact($plain);
+
+        return $expandedKey !== '' && $expandedKey === $plainKey;
+    }
+
+    /**
+     * Download stores tag album tracks as "Title (Album Version)",
+     * "Title (Album Version (Explicit))", "Title - Remastered 2011" while
+     * MusicBrainz/local tracklists carry the plain title. Such a label
+     * describes the edition of the recording, not a different song.
+     *
+     * Only trailing groups made exclusively of the whitelisted words below
+     * are removed. Demo, live, remix, mono, single/radio edits and any other
+     * qualifier are kept: they denote a different recording and stay subject
+     * to the bounded near-full policy.
+     *
+     * @param array<string,mixed> $a
+     * @param array<string,mixed> $b
+     */
+    private function isVersionAnnotationVariant(array $a, array $b): bool
+    {
+        $aBase = $this->stripTrailingVersionAnnotations((string)$a['raw']);
+        $bBase = $this->stripTrailingVersionAnnotations((string)$b['raw']);
+
+        if ($aBase === null && $bBase === null) {
+            return false;
+        }
+
+        $aKey = $this->deterministicCompact($aBase ?? (string)$a['raw']);
+        $bKey = $this->deterministicCompact($bBase ?? (string)$b['raw']);
+
+        return $aKey !== '' && $aKey === $bKey;
+    }
+
+    /**
+     * Remove up to three trailing version annotations, either bracketed
+     * (one nesting level allowed) or introduced by " - ".
+     * Returns null when nothing was removed.
+     */
+    private function stripTrailingVersionAnnotations(string $title): ?string
+    {
+        $current = trim($title);
+        $stripped = false;
+
+        for ($i = 0; $i < 3; $i++) {
+            if (preg_match(
+                '/^(.*?)\s*[\(\[]((?:[^\(\)\[\]]|[\(\[][^\(\)\[\]]*[\)\]])*)[\)\]]\s*$/u',
+                $current,
+                $m
+            ) === 1 && $this->isVersionAnnotation((string)$m[2])) {
+                $base = trim((string)$m[1]);
+            } elseif (preg_match(
+                '/^(.*?)\s+[-\x{2013}]\s+([^-\x{2013}]+)$/u',
+                $current,
+                $m
+            ) === 1 && $this->isVersionAnnotation((string)$m[2])) {
+                $base = trim((string)$m[1]);
+            } else {
+                break;
+            }
+
+            if ($base === '') {
+                break;
+            }
+
+            $current = $base;
+            $stripped = true;
+        }
+
+        return $stripped ? $current : null;
+    }
+
+    private function isVersionAnnotation(string $content): bool
+    {
+        $content = function_exists('mb_strtolower')
+            ? mb_strtolower($content, 'UTF-8')
+            : strtolower($content);
+
+        $words = preg_split('/[^\p{L}\p{N}]+/u', $content, -1, PREG_SPLIT_NO_EMPTY);
+        if (!is_array($words) || empty($words)) {
+            return false;
+        }
+
+        $allowed = [
+            'album' => true, 'lp' => true, 'version' => true,
+            'explicit' => true, 'clean' => true, 'edited' => true,
+            'remaster' => true, 'remastered' => true,
+            'digital' => true, 'digitally' => true,
+        ];
+        $required = [
+            'album' => true, 'lp' => true, 'explicit' => true,
+            'clean' => true, 'edited' => true,
+            'remaster' => true, 'remastered' => true,
+        ];
+
+        $hasRequired = false;
+        foreach ($words as $word) {
+            if (preg_match('/^(19|20)\d{2}$/', $word) === 1) {
+                continue;
+            }
+            if (!isset($allowed[$word])) {
+                return false;
+            }
+            if (isset($required[$word])) {
+                $hasRequired = true;
+            }
+        }
+
+        return $hasRequired;
     }
 
     /**
