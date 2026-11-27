@@ -64,6 +64,11 @@ class ArtistController
     $albums = $this->artistModel->getAlbums($id);
     $stats  = $this->artistModel->getAlbumStats($id);
 
+    // La policy di cache rimane nel model; nessun I/O esterno nel render.
+    require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
+    $needsArtistMeta = $this->artistModel->needsBioRefetch($artist, ArtistMetadataService::BIO_LOGIC_VERSION)
+      || $this->artistModel->needsImageRefetch($artist, ArtistMetadataService::IMAGE_LOGIC_VERSION);
+
     require BASE_PATH . '/views/artists/profile.php';
   }
 
@@ -199,6 +204,8 @@ class ArtistController
     return [
       'ok'          => true,
       'bio'         => $artist['bio']         ?? '',
+      'bio_status'  => $artist['bio_status'] ?? 'none',
+      'image_status' => $artist['image_status'] ?? 'none',
       'bio_source'  => $artist['bio_source']  ?? '',
       'bio_lang'    => $artist['bio_lang']    ?? '',
       'bio_url'     => $artist['bio_url']     ?? '',
@@ -241,23 +248,14 @@ class ArtistController
 
       require_once BASE_PATH . '/app/services/ArtistMetadataService.php';
 
-      // Discografia già salvata e NON vuota: la mostriamo dalla cache
-      // (rispettando needsDiscographyRefetch per gli aggiornamenti di
-      // versione). Se invece in cache non c'è NESSUNA riga, non ci
-      // fidiamo del cooldown: un vuoto salvato è quasi sempre un
-      // fallimento MusicBrainz transitorio (503 a metà scansione), non un
-      // artista senza dischi. In quel caso si ritenta SUBITO a ogni visita
-      // — con il retry HTTP sui 503 ora nel service, basta che l'utente
-      // riapra la pagina e la discografia si popola da sola, senza SQL
-      // manuale. (Il refetch resta comunque limitato a chi ha un MBID,
-      // vedi guardia $mbid poco sotto.)
+      // Anche una cache vuota rispetta il cooldown e il TTL del model.
+      // Un errore temporaneo non deve generare richieste a ogni visita.
       $cachedDisco = $this->artistModel->getDiscography($id);
-      $hasCached   = !empty($cachedDisco);
 
-      if ($hasCached
-          && !$this->artistModel->needsDiscographyRefetch($artist, ArtistMetadataService::DISCOGRAPHY_LOGIC_VERSION)) {
+      if (!$this->artistModel->needsDiscographyRefetch($artist, ArtistMetadataService::DISCOGRAPHY_LOGIC_VERSION)) {
         echo json_encode([
           'ok'    => true,
+          'status' => $artist['disco_status'] ?? 'none',
           'items' => $this->mapDiscographyCovers($cachedDisco),
         ]);
         return;
@@ -268,7 +266,7 @@ class ArtistController
       // marchiamo nulla così si potrà ritentare subito dopo il fetch-meta.
       $mbid = $artist['mb_artist_id'] ?? '';
       if ($mbid === '') {
-        echo json_encode(['ok' => true, 'items' => []]);
+        echo json_encode(['ok' => true, 'status' => 'pending', 'items' => $this->mapDiscographyCovers($cachedDisco)]);
         return;
       }
 
@@ -305,6 +303,7 @@ class ArtistController
 
       echo json_encode([
         'ok'    => true,
+        'status' => $status,
         'items' => $this->mapDiscographyCovers($this->artistModel->getDiscography($id)),
       ]);
     } catch (Throwable $e) {

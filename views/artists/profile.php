@@ -28,8 +28,7 @@ if (!empty($artist['active_from'])) {
 // ordinati per numero di album (Artist::getAlbumStats).
 $mainGenre = $stats['genres'][0] ?? '';
 
-// Discografia ufficiale gia' recuperata?
-$discoFetched = !empty($artist['disco_fetched_at']);
+// La decisione sul retry arriva dal controller e dal model.
 
 /* PHP 7.4 compatibile. Chiave del colore formato nel registro:
    segue i token --grz-fmt-* usati dai badge formato. */
@@ -108,7 +107,7 @@ if (!function_exists('artistLedgerFormatKey')) {
 
       <?php elseif ($bioFetched): ?>
         <p class="artist-bio-empty" id="bioEmpty">
-          Nessuna biografia disponibile per questo artista.
+          <?= ($artist['bio_status'] ?? '') === 'error' ? 'Biografia temporaneamente non disponibile. Verrà ritentata alla prossima visita utile.' : 'Nessuna biografia disponibile per questo artista.' ?>
         </p>
 
       <?php else: ?>
@@ -280,8 +279,16 @@ if (!function_exists('artistLedgerFormatKey')) {
   (function() {
     var BASE = '<?= BASE_URL ?>';
     var ARTIST_ID = <?= (int)$artist['id'] ?>;
-    var ALREADY_FETCHED = <?= $bioFetched ? 'true' : 'false' ?>;
-    var DISCO_FETCHED = <?= $discoFetched ? 'true' : 'false' ?>;
+    var NEED_META = <?= $needsArtistMeta ? 'true' : 'false' ?>;
+    // Identità del DOM, non solo ID artista: protegge anche da A -> B -> A.
+    var pageHero = document.getElementById('artistHero');
+    var pageLedger = document.getElementById('artistLedger');
+
+    function isCurrentPage() {
+      return !!pageHero && !!pageLedger &&
+        document.getElementById('artistHero') === pageHero &&
+        document.getElementById('artistLedger') === pageLedger;
+    }
 
     function esc(s) {
       var d = document.createElement('div');
@@ -336,6 +343,7 @@ if (!function_exists('artistLedgerFormatKey')) {
 
     // ---- Render della bio recuperata -------------------------
     function renderMeta(data) {
+      if (!isCurrentPage()) return;
       var bioBox = document.getElementById('artistBio');
       if (bioBox) {
         if (data.bio && data.bio.trim() !== '') {
@@ -350,13 +358,18 @@ if (!function_exists('artistLedgerFormatKey')) {
               '';
             srcHtml = '<div class="artist-bio-source">Fonte: ' + inner + lang + '</div>';
           }
+          // A capo come nl2br() del render PHP: la bio Wikipedia ha i
+          // paragrafi separati da \n, che in HTML altrimenti sparirebbero.
           bioBox.innerHTML =
-            '<p class="artist-bio-text" id="bioText">' + esc(data.bio) + '</p>' +
+            '<p class="artist-bio-text" id="bioText">' + esc(data.bio).replace(/\n/g, '<br>\n') + '</p>' +
             '<button type="button" class="artist-bio-toggle" id="bioToggle" hidden>Mostra tutto</button>' +
             srcHtml;
           setupClamp();
-        } else {
-          bioBox.innerHTML = '<p class="artist-bio-empty">Nessuna biografia disponibile per questo artista.</p>';
+        } else if (!bioBox.querySelector('#bioText')) {
+          bioBox.innerHTML = '<p class="artist-bio-empty"></p>';
+          bioBox.firstChild.textContent = data.bio_status === 'error' || data.bio_status === 'partial'
+            ? 'Biografia temporaneamente non disponibile. Verrà ritentata alla prossima visita utile.'
+            : 'Nessuna biografia disponibile per questo artista.';
         }
       }
 
@@ -376,32 +389,35 @@ if (!function_exists('artistLedgerFormatKey')) {
       renderChips(data);
     }
 
-    // ---- Fetch on demand (solo prima volta) ------------------
+    // Non rimuovere una biografia valida se la richiesta fallisce.
+    function showMetaError() {
+      if (!isCurrentPage()) return;
+      var bioBox = document.getElementById('artistBio');
+      if (bioBox && !bioBox.querySelector('#bioText')) {
+        bioBox.innerHTML = '<p class="artist-bio-empty">Recupero metadati temporaneamente non disponibile. Riprova alla prossima visita.</p>';
+      }
+    }
+
+    // Il backend rivaluta la cache prima di interrogare qualsiasi API.
     function fetchMeta(done) {
+      if (!isCurrentPage()) return;
       fetch(BASE + '/index.php?route=artists/fetch-meta/' + ARTIST_ID, {
           headers: {
             'X-Requested-With': 'XMLHttpRequest'
           }
         })
         .then(function(r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
           return r.json();
         })
         .then(function(data) {
+          if (!isCurrentPage()) return;
           if (data && data.ok) renderMeta(data);
-          else renderMeta({
-            bio: ''
-          });
+          else showMetaError();
         })
-        .catch(function() {
-          renderMeta({
-            bio: ''
-          });
-        })
-        // Eseguito in ogni caso (successo o errore), come un finally:
-        // sblocca la chiamata alla discografia SOLO quando fetch-meta
-        // ha finito e l'eventuale MBID è stato salvato in DB.
+        .catch(showMetaError)
         .then(function() {
-          if (typeof done === 'function') done();
+          if (isCurrentPage() && typeof done === 'function') done();
         });
     }
 
@@ -605,7 +621,8 @@ if (!function_exists('artistLedgerFormatKey')) {
     // normalizzato vale solo per le schede SENZA release-group (una
     // scheda con un release-group diverso è un'altra uscita e resta
     // fuori dagli album in studio). Ogni scheda si abbina una volta.
-    function renderLedger(items) {
+    function renderLedger(items, fetchStatus) {
+      if (!isCurrentPage()) return;
       var section = document.getElementById('artistLedger');
       var body = document.getElementById('ledgerBody');
       var status = document.getElementById('ledgerStatus');
@@ -614,7 +631,10 @@ if (!function_exists('artistLedgerFormatKey')) {
 
       if (!items || !items.length) {
         if (status) {
-          status.textContent = 'Discografia ufficiale non disponibile per questo artista.';
+          status.textContent = fetchStatus === 'error' || fetchStatus === 'partial'
+            ? 'Discografia temporaneamente non disponibile. Verrà ritentata alla prossima visita utile.'
+            : (fetchStatus === 'pending' ? 'Discografia in attesa della verifica dell’identità artista.'
+              : 'Discografia ufficiale non disponibile per questo artista.');
           status.classList.add('is-final');
         }
         return;
@@ -694,27 +714,37 @@ if (!function_exists('artistLedgerFormatKey')) {
         own: nOwned + extras.length,
         miss: nMissing
       });
-      if (status) status.hidden = true;
+      if (status) {
+        var incomplete = fetchStatus === 'error' || fetchStatus === 'partial' || fetchStatus === 'pending';
+        status.hidden = !incomplete;
+        if (incomplete) {
+          status.textContent = 'Discografia salvata in cache. Aggiornamento da completare alla prossima visita utile.';
+          status.classList.add('is-final');
+        }
+      }
       if (source) source.hidden = false;
 
       syncPlayButtons();
     }
 
     function fetchDisco() {
+      if (!isCurrentPage()) return;
       fetch(BASE + '/index.php?route=artists/fetch-discography/' + ARTIST_ID, {
           headers: {
             'X-Requested-With': 'XMLHttpRequest'
           }
         })
         .then(function(r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
           return r.json();
         })
         .then(function(data) {
-          if (data && data.ok) renderLedger(data.items);
-          else renderLedger([]);
+          if (!isCurrentPage()) return;
+          if (data && data.ok) renderLedger(data.items, data.status);
+          else renderLedger([], 'error');
         })
         .catch(function() {
-          renderLedger([]);
+          renderLedger([], 'error');
         });
     }
 
@@ -802,21 +832,17 @@ if (!function_exists('artistLedgerFormatKey')) {
     }
 
     function init() {
+      if (!isCurrentPage()) return;
       setupPlayButtons();
+      setupClamp();
 
-      if (ALREADY_FETCHED) {
-        setupClamp();
-        // Bio già in DB → l'MBID (se esiste) è già disponibile:
-        // la discografia può partire subito.
-        fetchDisco();
-      } else {
-        // RACE CONDITION da evitare: fetch-discography dipende
-        // dall'MBID che viene trovato e salvato da fetch-meta.
-        // Con le due chiamate in parallelo, la discografia leggerebbe
-        // un MBID ancora vuoto e mostrerebbe "non disponibile"
-        // (prima "funzionava" solo perché il session lock di PHP
-        // serializzava le richieste per sbaglio).
+      // Prima i metadati quando dovuti, poi la discografia: l'MBID
+      // potrebbe essere appena stato salvato. Nessuna chiamata meta
+      // quando entrambe le cache sono ancora valide.
+      if (NEED_META) {
         fetchMeta(fetchDisco);
+      } else {
+        fetchDisco();
       }
     }
 
