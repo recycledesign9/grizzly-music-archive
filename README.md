@@ -33,6 +33,7 @@
 - Sticky audio player for MP3 and FLAC: single-row layout, repeat (queue or track), remaining time, minute ruler and an editable play queue
 - **Instant Mix**: pick genres, a period and a number of tracks, and Grizzly builds a varied mix from the files in your archive, ready to play and optionally saved as a playlist
 - Playlists with drag-and-drop ordering
+- Download playlists as streamed ZIP archives (including ZIP64 for archives larger than 4 GB), with MP3/FLAC files in playlist order and an M3U8 playlist; no temporary archive or additional PHP ZIP extension required
 - YouTube lookup for tracks, with in-page preview
 
 **Audio library**
@@ -207,7 +208,11 @@ A pinned image tag will not automatically receive future PHP security fixes. Fol
 
 ---
 
-## ⬆️ Upgrading to v0.6.2
+## ⬆️ Upgrading to v0.6.3
+
+**Already running v0.6.2?** Version 0.6.3 introduces no new database migration. Back up your archive, pull the release, rebuild the shared PHP image and recreate only `app` and `worker`, preserving the existing database image and volumes. If upgrading from an earlier version, follow the cumulative v0.6.2 migration procedure below.
+
+### Cumulative migration for installations older than v0.6.2
 
 **Back up your database before upgrading.** Existing installations update to v0.6.2 with a single cumulative migration, without running earlier migration files separately. Upgrades from v0.4.0 and later are supported.
 
