@@ -114,8 +114,16 @@ class ArtistMetadataService
      *
      * v1: identita' Deezer persistente + risoluzione deterministica
      * MusicBrainz -> Deezer ID -> /artist/{id}; nessun ranking per fan.
+     *
+     * v2: con MBID gia' salvato e MusicBrainz che non risponde, la foto
+     * non viene piu' rimandata a priori: si usa la prova degli album
+     * locali su Deezer (stessa prova degli artisti senza relazione Deezer
+     * su MusicBrainz). Senza prova l'esito resta 'error' e si riprova
+     * dopo il cooldown. Il download scarta le risposte che non sono
+     * immagini. Il bump riguarda solo gli artisti SENZA foto: per una
+     * foto gia' presente needsImageRefetch() non rifa' mai il recupero.
      */
-    public const IMAGE_LOGIC_VERSION = 1;
+    public const IMAGE_LOGIC_VERSION = 2;
 
     /**
      * v2: fix del 2026-07 — la discografia veniva letta da /release
@@ -930,8 +938,41 @@ class ArtistMetadataService
             ];
         }
 
+        // MBID gia' salvato ma MusicBrainz non ha risposto: le relazioni
+        // url-rels (eventuale link Deezer) non sono note. Resta valida la
+        // prova degli album locali, che non dipende da MusicBrainz: nome
+        // artista identico + titolo album identico su Deezer, con un solo
+        // ID artista coerente. E' la stessa prova usata quando MusicBrainz
+        // risponde ma non ha alcuna relazione Deezer. Senza prova univoca
+        // l'esito e' ok=false (errore transitorio): nessun "non trovato",
+        // si riprova dopo il cooldown, quando MusicBrainz risponde.
+        //
+        // L'ID Deezer trovato cosi' NON viene restituito, quindi non viene
+        // salvato in deezer_artist_id: senza MusicBrainz non si puo'
+        // escludere una relazione Deezer esplicita diversa, e un mapping
+        // salvato non viene piu' cambiato in automatico
+        // (Artist::attachDeezerIdIfEmpty). Si salva solo la foto; l'identita'
+        // Deezer resta da stabilire con MusicBrainz raggiungibile.
         if ($musicBrainzUnavailableForKnownIdentity) {
-            return ['id' => '', 'image_url' => '', 'ok' => false];
+            $resolved = $this->deezerArtistIdFromLocalAlbums(
+                $artistName,
+                $localAlbumTitles
+            );
+
+            if (!$resolved['ok'] || $resolved['id'] === '') {
+                return ['id' => '', 'image_url' => '', 'ok' => false];
+            }
+
+            $direct = $this->deezerArtistById($resolved['id']);
+            if (!$direct['ok']) {
+                return ['id' => '', 'image_url' => '', 'ok' => false];
+            }
+
+            return [
+                'id'        => '',
+                'image_url' => $direct['image_url'],
+                'ok'        => true,
+            ];
         }
 
         $deezerIds = $this->extractDeezerArtistIds($mbRelations);
@@ -1207,6 +1248,13 @@ class ArtistMetadataService
 
         $bytes = $this->httpGetBinary($imageUrl);
         if ($bytes === '' || strlen($bytes) < 512) {
+            return null;
+        }
+
+        // Solo vere immagini su disco: una pagina HTML di errore abbastanza
+        // lunga passerebbe il controllo sulla dimensione e verrebbe salvata
+        // come foto. Stessa verifica delle copertine della discografia.
+        if (!$this->isImageBytes($bytes)) {
             return null;
         }
 
