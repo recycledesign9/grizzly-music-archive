@@ -1363,14 +1363,6 @@ window.__syncDashboardLiveRefresh = DashboardLiveRefresh.sync;
       // Se siamo usciti dalla dashboard il timer viene eliminato.
       DashboardLiveRefresh.sync();
 
-      // Estrazione colore dominante dell'hero scheda disco (se presente).
-      // Va richiamata a ogni navigazione SPA perche' il contenuto e' stato
-      // rigenerato: senza questa riga il colore si applicava solo dopo un
-      // refresh completo della pagina.
-      if (typeof window.__applyAlbumHero === 'function') {
-        window.__applyAlbumHero();
-      }
-
       // Sincronizza i tre stati del pulsante hero "Riproduci album"
       // (play / pausa / riprendi) col Player, dopo la rigenerazione SPA.
       if (typeof window.__syncAlbumHeroPlayBtn === 'function') {

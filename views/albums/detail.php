@@ -217,11 +217,8 @@ if ($audioFmtLabel !== '') {
   <?php endif; ?>
 
   <!-- ============================================================
-       HERO — testata a piena larghezza. La fascia cromatica dietro
-       la testata viene colorata da album-hero.js leggendo il colore
-       dominante della cover GIÀ caricata (nessuna rete, nessuna API).
-       Se la cover manca o è cross-origin, resta l'accento neutro di
-       default definito nel CSS: l'hero non dipende da nulla di esterno.
+       HERO — testata a piena larghezza, senza sfondo cromatico.
+       La copertina viene visualizzata direttamente, senza Canvas.
        ============================================================ -->
   <?php
   // Formati posseduti: usati per i badge dell'hero più in basso.
@@ -3521,126 +3518,6 @@ if ($audioFmtLabel !== '') {
 </script>
 
 <!-- ============================================================
-     HERO — estrazione colore dominante dalla cover.
-     Nessuna rete, nessuna dipendenza. Su cover cross-origin o
-     errore, resta il fallback neutro definito nel CSS.
-     ============================================================ -->
-<script>
-  (function() {
-    'use strict';
-
-    function extractDominant(img) {
-      var W = 48,
-        H = 48;
-      var canvas = document.createElement('canvas');
-      canvas.width = W;
-      canvas.height = H;
-      var ctx = canvas.getContext('2d', {
-        willReadFrequently: true
-      });
-      if (!ctx) return null;
-      ctx.drawImage(img, 0, 0, W, H);
-      var data;
-      try {
-        data = ctx.getImageData(0, 0, W, H).data;
-      } catch (e) {
-        return null;
-      }
-      var rs = 0,
-        gs = 0,
-        bs = 0,
-        n = 0;
-      for (var i = 0; i < data.length; i += 4) {
-        var r = data[i],
-          g = data[i + 1],
-          b = data[i + 2],
-          a = data[i + 3];
-        if (a < 200) continue;
-        var max = Math.max(r, g, b),
-          min = Math.min(r, g, b);
-        var v = max / 255;
-        var s = max === 0 ? 0 : (max - min) / max;
-        if (v > 0.15 && v < 0.97 && s > 0.22) {
-          rs += r;
-          gs += g;
-          bs += b;
-          n++;
-        }
-      }
-      if (n < 12) {
-        rs = gs = bs = n = 0;
-        for (var j = 0; j < data.length; j += 4) {
-          if (data[j + 3] < 200) continue;
-          rs += data[j];
-          gs += data[j + 1];
-          bs += data[j + 2];
-          n++;
-        }
-        if (n === 0) return null;
-      }
-      return [Math.round(rs / n), Math.round(gs / n), Math.round(bs / n)];
-    }
-
-    // Scurisce il colore estratto in base alla sua luminosita' percepita
-    // (formula Rec. 601). Piu' la cover e' chiara, piu' scuriamo: cosi'
-    // un azzurro pastello o un giallo chiaro diventano una base scura su
-    // cui il testo bianco resta leggibile, MANTENENDO la tinta della cover.
-    function darkenForText(rgb) {
-      var r = rgb[0],
-        g = rgb[1],
-        b = rgb[2];
-      var lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255; // 0 = nero, 1 = bianco
-      var scale = 0.85 - lum * 0.6;
-      if (scale < 0.32) scale = 0.32;
-      if (scale > 0.78) scale = 0.78;
-      return 'rgb(' + Math.round(r * scale) + ',' + Math.round(g * scale) + ',' + Math.round(b * scale) + ')';
-    }
-
-    // Idempotente: rilegge l'hero corrente e applica il colore. Puo' essere
-    // chiamata quante volte serve (primo load E ogni navigazione SPA), senza
-    // accumulare listener. Esposta come window.__applyAlbumHero: e' il router
-    // SPA in app.js a richiamarla dopo aver iniettato il nuovo contenuto,
-    // esattamente come fa con initTracklistPlayers()/reinitBootstrap().
-    function applyHeroColor() {
-      var hero = document.getElementById('albumHero');
-      if (!hero) return;
-      var img = hero.querySelector('.album-hero-cover');
-      if (!img) return;
-      var src = img.getAttribute('src') || '';
-      if (src.indexOf('placeholder') !== -1) return;
-
-      function run() {
-        if (!img.naturalWidth) return;
-        var rgb = extractDominant(img);
-        if (rgb) {
-          hero.style.setProperty('--cover', 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')');
-          hero.style.setProperty('--cover-safe', darkenForText(rgb));
-        }
-      }
-      if (img.complete && img.naturalWidth) {
-        run();
-      } else {
-        img.addEventListener('load', run, {
-          once: true
-        });
-        img.addEventListener('error', function() {}, {
-          once: true
-        });
-      }
-    }
-
-    window.__applyAlbumHero = applyHeroColor;
-
-    // Primo caricamento (pagina piena, non-SPA).
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', applyHeroColor);
-    } else {
-      applyHeroColor();
-    }
-  })();
-</script>
-
-<!-- ============================================================
      PULSANTE HERO "RIPRODUCI ALBUM" — tre stati dinamici
      Stato 1  Riproduci album  (play)   -> carica e avvia l'album
      Stato 2  Pausa            (pause)  -> l'album è in riproduzione
@@ -3732,7 +3609,11 @@ if ($audioFmtLabel !== '') {
       setTimeout(sync, 0);
     };
 
-    // Espone sync per il router SPA e ascolta i cambi di stato del Player.
+    // La vista viene rieseguita a ogni navigazione SPA. Rimuove il
+    // listener precedente prima di registrare quello della vista corrente.
+    if (typeof window.__syncAlbumHeroPlayBtn === 'function') {
+      document.removeEventListener('player:changed', window.__syncAlbumHeroPlayBtn);
+    }
     window.__syncAlbumHeroPlayBtn = sync;
     document.addEventListener('player:changed', sync);
 
